@@ -1,6 +1,9 @@
 import type { AudioExtractionResult, BatchDownloadItemResult, BatchDownloadResult, ConflictStrategy, CourseDetailResponse, CoursesResponse, CredentialStatus, DownloadJobStatus, DownloadOutputFormat, DownloadResult, MediaDependencyInstallResult, MediaDependencyStatusResponse, NativeDownloadPlanResult, OfficialViewerPlanResult, OfficialViewerSessionBridgeResult, PostprocessJobStatus, ProgressEvent, STTProviderStatusResponse, TermsResponse, TranscriptionResult } from './types';
+import { buildRequestHeaders } from './http';
+import { reportWithPostprocess } from './postprocess';
+import type { PostprocessEntry } from './postprocess';
 import {
-  backendApiBaseUrl,
+  backendApiConnection,
   cancelNativeDownloadJob,
   fetchNativeDownloadJob,
   isTauriRuntime,
@@ -9,7 +12,7 @@ import {
 } from './desktop';
 
 async function apiUrl(path: string): Promise<string> {
-  const baseUrl = await backendApiBaseUrl();
+  const { baseUrl } = await backendApiConnection();
   return baseUrl ? `${baseUrl}${path}` : path;
 }
 
@@ -37,8 +40,6 @@ const AUTHENTICATION_ERROR_CODES = new Set([
   'lms_session_unverified',
 ]);
 
-const nativeVideoPostprocessedJobIds = new Set<string>();
-
 export function isAuthenticationError(error: unknown): error is ApiError {
   return error instanceof ApiError && AUTHENTICATION_ERROR_CODES.has(error.code);
 }
@@ -61,12 +62,10 @@ function errorMessage(code: string): string {
 }
 
 async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
+  const connection = await backendApiConnection();
   const response = await fetch(await apiUrl(url), {
     ...init,
-    headers: {
-      'Content-Type': 'application/json',
-      ...(init?.headers ?? {}),
-    },
+    headers: buildRequestHeaders(connection.token, init?.headers),
   });
   const payload = await response.json().catch(() => null);
   if (!response.ok) {
@@ -202,11 +201,15 @@ async function postprocessNativeVideoItem(item: DownloadResult | BatchDownloadIt
   }
 }
 
-async function withNativeVideoPostprocess(job: DownloadJobStatus): Promise<DownloadJobStatus> {
-  if (!isTauriRuntime() || !job.job_id.startsWith('native-') || job.status !== 'succeeded') return job;
-  if (nativeVideoPostprocessedJobIds.has(job.job_id)) return job;
-  nativeVideoPostprocessedJobIds.add(job.job_id);
-  const progress: ProgressEvent[] = [...job.progress];
+function nativeJobNeedsVideoPostprocess(job: DownloadJobStatus): boolean {
+  const isMp4Item = (item: DownloadResult | BatchDownloadItemResult) =>
+    item.ok && typeof item.output_path === 'string' && item.output_path.toLowerCase().endsWith('.mp4');
+  if (isSingleDownloadResult(job.result)) return isMp4Item(job.result);
+  if (isBatchDownloadResult(job.result)) return job.result.items.some(isMp4Item);
+  return false;
+}
+
+async function runNativeVideoPostprocess(job: DownloadJobStatus, progress: ProgressEvent[]): Promise<DownloadJobStatus> {
   if (isSingleDownloadResult(job.result)) {
     const processed = await postprocessNativeVideoItem(job.result, progress);
     return {
@@ -241,6 +244,21 @@ async function withNativeVideoPostprocess(job: DownloadJobStatus): Promise<Downl
     };
   }
   return job;
+}
+
+const nativePostprocessEntries = new Map<string, PostprocessEntry>();
+
+/**
+ * A native download that finished writing bytes is not finished for the user until
+ * every MP4 passed the ensure-playable step. Until then it is reported as a
+ * non-terminal `running` job; see `reportWithPostprocess`.
+ */
+export async function withNativeVideoPostprocess(job: DownloadJobStatus): Promise<DownloadJobStatus> {
+  if (!isTauriRuntime() || !job.job_id.startsWith('native-')) return job;
+  return reportWithPostprocess(nativePostprocessEntries, job, {
+    needsPostprocess: nativeJobNeedsVideoPostprocess,
+    run: runNativeVideoPostprocess,
+  });
 }
 
 export async function startDownloadJob(courseId: string | number, moduleItemId: string | number, courseName: string, outputDir: string, conflictStrategy: ConflictStrategy = 'rename'): Promise<DownloadJobStatus> {
@@ -330,7 +348,8 @@ export async function fetchDownloadJob(jobId: string): Promise<DownloadJobStatus
 
 export async function cancelDownloadJob(jobId: string): Promise<DownloadJobStatus> {
   if (isTauriRuntime() && jobId.startsWith('native-')) {
-    return cancelNativeDownloadJob(jobId);
+    // A cancel that lands during MP4 post-processing must not report the job as finished.
+    return withNativeVideoPostprocess(await cancelNativeDownloadJob(jobId));
   }
   if (jobId.startsWith('artifact-')) {
     const job = await requestJson<DownloadJobStatus>(`/api/download/artifacts/jobs/${jobId.slice('artifact-'.length)}/cancel`, { method: 'POST' });
