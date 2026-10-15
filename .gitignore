@@ -1,0 +1,58 @@
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+dist/
+build/
+*.egg-info/
+
+# Node/Electron
+node_modules/
+dist-electron/
+release/
+.next/
+.vite/
+*.tsbuildinfo
+
+# Local secrets/session/runtime data
+.env
+.env.*
+!.env.example
+*.sqlite
+*.sqlite3
+*.db
+cookies*.json
+storage_state*.json
+session*.json
+secrets*.json
+
+# Logs/debug payloads may contain signed URLs or cookies
+logs/
+debug_data/
+network_logs/
+raw_responses/
+.local/
+
+# Downloaded media/transcription artifacts
+videos/
+downloads/
+transcripts/
+*.mp4
+*.m4v
+*.mkv
+*.webm
+*.mp3
+*.wav
+*.m4a
+
+# macOS/IDE
+.DS_Store
+.idea/
+.vscode/
+
+# Rust/Tauri build output
+frontend/src-tauri/target/
+frontend/src-tauri/gen/schemas/
+frontend/src-tauri/resources/backend-sidecar/
