@@ -427,7 +427,12 @@ const progress = await import('../src/lib/progress.ts');
 
 // Per-item rows for the progress drawer.
 {
-  const { buildJobRows, summarizeRows, isRetryable } = await import('../src/lib/jobItems.ts');
+  const { buildJobRows, summarizeRows, isRetryable, isExpiredMediaUrlCode } = await import('../src/lib/jobItems.ts');
+  // CDN rejections of a native transfer are re-planned once instead of logging the user out.
+  assert.equal(isExpiredMediaUrlCode('HTTP 403'), true);
+  assert.equal(isExpiredMediaUrlCode('HTTP 410'), true);
+  assert.equal(isExpiredMediaUrlCode('session_expired'), false);
+  assert.equal(isExpiredMediaUrlCode(null), false);
   const item = (id) => ({ id: String(id), rawId: id, title: `T${id}`, sizeBytes: 100 });
   const job = (status, events, extra = {}) => ({ job_id: 'native-1', status, cancel_requested: false, progress: events, result: null, error_code: null, ...extra });
   const mp4Plan = { courseId: 1, courseName: 'c', kind: 'video', outputs: ['mp4'], items: [item(1), item(2), item(3)] };
@@ -504,3 +509,12 @@ const progress = await import('../src/lib/progress.ts');
 }
 
 console.log('frontend contract ok');
+
+// Watching stays available while a video download runs; refresh is only blocked by installs.
+{
+  const app = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
+  assert.ok(app.includes("downloads.active && tab !== 'video'"), 'video watch must not be blocked by an active download');
+  assert.ok(app.includes('const busyElsewhere = media.isInstalling;'), 'refresh must not be blocked by an active download');
+  const downloads = readFileSync(new URL('../src/hooks/useDownloads.ts', import.meta.url), 'utf8');
+  assert.ok(downloads.includes('autoRetryUsedRef'), 'native CDN rejection must trigger one automatic re-plan');
+}

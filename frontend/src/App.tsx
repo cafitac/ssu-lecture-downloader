@@ -79,7 +79,7 @@ function Workspace({ session }: { session: LmsSession }) {
   const sizes = sumSizes(selectedItems);
   const sizeText = sizes.bytes > 0 ? (sizes.unknown > 0 ? `${formatBytes(sizes.bytes)} 이상` : formatBytes(sizes.bytes)) : null;
   const missing = tab === 'video' ? media.missingFor(formats) : [];
-  const busyElsewhere = downloads.active || media.isInstalling;
+  const busyElsewhere = media.isInstalling;
   const canDownload = selectedItems.length > 0 && !downloads.active && missing.length === 0 && !media.isInstalling;
 
   const setChecked = useCallback((keys: string[], checked: boolean) => {
@@ -147,8 +147,9 @@ function Workspace({ session }: { session: LmsSession }) {
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [drawerOpen, settingsOpen]);
 
-  const actionBlockedReason = downloads.active
-    ? (tab === 'video' ? '다운로드가 끝나면 볼 수 있어요' : '다른 다운로드가 끝나면 받을 수 있어요')
+  // Watching works during a download; a material download still waits for the running job.
+  const actionBlockedReason = downloads.active && tab !== 'video'
+    ? '다른 다운로드가 끝나면 받을 수 있어요'
     : viewer.queue.active ? '순서대로 시청 중이에요' : null;
   const installBlockedReason = !media.autoInstallAvailable ? media.autoInstallUnavailableReason ?? '이 환경에서는 자동으로 설치할 수 없어요' : downloads.active ? '다운로드가 끝나면 설치할 수 있어요' : null;
   const selectCourse = (next: CourseSummary) => setSelectedCourseId(String(next.id));

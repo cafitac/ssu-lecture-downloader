@@ -49,6 +49,8 @@ export interface JobRow {
   total?: number;
   /** Plain-Korean failure reason for `failed` rows. */
   reason?: string;
+  /** Raw failure code behind `reason`, for retry decisions (never shown). */
+  reasonCode?: string;
   outputPath?: string;
 }
 
@@ -224,7 +226,10 @@ export function buildJobRows(plan: JobPlan, job: DownloadJobStatus | null): JobR
       total: state.total ?? (item.sizeBytes ?? undefined),
       outputPath: outputPath ?? undefined,
     };
-    if (phase === 'failed') row.reason = describeErrorCode(reasonCode);
+    if (phase === 'failed') {
+      row.reason = describeErrorCode(reasonCode);
+      if (reasonCode) row.reasonCode = reasonCode;
+    }
     return row;
   });
 }
@@ -254,6 +259,17 @@ export function summarizeRows(rows: JobRow[]): JobSummary {
     running,
     percent: rows.length ? Math.round(progress / rows.length) : 0,
   };
+}
+
+/**
+ * A native transfer rejected by the media CDN (401/403/410) usually means the signed
+ * media URL expired, not that the LMS session did. Planning again fetches a fresh URL,
+ * and the backend re-logs in by itself when the LMS session really expired.
+ */
+const EXPIRED_MEDIA_URL_CODES = new Set(['HTTP 401', 'HTTP 403', 'HTTP 410']);
+
+export function isExpiredMediaUrlCode(code: string | null | undefined): boolean {
+  return Boolean(code && EXPIRED_MEDIA_URL_CODES.has(code));
 }
 
 export function isRetryable(row: JobRow): boolean {
