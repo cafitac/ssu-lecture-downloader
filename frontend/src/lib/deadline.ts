@@ -137,7 +137,10 @@ function describe(item: DeadlineFields, now: Date, copy: Copy, { honorUnlock }: 
     if (next.late) return { badge: '지각', when, tone: 'late', title: copy.late(when) };
     return { badge: dDay(next.at, now), when, tone: toneFor(next.at, now), title: copy.until(when) };
   }
-  if (isMissed(item, now)) return { badge: '기한 지남', when: null, tone: 'missed', title: copy.missed };
+  if (isMissed(item, now)) {
+    const closed = closedAt(item);
+    return { badge: '기한 지남', when: closed ? formatDeadline(closed) : null, tone: 'missed', title: copy.missed };
+  }
   return null;
 }
 

@@ -8,7 +8,7 @@ import { ExternalIcon } from './Icons';
 const STATUS_CHIP: Record<TaskStatus, { className: string; text: string }> = {
   done: { className: 'chip chip-success', text: '완료' },
   pending: { className: 'chip chip-warning', text: '미완료' },
-  overdue: { className: 'chip chip-danger', text: '기한 지남' },
+  overdue: { className: 'chip chip-danger', text: '미완료' },
 };
 
 interface Props {
