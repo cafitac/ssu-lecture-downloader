@@ -19,7 +19,7 @@ export function LoginPanel({ credentialStatus, formRef, state, message, isAuthen
           <span>{credentialStatus?.source ?? 'app'}</span>
         </div>
         <p className="hint">
-          처음 실행하면 계정 정보만 입력하면 됩니다. 계정 정보는 이 기기의 앱 저장소에 보관하고, 로그인 세션은 앱 실행 중에만 재사용합니다.
+          계정 정보는 디스크에 저장하지 않고 앱이 켜져 있는 동안 메모리에만 보관합니다. 앱을 종료하면 지워지므로 다음 실행 때 다시 로그인해야 합니다.
         </p>
         <form ref={formRef} className="credential-form" onSubmit={onSubmit}>
           <input name="username" autoComplete="username" placeholder="SSU LMS ID" aria-label="SSU LMS ID" disabled={isAuthenticating} />
@@ -28,7 +28,7 @@ export function LoginPanel({ credentialStatus, formRef, state, message, isAuthen
         </form>
         <p className={`status login-status ${state}`} role={state === 'error' ? 'alert' : 'status'}>{message}</p>
         <p className="hint">
-          비밀번호는 저장 여부만 확인합니다. 화면에는 다시 표시하지 않습니다.
+          입력한 비밀번호는 화면에 다시 표시하지 않습니다.
         </p>
       </section>
     </main>
