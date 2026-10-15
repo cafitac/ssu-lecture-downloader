@@ -518,3 +518,22 @@ console.log('frontend contract ok');
   const downloads = readFileSync(new URL('../src/hooks/useDownloads.ts', import.meta.url), 'utf8');
   assert.ok(downloads.includes('autoRetryUsedRef'), 'native CDN rejection must trigger one automatic re-plan');
 }
+
+// Attendance deadlines: D-day before due_at, late window until late_at/lock_at, then missed.
+{
+  const { lectureDeadline, courseDeadline } = await import('../src/lib/deadline.ts');
+  const now = new Date('2026-10-15T03:00:00Z');
+  const base = { completed: false, unlock_at: '2026-10-12T15:00:00Z', late_at: '2026-10-26T14:59:59Z' };
+  assert.equal(lectureDeadline({ ...base, completed: true, due_at: '2026-10-19T14:59:59Z' }, now), null);
+  const open = lectureDeadline({ ...base, due_at: '2026-10-19T14:59:59Z' }, now);
+  assert.equal(open.badge, 'D-4');
+  assert.equal(open.tone, 'normal');
+  assert.equal(lectureDeadline({ ...base, due_at: '2026-10-16T14:59:59Z' }, now).tone, 'soon');
+  assert.equal(lectureDeadline({ ...base, due_at: '2026-10-15T14:59:59Z' }, now).badge, '오늘 마감');
+  assert.equal(lectureDeadline({ ...base, due_at: '2026-10-12T14:59:59Z' }, now).tone, 'late');
+  assert.equal(lectureDeadline({ ...base, due_at: '2026-10-01T14:59:59Z', late_at: '2026-10-08T14:59:59Z' }, now).badge, '기한 지남');
+  assert.equal(lectureDeadline({ completed: false, unlock_at: '2026-10-26T15:00:00Z', due_at: '2026-11-02T14:59:59Z' }, now).badge, '열리기 전');
+  assert.equal(lectureDeadline({ completed: false }, now), null);
+  assert.equal(courseDeadline('2026-10-19T14:59:59Z', true, now).badge, '지각 D-4');
+  assert.equal(courseDeadline(null, false, now), null);
+}

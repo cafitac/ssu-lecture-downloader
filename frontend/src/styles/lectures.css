@@ -1,6 +1,6 @@
 /* Dense lecture table. Column widths are shared by head, week header and rows. */
 .lecture-table {
-  --cols: 36px minmax(0, 1fr) 56px 64px 104px 32px;
+  --cols: 36px minmax(0, 1fr) 56px 64px 150px 104px 32px;
   --row-h: 36px;
 }
 .lecture-table.is-material { --cols: 36px minmax(0, 1fr) 64px 72px 32px; }
@@ -40,3 +40,12 @@
 
 /* A week with a single row shows its label inline instead of a header row. */
 .week-tag { display: inline-block; min-width: 3.5em; margin-right: var(--sp-2); color: var(--text-muted); font-size: var(--fs-12); font-weight: var(--fw-regular); }
+
+/* Attendance deadline column and sidebar hint. */
+.cell-deadline { display: flex; align-items: baseline; gap: var(--sp-2); white-space: nowrap; overflow: hidden; font-size: var(--fs-12); color: var(--text-muted); }
+.deadline-badge { font-weight: var(--fw-semibold); min-width: 3.2em; }
+.tone-normal .deadline-badge { color: var(--text); }
+.tone-soon, .tone-late { color: var(--warning-fg); }
+.tone-urgent, .tone-missed { color: var(--danger-fg); }
+.course-deadline { margin-left: var(--sp-2); font-weight: var(--fw-semibold); }
+.course-deadline.tone-normal { color: var(--text-muted); }

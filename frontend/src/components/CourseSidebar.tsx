@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react';
 import type { ListState } from '../hooks/useLmsSession';
 import { courseWatchSummary, splitCourseName } from '../lib/content';
+import { courseDeadline } from '../lib/deadline';
 import type { CourseSummary } from '../lib/types';
 import { Spinner } from './Screens';
 
@@ -36,6 +37,8 @@ export function CourseSidebar({ courses, selectedId, listState, listError, onSel
         {courses.map((course) => {
           const selected = String(course.id) === selectedId;
           const { title, code } = splitCourseName(course.name);
+          const deadline = courseDeadline(course.next_deadline_at, course.next_deadline_is_late);
+          const missed = course.missed_lecture_count ?? 0;
           return (
             <li key={course.id}>
               <button
@@ -47,7 +50,11 @@ export function CourseSidebar({ courses, selectedId, listState, listError, onSel
                 onClick={() => onSelect(course)}
               >
                 <span className="course-name">{title}</span>
-                <span className="course-meta">{courseWatchSummary(course)}</span>
+                <span className="course-meta">
+                  {courseWatchSummary(course)}
+                  {deadline && <span className={`course-deadline tone-${deadline.tone}`} title={deadline.title}>{deadline.badge}</span>}
+                  {missed > 0 && <span className="course-deadline tone-missed" title="시청 기한이 모두 지난 강의">놓침 {missed}</span>}
+                </span>
               </button>
             </li>
           );

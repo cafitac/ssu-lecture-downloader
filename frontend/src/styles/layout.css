@@ -75,7 +75,7 @@
 .format-toggle[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-tint); color: var(--accent-text); }
 .format-toggle:disabled { cursor: not-allowed; }
 .format-toggle[aria-pressed="false"]:disabled { color: var(--text-faint); }
-.folder-chip span { max-width: 120px; overflow: hidden; text-overflow: ellipsis; }
+.folder-chip span { max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* Drawer */
 .drawer { display: grid; grid-template-rows: auto auto minmax(0, 1fr) auto; width: 340px; min-height: 0; border-left: 1px solid var(--border); background: var(--bg-subtle); }
