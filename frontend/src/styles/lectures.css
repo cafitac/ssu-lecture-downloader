@@ -49,3 +49,52 @@
 .tone-urgent, .tone-missed { color: var(--danger-fg); }
 .course-deadline { margin-left: var(--sp-2); font-weight: var(--fw-semibold); }
 .course-deadline.tone-normal { color: var(--text-muted); }
+
+/* Third tab: assignments and quizzes (no checkbox column, nothing to select). */
+.lecture-table.is-task { --cols: minmax(0, 1fr) 44px 150px 88px 32px; }
+.task-row {
+  display: grid; grid-template-columns: var(--cols); align-items: center; column-gap: var(--sp-1);
+  min-height: var(--row-h); padding: 0 var(--sp-3) 0 var(--sp-5); border-bottom: 1px solid var(--border);
+}
+.task-row:hover { background: var(--bg-hover); }
+.cell-kind { color: var(--text-muted); font-size: var(--fs-12); }
+.chip-danger { background: var(--danger-bg); color: var(--danger-fg); }
+.tone-muted, .tone-muted .deadline-badge { color: var(--text-faint); }
+@container (max-width: 520px) {
+  .lecture-table.is-task { --cols: minmax(0, 1fr) 96px 88px 32px; }
+  .cell-kind { display: none; }
+}
+
+/* Sidebar and header hints for lectures that are not open yet. */
+.course-upcoming { margin-left: var(--sp-1); color: var(--text-faint); }
+.pane-sub-upcoming { color: var(--text-faint); }
+
+/* Top bar button and the 다가오는 기한 overview. */
+.deadlines-toggle { gap: var(--sp-2); }
+.deadlines-toggle.is-active { background: var(--accent-tint); color: var(--accent-text); }
+.count-badge {
+  display: inline-flex; align-items: center; justify-content: center; min-width: 18px; height: 18px; padding: 0 5px;
+  border-radius: 9px; background: var(--danger-fg); color: var(--bg); font-size: var(--fs-12); font-weight: var(--fw-semibold);
+}
+.deadlines-pane { grid-template-rows: auto auto minmax(0, 1fr); }
+.deadline-note { padding: 0 var(--sp-5) var(--sp-2); border-bottom: 1px solid var(--border); color: var(--text-muted); font-size: var(--fs-12); }
+.deadline-group-title {
+  position: sticky; top: 0; z-index: 1; display: flex; justify-content: space-between; align-items: center;
+  height: 32px; padding: 0 var(--sp-5); border-bottom: 1px solid var(--border); background: var(--bg-subtle);
+  font-size: var(--fs-13); font-weight: var(--fw-semibold);
+}
+.deadline-row {
+  display: grid; grid-template-columns: 96px 104px 44px minmax(0, 150px) minmax(0, 1fr) auto; align-items: center; column-gap: var(--sp-2);
+  width: 100%; min-height: var(--row-h); padding: 0 var(--sp-5); border: 0; border-bottom: 1px solid var(--border);
+  background: transparent; text-align: left; cursor: pointer;
+}
+.deadline-row:hover { background: var(--bg-hover); }
+.deadline-row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.deadline-row.is-upcoming .deadline-title, .deadline-row.is-upcoming .deadline-course { color: var(--text-muted); }
+.deadline-date { color: var(--text-muted); font-size: var(--fs-12); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.deadline-course { overflow: hidden; color: var(--text-muted); font-size: var(--fs-12); text-overflow: ellipsis; white-space: nowrap; }
+.deadline-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@container (max-width: 640px) {
+  .deadline-row { grid-template-columns: 96px 44px minmax(0, 1fr) auto; row-gap: 0; }
+  .deadline-row .deadline-date, .deadline-row .deadline-course { display: none; }
+}

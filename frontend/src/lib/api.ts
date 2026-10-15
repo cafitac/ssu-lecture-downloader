@@ -1,4 +1,4 @@
-import type { AudioExtractionResult, BatchDownloadItemResult, BatchDownloadResult, ConflictStrategy, CourseDetailResponse, CoursesResponse, CredentialStatus, DownloadJobStatus, DownloadOutputFormat, DownloadResult, MediaDependencyInstallResult, MediaDependencyStatusResponse, NativeDownloadPlanResult, OfficialViewerPlanResult, OfficialViewerSessionBridgeResult, PostprocessJobStatus, ProgressEvent, STTProviderStatusResponse, TermsResponse, TranscriptionResult } from './types';
+import type { AudioExtractionResult, BatchDownloadItemResult, BatchDownloadResult, ConflictStrategy, CourseDetailResponse, CoursesResponse, CredentialStatus, DeadlinesResponse, DownloadJobStatus, DownloadOutputFormat, DownloadResult, MediaDependencyInstallResult, MediaDependencyStatusResponse, NativeDownloadPlanResult, OfficialViewerPlanResult, OfficialViewerSessionBridgeResult, PostprocessJobStatus, ProgressEvent, STTProviderStatusResponse, TermsResponse, TranscriptionResult } from './types';
 import { buildRequestHeaders } from './http';
 import { reportWithPostprocess } from './postprocess';
 import type { PostprocessEntry } from './postprocess';
@@ -104,6 +104,14 @@ export function fetchCourses(termId?: number | null, refresh = false): Promise<C
   if (refresh) params.set('refresh', 'true');
   const suffix = params.toString() ? `?${params.toString()}` : '';
   return requestJson<CoursesResponse>(`/api/courses${suffix}`);
+}
+
+export function fetchDeadlines(termId?: number | null, refresh = false): Promise<DeadlinesResponse> {
+  const params = new URLSearchParams();
+  if (termId !== undefined && termId !== null) params.set('term_id', String(termId));
+  if (refresh) params.set('refresh', 'true');
+  const suffix = params.toString() ? `?${params.toString()}` : '';
+  return requestJson<DeadlinesResponse>(`/api/deadlines${suffix}`);
 }
 
 export function fetchCourseDetail(courseId: string | number, courseName: string, options: { refresh?: boolean; outputDir?: string } = {}): Promise<CourseDetailResponse> {

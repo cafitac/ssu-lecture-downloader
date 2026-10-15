@@ -5,6 +5,7 @@ interface Props {
   tab: LectureTab;
   videoCount: number;
   materialCount: number;
+  taskCount: number;
   unwatchedOnly: boolean;
   queue: WatchQueueState;
   watchDisabled: boolean;
@@ -15,7 +16,7 @@ interface Props {
 }
 
 export function LectureToolbar({
-  tab, videoCount, materialCount, unwatchedOnly, queue, watchDisabled, onTabChange, onUnwatchedOnlyChange, onStartWatch, onStopWatch,
+  tab, videoCount, materialCount, taskCount, unwatchedOnly, queue, watchDisabled, onTabChange, onUnwatchedOnlyChange, onStartWatch, onStopWatch,
 }: Props) {
   return (
     <div className="toolbar">
@@ -25,6 +26,9 @@ export function LectureToolbar({
         </button>
         <button type="button" role="tab" aria-selected={tab === 'material'} className="tab" onClick={() => onTabChange('material')}>
           자료 <span className="tab-count">{materialCount}</span>
+        </button>
+        <button type="button" role="tab" aria-selected={tab === 'task'} className="tab" onClick={() => onTabChange('task')}>
+          과제·퀴즈 <span className="tab-count">{taskCount}</span>
         </button>
       </div>
       {tab === 'video' && (

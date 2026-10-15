@@ -80,6 +80,21 @@ def build_router(ctx: AppContext) -> APIRouter:
             "courses": [course.model_dump() for course in result.courses],
         }
 
+    @router.get("/api/deadlines")
+    def deadlines(term_id: int | None = None, refresh: bool = False) -> dict[str, object]:
+        username, password = ctx.require_credentials()
+        term_ids = [term_id] if term_id is not None else None
+        result = ctx.call_service(lambda: service.list_deadlines(username, password, term_ids=term_ids, **refresh_kwargs(refresh)))
+        if not result.ok:
+            raise_for_result_error(result.error_code)
+        return {
+            "ok": True,
+            "error_code": None,
+            "term_ids": term_ids,
+            "deadline_count": len(result.deadlines),
+            "deadlines": [item.model_dump() for item in result.deadlines],
+        }
+
     @router.get("/api/courses/{course_id}")
     def course_detail(course_id: str, course_name: str = "", refresh: bool = False, output_dir: str | None = None) -> dict[str, object]:
         username, password = ctx.require_credentials()

@@ -110,6 +110,7 @@ def test_token_required_on_every_api_route_except_get_health(tmp_path, monkeypat
         ('GET', '/api/credentials/status'),
         ('GET', '/api/terms'),
         ('GET', '/api/courses'),
+        ('GET', '/api/deadlines'),
         ('POST', '/api/watch/session-bridge-plan'),
         ('POST', '/api/media/video/ensure-playable'),
         ('GET', '/api/download/jobs/anything'),

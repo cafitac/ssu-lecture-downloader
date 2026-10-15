@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { ActionBar } from './components/ActionBar';
 import { CourseSidebar } from './components/CourseSidebar';
+import { DeadlinesPane } from './components/DeadlinesPane';
 import { DownloadDrawer } from './components/DownloadDrawer';
 import { LecturePane } from './components/LecturePane';
 import { BackendScreen, LoginScreen, SplashScreen } from './components/Screens';
@@ -9,20 +10,23 @@ import { Toasts } from './components/Toasts';
 import { TopBar } from './components/TopBar';
 import { useBackendStatus } from './hooks/useBackendStatus';
 import { useCourseContent } from './hooks/useCourseContent';
+import { useDeadlines } from './hooks/useDeadlines';
 import { useDownloadDir } from './hooks/useDownloadDir';
 import { useDownloads } from './hooks/useDownloads';
 import { useLmsSession } from './hooks/useLmsSession';
 import type { LmsSession } from './hooks/useLmsSession';
 import { useMediaDependencies } from './hooks/useMediaDependencies';
+import { useNow } from './hooks/useNow';
 import { useOfficialViewer } from './hooks/useOfficialViewer';
 import { useToasts } from './hooks/useToasts';
-import { groupByWeek, isSelectable, itemKey, sumSizes } from './lib/content';
+import { groupByWeek, isSelectable, isTaskItem, isUnwatchedNow, itemKey, lmsItemUrl, pickDefaultCourse, sortTasks, sumSizes } from './lib/content';
 import type { LectureTab } from './lib/content';
-import { isTauriRuntime, openDownloadedFolder } from './lib/desktop';
+import { dueSoonCount } from './lib/deadline';
+import { isTauriRuntime, openDownloadedFolder, openUrlInBrowser } from './lib/desktop';
 import { friendlyError } from './lib/errors';
 import { formatBytes, shortFolderName } from './lib/format';
 import type { JobPlan, PlannedItem } from './lib/jobItems';
-import type { CourseContentItem, CourseSummary, DownloadOutputFormat } from './lib/types';
+import type { CourseContentItem, CourseSummary, DeadlineEntryDto, DownloadOutputFormat } from './lib/types';
 
 const FORMAT_ORDER: DownloadOutputFormat[] = ['mp4', 'mp3', 'txt'];
 
@@ -33,6 +37,8 @@ function toPlannedItem(item: CourseContentItem): PlannedItem {
 function Workspace({ session }: { session: LmsSession }) {
   const { toasts, push, dismiss } = useToasts();
   const { courses, expire } = session;
+  const now = useNow();
+  const [view, setView] = useState<'course' | 'deadlines'>('course');
   const [selectedCourseId, setSelectedCourseId] = useState<string | null>(null);
   const [tab, setTab] = useState<LectureTab>('video');
   const [unwatchedOnly, setUnwatchedOnly] = useState(false);
@@ -49,9 +55,7 @@ function Workspace({ session }: { session: LmsSession }) {
     setSelectedCourseId((current) => {
       if (courses.length === 0) return null;
       if (current !== null && courses.some((course) => String(course.id) === current)) return current;
-      const preferred = courses.find((course) => course.uncompleted_lecture_count > 0)
-        ?? courses.find((course) => course.lecture_count > 0)
-        ?? courses[0];
+      const preferred = pickDefaultCourse(courses) ?? courses[0];
       return String(preferred.id);
     });
   }, [courses]);
@@ -59,6 +63,7 @@ function Workspace({ session }: { session: LmsSession }) {
 
   const { dir, pick } = useDownloadDir();
   const content = useCourseContent(course, dir, onAuthError);
+  const deadlines = useDeadlines(session.termId, courses, onAuthError);
   const downloads = useDownloads({ downloadDir: dir, onAuthError, onError });
   const media = useMediaDependencies({ onMessage: push, downloadBusy: downloads.active });
   const viewer = useOfficialViewer({ notify: push, onAuthError });
@@ -69,10 +74,12 @@ function Workspace({ session }: { session: LmsSession }) {
 
   const videos = useMemo(() => content.items.filter((item) => item.kind === 'video'), [content.items]);
   const materials = useMemo(() => content.items.filter((item) => item.kind === 'material'), [content.items]);
+  const tasks = useMemo(() => sortTasks(content.items.filter(isTaskItem), now), [content.items, now]);
   const visibleItems = useMemo(() => {
+    if (tab === 'task') return [];
     if (tab === 'material') return materials;
-    return unwatchedOnly ? videos.filter((item) => item.completed !== true) : videos;
-  }, [materials, tab, unwatchedOnly, videos]);
+    return unwatchedOnly ? videos.filter((item) => isUnwatchedNow(item, now)) : videos;
+  }, [materials, now, tab, unwatchedOnly, videos]);
   const groups = useMemo(() => groupByWeek(visibleItems), [visibleItems]);
   const selectableKeys = useMemo(() => visibleItems.filter(isSelectable).map((item) => itemKey(item) as string), [visibleItems]);
   const selectedItems = useMemo(
@@ -114,7 +121,7 @@ function Workspace({ session }: { session: LmsSession }) {
     const plan: JobPlan = {
       courseId: course.id,
       courseName: course.name,
-      kind: tab,
+      kind: tab === 'material' ? 'material' : 'video',
       outputs: tab === 'video' ? formats : ['mp4'],
       items: items.map(toPlannedItem),
     };
@@ -128,6 +135,29 @@ function Workspace({ session }: { session: LmsSession }) {
     if (!course) return;
     if (tab === 'video') void viewer.open(course, item, itemKey(item) as string);
     else void beginDownload([item]);
+  }
+
+  async function openLmsPage(address: string | null) {
+    const url = lmsItemUrl(address);
+    if (!url) {
+      push('LMS 주소를 알 수 없어요.', 'error');
+      return;
+    }
+    try {
+      await openUrlInBrowser(url);
+    } catch (error) {
+      push(friendlyError(error, 'LMS 페이지를 열지 못했어요.'), 'error');
+    }
+  }
+
+  function selectDeadline(entry: DeadlineEntryDto) {
+    if (entry.kind === 'video') {
+      setSelectedCourseId(String(entry.course_id));
+      setTab('video');
+      setView('course');
+      return;
+    }
+    void openLmsPage(entry.url);
   }
 
   async function openFolder(path?: string) {
@@ -161,7 +191,11 @@ function Workspace({ session }: { session: LmsSession }) {
     ? '다른 다운로드가 끝나면 받을 수 있어요'
     : viewer.queue.active ? '순서대로 시청 중이에요' : null;
   const installBlockedReason = !media.autoInstallAvailable ? media.autoInstallUnavailableReason ?? '이 환경에서는 자동으로 설치할 수 없어요' : downloads.active ? '다운로드가 끝나면 설치할 수 있어요' : null;
-  const selectCourse = (next: CourseSummary) => setSelectedCourseId(String(next.id));
+  const selectCourse = (next: CourseSummary) => {
+    setSelectedCourseId(String(next.id));
+    setView('course');
+  };
+  const showActionBar = (view === 'course' && tab !== 'task') || downloads.active || downloads.startError !== null;
 
   return (
     <div className="app">
@@ -170,6 +204,9 @@ function Workspace({ session }: { session: LmsSession }) {
         termId={session.termId}
         listState={session.listState}
         busy={busyElsewhere}
+        dueSoonCount={dueSoonCount(deadlines.items, now)}
+        deadlinesOpen={view === 'deadlines'}
+        onToggleDeadlines={() => setView((current) => (current === 'deadlines' ? 'course' : 'deadlines'))}
         onTermChange={session.changeTerm}
         onRefresh={() => { session.refresh(); content.reload(true); }}
         onOpenSettings={() => setSettingsOpen(true)}
@@ -177,14 +214,25 @@ function Workspace({ session }: { session: LmsSession }) {
       <div className="workspace">
         <CourseSidebar
           courses={courses}
-          selectedId={selectedCourseId}
+          selectedId={view === 'course' ? selectedCourseId : null}
           listState={session.listState}
           listError={session.listError}
+          now={now}
           onSelect={selectCourse}
           onRetry={session.refresh}
         />
         <main className="main">
           <div className="main-body">
+            {view === 'deadlines' ? (
+              <DeadlinesPane
+                items={deadlines.items}
+                state={deadlines.state}
+                error={deadlines.error}
+                now={now}
+                onSelect={selectDeadline}
+                onReload={deadlines.reload}
+              />
+            ) : (
             <LecturePane
               course={course}
               allItems={content.items}
@@ -195,6 +243,8 @@ function Workspace({ session }: { session: LmsSession }) {
               groups={groups}
               videoCount={videos.length}
               materialCount={materials.length}
+              tasks={tasks}
+              now={now}
               selected={selected}
               selectableKeys={selectableKeys}
               queue={viewer.queue}
@@ -206,10 +256,12 @@ function Workspace({ session }: { session: LmsSession }) {
               onToggle={(key, checked) => setChecked([key], checked)}
               onToggleMany={setChecked}
               onAction={handleRowAction}
+              onOpenTask={(item) => void openLmsPage(item.url)}
               onStartWatch={() => { if (course) void viewer.startQueue(course, visibleItems); }}
               onStopWatch={viewer.stop}
               onReload={content.reload}
             />
+            )}
             {drawerOpen && downloads.plan && (
               <DownloadDrawer
                 rows={downloads.rows}
@@ -225,7 +277,7 @@ function Workspace({ session }: { session: LmsSession }) {
               />
             )}
           </div>
-          <ActionBar
+          {showActionBar && <ActionBar
             tab={tab}
             selectedCount={selectedItems.length}
             sizeText={sizeText}
@@ -250,7 +302,7 @@ function Workspace({ session }: { session: LmsSession }) {
             onDownload={() => void beginDownload(selectedItems)}
             startError={downloads.startError}
             onDismissError={downloads.dismissStartError}
-          />
+          />}
         </main>
       </div>
       <Toasts toasts={toasts} dismiss={dismiss} />

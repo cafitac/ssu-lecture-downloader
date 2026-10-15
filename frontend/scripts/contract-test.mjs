@@ -33,6 +33,10 @@ const requiredFiles = [
   'src/components/CourseSidebar.tsx',
   'src/components/LecturePane.tsx',
   'src/components/LectureList.tsx',
+  'src/components/TaskList.tsx',
+  'src/components/DeadlinesPane.tsx',
+  'src/lib/deadline.ts',
+  'src/hooks/useDeadlines.ts',
   'src/components/ActionBar.tsx',
   'src/components/DownloadDrawer.tsx',
   'src/components/SettingsDialog.tsx',
@@ -56,7 +60,7 @@ for (const file of requiredFiles) {
 }
 
 const api = readFileSync('src/lib/api.ts', 'utf8');
-for (const endpoint of ['/api/credentials/status', '/api/credentials', '/api/courses', '/api/courses/', '/api/watch/viewer-plan', '/api/download/jobs', '/api/download/batch/jobs', '/api/download/plan', '/api/download', '/api/download/batch/plan', '/api/download/batch', '/api/media/audio/jobs', '/api/stt/providers/status', '/api/media/dependencies/status', '/api/media/dependencies/install/jobs', '/api/stt/jobs']) {
+for (const endpoint of ['/api/credentials/status', '/api/credentials', '/api/courses', '/api/courses/', '/api/deadlines', '/api/watch/viewer-plan', '/api/download/jobs', '/api/download/batch/jobs', '/api/download/plan', '/api/download', '/api/download/batch/plan', '/api/download/batch', '/api/media/audio/jobs', '/api/stt/providers/status', '/api/media/dependencies/status', '/api/media/dependencies/install/jobs', '/api/stt/jobs']) {
   if (!api.includes(endpoint)) {
     throw new Error(`API client missing endpoint ${endpoint}`);
   }
@@ -86,7 +90,7 @@ if (readFileSync('src/main.tsx', 'utf8').split('\n').length > 20) {
 // New UI copy.
 for (const text of [
   '강의 다운로더', '이번 학기', '지난 학기', 'SSU Lecture Downloader', 'week-tag', '과목 {courses.length}개', '안 본 강의', '모두 시청함', '영상 없음', '안 본 것만', '순서대로 시청',
-  '시청함', '안 봄', '받음', '전체 선택', '받을 항목을 선택하세요', '개 선택', '다운로드', '모두 취소', '다시 시도', '폴더 열기',
+  '시청함', '안 봄', '열리기 전', '다가오는 기한', '과제·퀴즈', '기한 지남', '모두 시청함', '예정', '받음', '전체 선택', '받을 항목을 선택하세요', '개 선택', '다운로드', '모두 취소', '다시 시도', '폴더 열기',
   '대기', '받는 중', '음성 추출 중', '자막 만드는 중', '완료', '실패',
   '저장 폴더', '변경', '음성·자막 구성요소', '설치', '앱을 끄면 로그인 정보가 지워져요', '로그아웃',
   '디스크에 저장하지 않고 앱이 켜져 있는 동안 메모리에만 보관합니다', '로그인',
@@ -97,7 +101,7 @@ for (const text of [
 // Developer jargon and removed concepts must stay out of the UI.
 for (const forbidden of [
   '명시 선택 UX', 'SOONGSIL LMS', 'Soongsil LMS local', 'modules ', 'lectures ', 'readystream', 'Tauri 앱은', '앱 연결됨', '앱 연결 확인 중',
-  '현재 학기 새로고침', '선택한 학기 불러오기', '표시된 영상 순차 시청', '영상만', '미완료', '강의 선택', '완료 정보 없음',
+  '현재 학기 새로고침', '선택한 학기 불러오기', '표시된 영상 순차 시청', '영상만', '강의 선택', '완료 정보 없음',
   '다운로드 진단 로그', '응답 진단', 'credential-panel', 'postprocess-card', '후처리', 'Finder에서 선택', '자동 기본값',
   'Python API', 'dry_run', 'byte progress',
 ]) {
@@ -249,7 +253,8 @@ if (!tauriLib.includes('fn with_watch_assist') || !tauriLib.includes('fn session
 if (!tauriLib.includes('format!("{VIEWER_LABEL_PREFIX}-{id}")')) {
   throw new Error('Each official viewer open must use a unique window label so close() never races the next build');
 }
-if (desktop.includes("invoke<void>('open_url_in_browser', { url })") || main.includes('기본 브라우저로 대체됩니다')) {
+// Opening an assignment/quiz page in the system browser is an explicit user action (TaskList); only playback must stay in-app.
+if (readFileSync('src/hooks/useOfficialViewer.ts', 'utf8').includes('openUrlInBrowser') || main.includes('기본 브라우저로 대체됩니다')) {
   throw new Error('Tauri watch flow must not silently fall back to the external browser; keep playback inside the app and report in-app viewer errors');
 }
 
@@ -532,8 +537,154 @@ console.log('frontend contract ok');
   assert.equal(lectureDeadline({ ...base, due_at: '2026-10-15T14:59:59Z' }, now).badge, '오늘 마감');
   assert.equal(lectureDeadline({ ...base, due_at: '2026-10-12T14:59:59Z' }, now).tone, 'late');
   assert.equal(lectureDeadline({ ...base, due_at: '2026-10-01T14:59:59Z', late_at: '2026-10-08T14:59:59Z' }, now).badge, '기한 지남');
-  assert.equal(lectureDeadline({ completed: false, unlock_at: '2026-10-26T15:00:00Z', due_at: '2026-11-02T14:59:59Z' }, now).badge, '열리기 전');
-  assert.equal(lectureDeadline({ completed: false }, now), null);
+    assert.equal(lectureDeadline({ completed: false }, now), null);
   assert.equal(courseDeadline('2026-10-19T14:59:59Z', true, now).badge, '지각 D-4');
   assert.equal(courseDeadline(null, false, now), null);
+}
+
+// Deadlines in Korea time: unopened weeks, assignments/quizzes, grouping and the course hints.
+{
+  process.env.TZ = 'Asia/Seoul';
+  const deadline = await import('../src/lib/deadline.ts');
+  const content = await import('../src/lib/content.ts');
+  const now = new Date('2026-10-15T03:00:00Z'); // 10/15(목) 12:00 KST
+
+  // Not open yet: its own state, never "unwatched".
+  const unopened = { completed: false, unlock_at: '2026-10-26T15:00:00Z', due_at: '2026-11-02T14:59:59Z' };
+  assert.equal(deadline.isOpened(unopened, now), false);
+  assert.equal(deadline.isOpened({ ...unopened, unlock_at: '2026-10-12T15:00:00Z' }, now), true);
+  assert.equal(deadline.isOpened({ completed: false }, now), true);
+  const unopenedInfo = deadline.lectureDeadline(unopened, now);
+  assert.equal(unopenedInfo.badge, '10/27(화)부터');
+  assert.equal(unopenedInfo.tone, 'muted');
+  assert.equal(unopenedInfo.when, null);
+  assert.equal(deadline.taskDeadline(unopened, now).badge, '10/27(화)부터');
+
+  // Lectures with only a lock time count it as the deadline, not as a late window.
+  assert.equal(deadline.lectureDeadline({ completed: false, lock_at: '2026-10-19T14:59:59Z' }, now).badge, 'D-4');
+
+  // Assignments and quizzes: due first, then lock; quizzes close at 23:59:00 KST.
+  const task = { completed: false, unlock_at: '2026-10-01T00:00:00Z' };
+  assert.equal(deadline.taskDeadline({ ...task, completed: true, due_at: '2026-10-19T14:59:00Z' }, now), null);
+  const quiz = deadline.taskDeadline({ ...task, due_at: '2026-10-19T14:59:00Z' }, now);
+  assert.equal(quiz.badge, 'D-4');
+  assert.equal(quiz.when, '10/19(월) 23:59');
+  assert.equal(deadline.taskDeadline({ ...task, due_at: '2026-10-15T14:59:00Z' }, now).badge, '오늘 마감');
+  const afterDue = deadline.taskDeadline({ ...task, due_at: '2026-10-10T14:59:00Z', lock_at: '2026-10-18T14:59:59Z' }, now);
+  assert.equal(afterDue.tone, 'late');
+  assert.equal(afterDue.when, '10/18(일) 23:59');
+  assert.equal(deadline.taskDeadline({ ...task, due_at: '2026-10-10T14:59:00Z', lock_at: '2026-10-12T14:59:59Z' }, now).badge, '기한 지남');
+  assert.equal(deadline.taskDeadline({ ...task, lock_at: '2026-10-20T14:59:59Z' }, now).badge, 'D-5');
+  assert.equal(deadline.taskDeadline(task, now), null);
+  assert.equal(deadline.taskStatus({ ...task, completed: true }, now), 'done');
+  assert.equal(deadline.taskStatus({ ...task, due_at: '2026-10-10T14:59:00Z' }, now), 'overdue');
+  assert.equal(deadline.taskStatus({ ...task, due_at: '2026-10-10T14:59:00Z', lock_at: '2026-10-20T14:59:00Z' }, now), 'pending');
+  assert.equal(deadline.taskStatus(task, now), 'pending');
+
+  // Grouping: 오늘 / 3일 이내 / 이번 주 / 이후 / 놓침, nearest first; done items and undated ones are left out.
+  const entry = (title, kind, fields) => ({ title, kind, completed: false, ...fields });
+  const rows = [
+    entry('later quiz', 'quiz', { due_at: '2026-11-20T14:59:00Z' }),
+    entry('week task', 'assignment', { due_at: '2026-10-21T14:59:59Z' }),
+    entry('soon lecture', 'video', { unlock_at: '2026-10-12T15:00:00Z', due_at: '2026-10-17T14:59:59Z' }),
+    entry('today task', 'assignment', { due_at: '2026-10-15T14:59:59Z' }),
+    entry('tomorrow quiz', 'quiz', { due_at: '2026-10-16T14:59:00Z' }),
+    entry('missed recently', 'assignment', { due_at: '2026-10-13T14:59:59Z' }),
+    entry('missed earlier', 'quiz', { due_at: '2026-10-05T14:59:00Z' }),
+    entry('done', 'assignment', { completed: true, due_at: '2026-10-16T14:59:59Z' }),
+    entry('no dates', 'assignment', {}),
+    entry('not open lecture', 'video', { unlock_at: '2026-10-22T15:00:00Z', due_at: '2026-10-29T14:59:59Z' }),
+  ];
+  const groups = deadline.groupDeadlines(rows, now);
+  assert.deepEqual(groups.map((group) => group.key), ['today', 'soon', 'week', 'later', 'missed']);
+  assert.deepEqual(groups.map((group) => group.title), ['오늘', '3일 이내', '이번 주', '이후', '놓침']);
+  const titles = (key) => groups.find((group) => group.key === key).entries.map((e) => e.item.title);
+  assert.deepEqual(titles('today'), ['today task']);
+  assert.deepEqual(titles('soon'), ['tomorrow quiz', 'soon lecture']);
+  assert.deepEqual(titles('week'), ['week task']);
+  assert.deepEqual(titles('later'), ['not open lecture', 'later quiz']);
+  assert.deepEqual(titles('missed'), ['missed recently', 'missed earlier']);
+  const missedEntry = groups.find((group) => group.key === 'missed').entries[0];
+  assert.equal(missedEntry.info.badge, '기한 지남');
+  assert.equal(missedEntry.info.when, '10/13(화) 23:59');
+  const notOpen = groups.find((group) => group.key === 'later').entries[0];
+  assert.equal(notOpen.upcoming, true);
+  assert.equal(notOpen.info.tone, 'muted');
+  assert.equal(notOpen.info.badge, 'D-14');
+  assert.equal(deadline.groupDeadlines([], now).length, 0);
+
+  // The top bar badge counts what is due within three days and can be done now.
+  assert.equal(deadline.dueSoonCount(rows, now), 3);
+  assert.equal(deadline.dueSoonCount([entry('open soon but not open', 'video', { unlock_at: '2026-10-16T00:00:00Z', due_at: '2026-10-17T00:00:00Z' })], now), 0);
+
+  // Sidebar hint: the nearer of lecture and task deadlines; missed = lectures + tasks.
+  const hint = deadline.courseNextDeadline({ next_deadline_at: '2026-10-22T14:59:59Z', next_task_deadline_at: '2026-10-17T14:59:00Z' }, now);
+  assert.equal(hint.badge, '과제 D-2');
+  assert.equal(deadline.courseNextDeadline({ next_deadline_at: '2026-10-16T14:59:59Z', next_task_deadline_at: '2026-10-17T14:59:00Z' }, now).badge, 'D-1');
+  assert.equal(deadline.courseNextDeadline({ next_deadline_at: '2026-10-19T14:59:59Z', next_deadline_is_late: true }, now).badge, '지각 D-4');
+  assert.equal(deadline.courseNextDeadline({}, now), null);
+  assert.equal(deadline.courseNextDeadline({ next_task_deadline_at: '2026-10-01T14:59:00Z' }, now), null);
+  assert.equal(deadline.courseMissedCount({ missed_lecture_count: 1, overdue_task_count: 2 }), 3);
+  assert.equal(deadline.courseMissedCount({}), 0);
+
+  // Course texts: only open unwatched lectures are "안 본 강의".
+  const course = (fields) => ({ id: 1, name: 'c', module_count: 1, lecture_count: 4, uncompleted_lecture_count: 0, ...fields });
+  assert.equal(content.courseWatchSummary(course({ uncompleted_lecture_count: 2 })), '안 본 강의 2개');
+  assert.equal(content.courseWatchSummary(course({ upcoming_lecture_count: 2 })), '모두 시청함');
+  assert.equal(content.courseUpcomingText(course({ upcoming_lecture_count: 2 })), '· 예정 2');
+  assert.equal(content.courseUpcomingText(course({ uncompleted_lecture_count: 1, upcoming_lecture_count: 2 })), null);
+  assert.equal(content.courseWatchSummary(course({ upcoming_lecture_count: 4 })), '열린 강의 없음');
+  assert.equal(content.courseWatchSummary(course({ lecture_count: 0 })), '영상 없음');
+  const video = (completed, unlock_at) => ({ kind: 'video', completed, unlock_at });
+  assert.deepEqual(content.countVideos([video(true, null), video(false, '2026-10-01T00:00:00Z'), video(false, '2026-10-26T15:00:00Z'), video(false, '2026-10-27T15:00:00Z'), { kind: 'material', completed: null }], now), { total: 4, watched: 1, upcoming: 2 });
+  assert.equal(content.isUnwatchedNow(video(false, '2026-10-26T15:00:00Z'), now), false);
+  assert.equal(content.isUnwatchedNow(video(false, '2026-10-01T00:00:00Z'), now), true);
+  assert.equal(content.isUnwatchedNow(video(true, null), now), false);
+
+  // Default course: open unwatched lectures first, then the nearest deadline (lecture or task).
+  const a = course({ id: 'a', lecture_count: 2, next_deadline_at: '2026-10-25T14:59:59Z' });
+  const b = course({ id: 'b', lecture_count: 2, next_task_deadline_at: '2026-10-17T14:59:00Z' });
+  const c = course({ id: 'c', lecture_count: 2, uncompleted_lecture_count: 1 });
+  assert.equal(content.pickDefaultCourse([a, b, c], now).id, 'c');
+  assert.equal(content.pickDefaultCourse([a, b], now).id, 'b');
+  assert.equal(content.pickDefaultCourse([course({ id: 'x', lecture_count: 0 }), course({ id: 'y' })], now).id, 'y');
+  assert.equal(content.pickDefaultCourse([], now), null);
+
+  // Task tab order: nearest deadline, undated, overdue, done; URLs are made absolute.
+  const t = (title, fields) => ({ kind: 'assignment', title, completed: false, ...fields });
+  const sorted = content.sortTasks([
+    t('done', { completed: true, due_at: '2026-10-16T14:59:00Z' }),
+    t('overdue', { due_at: '2026-10-01T14:59:00Z' }),
+    t('undated', {}),
+    t('later', { due_at: '2026-10-30T14:59:00Z' }),
+    t('soon', { due_at: '2026-10-17T14:59:00Z' }),
+  ], now).map((item) => item.title);
+  assert.deepEqual(sorted, ['soon', 'later', 'undated', 'overdue', 'done']);
+  assert.equal(content.lmsItemUrl('/courses/1/assignments/2'), 'https://canvas.ssu.ac.kr/courses/1/assignments/2');
+  assert.equal(content.lmsItemUrl('https://canvas.ssu.ac.kr/x'), 'https://canvas.ssu.ac.kr/x');
+  assert.equal(content.lmsItemUrl('javascript:alert(1)'), null);
+  assert.equal(content.lmsItemUrl(null), null);
+}
+
+// UI wiring of the deadline features.
+{
+  const app = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
+  assert.ok(app.includes('pickDefaultCourse') && app.includes('isUnwatchedNow'), 'default course and the unwatched filter must use the open-aware helpers');
+  const toolbar = readFileSync(new URL('../src/components/LectureToolbar.tsx', import.meta.url), 'utf8');
+  assert.ok(toolbar.includes('과제·퀴즈'), 'course view needs the assignments/quizzes tab');
+  const topbar = readFileSync(new URL('../src/components/TopBar.tsx', import.meta.url), 'utf8');
+  assert.ok(topbar.includes('count-badge') && topbar.includes('기한'), 'top bar needs the deadlines button with a count badge');
+  const pane = readFileSync(new URL('../src/components/DeadlinesPane.tsx', import.meta.url), 'utf8');
+  assert.ok(pane.includes('과제의 완료 표시는 LMS 기준이라 실제 제출 여부와 다를 수 있어요.'), 'deadline overview must say task completion is LMS-based');
+  const tasks = readFileSync(new URL('../src/components/TaskList.tsx', import.meta.url), 'utf8');
+  assert.ok(!tasks.includes('Checkbox'), 'task rows are not selectable');
+}
+
+// LMS links open only for Soongsil hosts.
+{
+  const { lmsItemUrl } = await import('../src/lib/content.ts');
+  assert.ok(lmsItemUrl('/courses/1/assignments/2')?.startsWith('https://'));
+  assert.equal(lmsItemUrl('https://canvas.ssu.ac.kr/courses/1/quizzes/3'), 'https://canvas.ssu.ac.kr/courses/1/quizzes/3');
+  assert.equal(lmsItemUrl('https://evil.example/ssu.ac.kr'), null);
+  assert.equal(lmsItemUrl('http://canvas.ssu.ac.kr/x'), null);
 }
