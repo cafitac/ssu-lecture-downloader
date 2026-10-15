@@ -1,4 +1,4 @@
-import type { DownloadJobStatus, DownloadResult, NativeDownloadPlanResult, OfficialViewerSessionBridgeResult } from './types';
+import type { BackendConnection, BackendSupervisionStatus, DownloadJobStatus, DownloadResult, NativeDownloadPlanResult, OfficialViewerSessionBridgeResult } from './types';
 import { open } from '@tauri-apps/plugin-dialog';
 import { invoke } from '@tauri-apps/api/core';
 import { downloadDir } from '@tauri-apps/api/path';
@@ -7,8 +7,11 @@ import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
 const FALLBACK_DOWNLOAD_DIR = '~/Downloads';
 const OFFICIAL_VIEWER_LABEL = 'official-viewer';
 
+// Rust opens every viewer under a fresh `official-viewer-<n>` label (so closing the
+// previous window can never race the next build); match by prefix to find it.
 async function focusExistingOfficialViewer(): Promise<boolean> {
-  const existing = await WebviewWindow.getByLabel(OFFICIAL_VIEWER_LABEL);
+  const exact = await WebviewWindow.getByLabel(OFFICIAL_VIEWER_LABEL);
+  const existing = exact ?? (await WebviewWindow.getAll()).find((window) => window.label.startsWith(`${OFFICIAL_VIEWER_LABEL}-`));
   if (!existing) return false;
   await existing.show();
   await existing.unminimize();
@@ -46,11 +49,16 @@ export async function pickDownloadDirectory(): Promise<string | null> {
   return typeof selected === 'string' ? selected : null;
 }
 
-export async function backendSupervisionStatus(): Promise<string> {
+export async function backendSupervisionStatus(): Promise<BackendSupervisionStatus> {
   if (!isTauriRuntime()) {
-    return 'browser';
+    return { state: 'ready', mode: 'browser', error: null, log_path: null };
   }
-  return invoke<string>('backend_supervision_status');
+  return invoke<BackendSupervisionStatus>('backend_supervision_status');
+}
+
+export async function restartBackend(): Promise<void> {
+  if (!isTauriRuntime()) return;
+  await invoke<void>('backend_restart');
 }
 
 export async function backendApiBaseUrl(): Promise<string> {
@@ -58,6 +66,30 @@ export async function backendApiBaseUrl(): Promise<string> {
     return '';
   }
   return invoke<string>('backend_api_base_url');
+}
+
+let cachedBackendConnection: Promise<BackendConnection> | null = null;
+
+/** Base URL and per-launch token of the Tauri-managed backend; empty under Vite/external backends. */
+export function backendApiConnection(): Promise<BackendConnection> {
+  if (!isTauriRuntime()) {
+    return Promise.resolve({ baseUrl: '', token: null });
+  }
+  if (!cachedBackendConnection) {
+    const pending = invoke<{ base_url: string; token: string | null }>('backend_api_connection')
+      .then((connection) => ({ baseUrl: connection.base_url, token: connection.token ?? null }));
+    // Do not cache failures.
+    pending.catch(() => {
+      if (cachedBackendConnection === pending) cachedBackendConnection = null;
+    });
+    cachedBackendConnection = pending;
+  }
+  return cachedBackendConnection;
+}
+
+/** Forget the cached connection; the port and token change whenever the backend restarts. */
+export function resetBackendConnection(): void {
+  cachedBackendConnection = null;
 }
 
 export async function openDownloadedFolder(path: string): Promise<void> {

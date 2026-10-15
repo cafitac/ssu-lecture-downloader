@@ -297,3 +297,17 @@ export interface PostprocessJobStatus<T = AudioExtractionResult | TranscriptionR
   result: T | null;
   error_code: string | null;
 }
+
+export interface BackendSupervisionStatus {
+  state: 'starting' | 'ready' | 'failed';
+  /** external | managed | managed-sidecar | disabled | browser | starting | failed | ... */
+  mode: string;
+  error: string | null;
+  log_path: string | null;
+}
+
+export interface BackendConnection {
+  baseUrl: string;
+  /** Per-launch token for a Tauri-managed backend; null for external/Vite backends. */
+  token: string | null;
+}
