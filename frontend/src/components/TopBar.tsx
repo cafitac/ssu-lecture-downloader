@@ -41,7 +41,7 @@ export function TopBar({ terms, termId, listState, busy, onTermChange, onRefresh
         type="button"
         className="btn btn-icon btn-ghost"
         aria-label="과목 새로고침"
-        title={busy ? '다운로드가 끝나면 새로고침할 수 있어요' : '과목 새로고침'}
+        title={busy ? '구성요소 설치가 끝나면 새로고침할 수 있어요' : '과목 새로고침'}
         disabled={loading || busy}
         onClick={onRefresh}
       >

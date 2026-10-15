@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ApiError, cancelDownloadJob, fetchDownloadJob, isAuthenticationError, startArtifactDownloadJob, startBatchDownloadJob, startDownloadJob } from '../lib/api';
 import { SESSION_EXPIRED_MESSAGE, friendlyError } from '../lib/errors';
-import { buildJobRows, isRetryable, summarizeRows } from '../lib/jobItems';
+import { buildJobRows, isExpiredMediaUrlCode, isRetryable, summarizeRows } from '../lib/jobItems';
 import type { JobPlan, JobRow } from '../lib/jobItems';
 import { TERMINAL_DOWNLOAD_STATUSES } from '../lib/progress';
 import type { DownloadJobStatus } from '../lib/types';
@@ -26,6 +26,9 @@ export function useDownloads({ downloadDir, onAuthError, onError }: Options) {
   const [startError, setStartError] = useState<string | null>(null);
   const [downloaded, setDownloaded] = useState<ReadonlySet<string>>(new Set());
   const planRef = useRef<JobPlan | null>(null);
+  // One automatic re-plan per user-started download when the CDN rejects a native transfer.
+  const autoRetryUsedRef = useRef(false);
+  const [autoRetryIds, setAutoRetryIds] = useState<string[] | null>(null);
   const callbacksRef = useRef({ onAuthError, onError });
   useEffect(() => {
     callbacksRef.current = { onAuthError, onError };
@@ -37,14 +40,28 @@ export function useDownloads({ downloadDir, onAuthError, onError }: Options) {
 
   /** Applies a fresh job snapshot; returns false when the failure sends the user back to login. */
   const applyJob = useCallback((next: DownloadJobStatus): boolean => {
-    if (next.status === 'failed' && next.error_code && isAuthenticationError(new ApiError(next.error_code, next.error_code))) {
+    const native = next.job_id.startsWith('native-');
+    if (
+      next.status === 'failed'
+      && next.error_code
+      && !(native && isExpiredMediaUrlCode(next.error_code))
+      && isAuthenticationError(new ApiError(next.error_code, next.error_code))
+    ) {
       callbacksRef.current.onAuthError(SESSION_EXPIRED_MESSAGE);
       return false;
     }
     setJob((current) => (current === null || current.job_id === next.job_id ? next : current));
     if (isTerminal(next) && planRef.current) {
       const current = planRef.current;
-      const finished = buildJobRows(current, next).filter((row) => row.phase === 'done');
+      const finalRows = buildJobRows(current, next);
+      if (native && !autoRetryUsedRef.current) {
+        const expired = finalRows.filter((row) => row.phase === 'failed' && isExpiredMediaUrlCode(row.reasonCode ?? next.error_code));
+        if (expired.length > 0) {
+          autoRetryUsedRef.current = true;
+          setAutoRetryIds(expired.map((row) => row.id));
+        }
+      }
+      const finished = finalRows.filter((row) => row.phase === 'done');
       if (finished.length > 0) {
         setDownloaded((previous) => new Set([...previous, ...finished.map((row) => `${current.courseId}:${row.id}`)]));
       }
@@ -64,8 +81,9 @@ export function useDownloads({ downloadDir, onAuthError, onError }: Options) {
     },
   });
 
-  const start = useCallback(async (nextPlan: JobPlan): Promise<boolean> => {
+  const start = useCallback(async (nextPlan: JobPlan, automatic = false): Promise<boolean> => {
     if (starting || (job !== null && !isTerminal(job)) || nextPlan.items.length === 0) return false;
+    if (!automatic) autoRetryUsedRef.current = false;
     planRef.current = nextPlan;
     setPlan(nextPlan);
     setJob(null);
@@ -111,6 +129,14 @@ export function useDownloads({ downloadDir, onAuthError, onError }: Options) {
     const wanted = new Set(only ?? rows.filter(isRetryable).map((row) => row.id));
     return start({ ...plan, items: plan.items.filter((item) => wanted.has(item.id)) });
   }, [active, plan, rows, start]);
+
+  // Re-plan the CDN-rejected items once, outside the polling callback.
+  useEffect(() => {
+    if (!autoRetryIds || !plan || active) return;
+    const wanted = new Set(autoRetryIds);
+    setAutoRetryIds(null);
+    void start({ ...plan, items: plan.items.filter((item) => wanted.has(item.id)) }, true);
+  }, [active, autoRetryIds, plan, start]);
 
   const isDownloaded = useCallback((courseId: string | number, itemId: string) => downloaded.has(`${courseId}:${itemId}`), [downloaded]);
 
