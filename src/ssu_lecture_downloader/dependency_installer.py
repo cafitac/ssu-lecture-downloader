@@ -4,6 +4,7 @@ import importlib.util
 import shutil
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from typing import Callable
 
@@ -11,6 +12,8 @@ from ssu_lecture_downloader.postprocess_media import ffmpeg_status
 from ssu_lecture_downloader.stt import check_stt_provider
 
 InstallProgress = Callable[[dict[str, object]], None]
+INSTALL_TIMEOUT_SECONDS = 900
+INSTALL_POLL_SECONDS = 0.5
 
 SUPPORTED_COMPONENTS = {'ffmpeg', 'faster_whisper'}
 PACKAGE_BY_COMPONENT = {
@@ -69,7 +72,35 @@ def _install_command() -> InstallCommand | None:
     return None
 
 
-def install_missing_media_components(components: list[str] | None = None, on_progress: InstallProgress | None = None) -> dict[str, object]:
+class InstallCancelled(Exception):
+    """The caller asked to stop while the installer subprocess was running."""
+
+
+def _run_install_command(command: list[str], *, timeout: float, should_cancel: Callable[[], bool] | None) -> subprocess.CompletedProcess:
+    """Run the installer, polling for cancel and enforcing an overall deadline."""
+    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    deadline = time.monotonic() + timeout
+    try:
+        while True:
+            try:
+                stdout, stderr = process.communicate(timeout=INSTALL_POLL_SECONDS)
+                return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+            except subprocess.TimeoutExpired:
+                if should_cancel and should_cancel():
+                    raise InstallCancelled()
+                if time.monotonic() >= deadline:
+                    raise
+    except BaseException:
+        process.kill()
+        process.communicate()
+        raise
+
+
+def install_missing_media_components(
+    components: list[str] | None = None,
+    on_progress: InstallProgress | None = None,
+    should_cancel: Callable[[], bool] | None = None,
+) -> dict[str, object]:
     requested = normalize_components(components)
     missing = missing_components(requested)
     supported, reason = install_supported()
@@ -90,7 +121,14 @@ def install_missing_media_components(components: list[str] | None = None, on_pro
         package = PACKAGE_BY_COMPONENT[component]
         if on_progress:
             on_progress({'stage': 'dependency_install_started', 'component': component, 'package': package, 'installer': command.label})
-        result = subprocess.run([*command.as_list(), package], capture_output=True, text=True, timeout=900)
+        try:
+            result = _run_install_command([*command.as_list(), package], timeout=INSTALL_TIMEOUT_SECONDS, should_cancel=should_cancel)
+        except InstallCancelled:
+            return {'ok': False, 'error_code': 'cancelled', 'failed_component': component, 'missing_components': missing_components(requested), 'installed_components': installed, 'message': '설치가 취소되었습니다.'}
+        except subprocess.TimeoutExpired:
+            return {'ok': False, 'error_code': 'dependency_install_timeout', 'failed_component': component, 'missing_components': missing_components(requested), 'installed_components': installed, 'message': f'{package} 설치가 {INSTALL_TIMEOUT_SECONDS}초 안에 끝나지 않았습니다.'}
+        except OSError as exc:
+            return {'ok': False, 'error_code': 'dependency_install_failed', 'failed_component': component, 'missing_components': missing_components(requested), 'installed_components': installed, 'message': str(exc)[:1000]}
         if result.returncode != 0:
             stderr_tail = '\n'.join((result.stderr or result.stdout or '').strip().splitlines()[-8:])
             return {

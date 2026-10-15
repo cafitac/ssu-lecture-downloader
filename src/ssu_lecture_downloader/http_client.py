@@ -24,6 +24,12 @@ class HttpClient:
     def cookies(self):
         return self.session.cookies
 
+    def close(self) -> None:
+        try:
+            self.session.close()
+        except Exception:
+            pass
+
     def get(self, step: str, url: str, **kwargs: Any) -> requests.Response:
         return self.request(step, "GET", url, **kwargs)
 

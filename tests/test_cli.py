@@ -149,3 +149,65 @@ def test_download_json_status_reports_missing_env_without_values(tmp_path):
     assert payload["credentials"]["SSU_USERNAME"] == "missing"
     assert payload["credentials"]["SSU_PASSWORD"] == "missing"
     assert "SSU_PASSWORD=" not in result.stdout
+
+
+from curl_cffi.requests import exceptions as curl_exceptions
+
+from ssu_lecture_downloader import cli
+from ssu_lecture_downloader.errors import LoginFlowError
+
+
+def run_main_with_failure(monkeypatch, error, argv):
+    def failing(args):
+        raise error
+
+    monkeypatch.setitem(cli.COMMANDS, 'login', failing)
+    return cli.main(argv)
+
+
+def test_cli_unexpected_exception_exits_nonzero_with_concise_stderr_message(monkeypatch, capsys):
+    code = run_main_with_failure(monkeypatch, RuntimeError('boom while parsing'), ['login'])
+
+    captured = capsys.readouterr()
+    assert code == 1
+    assert captured.out == ''
+    assert captured.err.strip() == 'Error: RuntimeError: boom while parsing'
+    assert 'Traceback' not in captured.err
+
+
+def test_cli_unexpected_exception_prints_json_error_with_json_flag(monkeypatch, capsys):
+    code = run_main_with_failure(monkeypatch, curl_exceptions.Timeout('Operation timed out after 30000 ms'), ['login', '--json'])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 1
+    assert payload['ok'] is False
+    assert payload['error_code'] == 'network_timeout'
+    assert payload['message']
+
+
+def test_cli_login_flow_errors_report_their_own_code(monkeypatch, capsys):
+    code = run_main_with_failure(monkeypatch, LoginFlowError('lti_launch_form_missing', 'LTI tool launch form not found'), ['login', '--json'])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 1
+    assert payload == {'ok': False, 'error_code': 'lti_launch_form_missing', 'message': 'LTI tool launch form not found'}
+
+
+def test_cli_error_message_redacts_signed_urls_and_is_truncated(monkeypatch, capsys):
+    error = ValueError('failed https://cdn.example/video.mp4?token=super-secret&x=1 ' + 'z' * 1000)
+
+    run_main_with_failure(monkeypatch, error, ['login', '--json'])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert 'super-secret' not in payload['message']
+    assert len(payload['message']) <= cli.MAX_ERROR_MESSAGE_CHARS
+
+
+def test_cli_keyboard_interrupt_exits_130(monkeypatch, capsys):
+    assert run_main_with_failure(monkeypatch, KeyboardInterrupt(), ['login']) == 130
+
+
+def test_cli_still_returns_the_handler_exit_code(monkeypatch):
+    monkeypatch.setitem(cli.COMMANDS, 'login', lambda args: 2)
+
+    assert cli.main(['login']) == 2

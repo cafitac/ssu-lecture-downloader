@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import shutil
+import threading
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Literal
@@ -151,10 +153,21 @@ def write_transcript_files(
         'language': language,
         'segments': [segment.model_dump() for segment in segments],
     }
-    text_path.write_text(text, encoding='utf-8')
-    md_path.write_text(md, encoding='utf-8')
-    json_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding='utf-8')
+    # Each file is written to a temp sibling and swapped in with os.replace. The
+    # user-facing .txt goes last, so its presence means the whole set is complete.
+    _write_text_atomically(md_path, md)
+    _write_text_atomically(json_path, json.dumps(payload, ensure_ascii=False, indent=2))
+    _write_text_atomically(text_path, text)
     return TranscriptionResult(ok=True, audio_path=audio_path, text_path=text_path, md_path=md_path, json_path=json_path, segments=segments)
+
+
+def _write_text_atomically(path: Path, content: str) -> None:
+    partial = path.with_name(f'{path.name}.part')
+    try:
+        partial.write_text(content, encoding='utf-8')
+        os.replace(partial, path)
+    finally:
+        partial.unlink(missing_ok=True)
 
 
 def _fake_segments(audio_path: Path) -> list[TranscriptSegment]:
@@ -166,13 +179,45 @@ def _emit_progress(on_progress: Callable[[dict[str, Any]], None] | None, event: 
         on_progress(event)
 
 
-def _faster_whisper_segments(request: TranscriptionRequest, on_progress: Callable[[dict[str, Any]], None] | None = None) -> list[TranscriptSegment]:
+class TranscriptionCancelled(Exception):
+    """Raised inside the segment loop when the caller asked to stop."""
+
+
+_WHISPER_MODELS: dict[tuple[str, str, str], Any] = {}
+_WHISPER_MODELS_LOCK = threading.Lock()
+
+
+def _load_whisper_model(model_size: str, device: str = 'auto', compute_type: str = 'auto') -> Any:
+    """Load a WhisperModel once per (size, device, compute_type) for the process lifetime."""
+    key = (model_size, device, compute_type)
+    with _WHISPER_MODELS_LOCK:
+        model = _WHISPER_MODELS.get(key)
+        if model is None:
+            from faster_whisper import WhisperModel
+
+            model = WhisperModel(model_size, device=device, compute_type=compute_type)
+            _WHISPER_MODELS[key] = model
+        return model
+
+
+def clear_whisper_model_cache() -> None:
+    with _WHISPER_MODELS_LOCK:
+        _WHISPER_MODELS.clear()
+
+
+def _faster_whisper_segments(
+    request: TranscriptionRequest,
+    on_progress: Callable[[dict[str, Any]], None] | None = None,
+    should_cancel: Callable[[], bool] | None = None,
+) -> list[TranscriptSegment]:
     try:
-        from faster_whisper import WhisperModel
+        import faster_whisper  # noqa: F401 - fail early with a stable error code
     except Exception as exc:  # pragma: no cover - guarded by provider check in normal path
         raise RuntimeError('faster_whisper_import_failed') from exc
     _emit_progress(on_progress, {'stage': 'transcript_model_loading', 'provider': request.provider, 'model': request.model, 'audio_path': str(request.audio_path)})
-    model = WhisperModel(request.model, device='auto', compute_type='auto')
+    model = _load_whisper_model(request.model, 'auto', 'auto')
+    if should_cancel and should_cancel():
+        raise TranscriptionCancelled('transcription cancelled')
     segments, _info = model.transcribe(
         str(request.audio_path),
         language=request.language,
@@ -187,6 +232,8 @@ def _faster_whisper_segments(request: TranscriptionRequest, on_progress: Callabl
     collected: list[TranscriptSegment] = []
     last_percent = -1
     for segment in segments:
+        if should_cancel and should_cancel():
+            raise TranscriptionCancelled('transcription cancelled')
         item = TranscriptSegment(start=float(segment.start), end=float(segment.end), text=segment.text.strip())
         collected.append(item)
         percent = None
@@ -212,7 +259,11 @@ def _faster_whisper_segments(request: TranscriptionRequest, on_progress: Callabl
     return collected
 
 
-def transcribe_audio(request: TranscriptionRequest, on_progress: Callable[[dict[str, Any]], None] | None = None) -> TranscriptionResult:
+def transcribe_audio(
+    request: TranscriptionRequest,
+    on_progress: Callable[[dict[str, Any]], None] | None = None,
+    should_cancel: Callable[[], bool] | None = None,
+) -> TranscriptionResult:
     audio_path = request.audio_path.expanduser()
     if not audio_path.exists():
         return TranscriptionResult(ok=False, audio_path=audio_path, error_code='audio_not_found', message='음성 파일을 찾을 수 없습니다.')
@@ -227,9 +278,14 @@ def transcribe_audio(request: TranscriptionRequest, on_progress: Callable[[dict[
             segments = _fake_segments(audio_path)
             _emit_progress(on_progress, {'stage': 'transcript_progress', 'provider': request.provider, 'model': request.model, 'audio_path': str(audio_path), 'segment_count': len(segments), 'duration': 1, 'progress_percent': 100})
         elif request.provider == 'faster_whisper':
-            segments = _faster_whisper_segments(request, on_progress=on_progress)
+            segments = _faster_whisper_segments(request, on_progress=on_progress, should_cancel=should_cancel)
         else:
             return TranscriptionResult(ok=False, audio_path=audio_path, error_code='stt_provider_not_implemented', message='이 STT provider는 아직 앱에서 실행하지 않습니다.', install_hint=status.install_hint)
+    except TranscriptionCancelled:
+        return TranscriptionResult(ok=False, audio_path=audio_path, error_code='cancelled', message='작업이 취소되었습니다.')
     except Exception as exc:
         return TranscriptionResult(ok=False, audio_path=audio_path, error_code=type(exc).__name__, message=str(exc)[:500])
-    return write_transcript_files(audio_path=audio_path, segments=segments, output_dir=request.output_dir, provider=request.provider, model=request.model, language=request.language, overwrite=request.overwrite)
+    try:
+        return write_transcript_files(audio_path=audio_path, segments=segments, output_dir=request.output_dir, provider=request.provider, model=request.model, language=request.language, overwrite=request.overwrite)
+    except OSError as exc:
+        return TranscriptionResult(ok=False, audio_path=audio_path, segments=segments, error_code='transcript_write_failed', message=str(exc)[:500])

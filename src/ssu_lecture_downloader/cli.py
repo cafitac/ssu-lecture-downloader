@@ -3,14 +3,17 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from dotenv import load_dotenv
 
+from ssu_lecture_downloader.errors import LoginFlowError, classify_network_error
 from ssu_lecture_downloader.http_client import HttpClient
 from ssu_lecture_downloader.login_flow import run_http_login_discovery
+from ssu_lecture_downloader.redaction import redact_url
 from ssu_lecture_downloader.service import SsuLectureService
 
 
@@ -440,25 +443,56 @@ def run_batch_download(args: argparse.Namespace) -> int:
     return 0 if result.ok else 1
 
 
+_URL_PATTERN = re.compile(r"https?://\S+")
+MAX_ERROR_MESSAGE_CHARS = 300
+
+
+def describe_failure(exc: BaseException) -> tuple[str, str]:
+    """(error_code, one-line message) for an unexpected exception, URLs redacted."""
+    if isinstance(exc, LoginFlowError):
+        return exc.code, exc.message
+    network_code = classify_network_error(exc)
+    if network_code:
+        return network_code, "LMS/Commons 서버에 연결하지 못했거나 응답이 지연되었습니다."
+    text = " ".join(str(exc).split())
+    text = _URL_PATTERN.sub(lambda match: redact_url(match.group(0)), text)
+    return type(exc).__name__, text[:MAX_ERROR_MESSAGE_CHARS]
+
+
+def report_failure(exc: BaseException, *, as_json: bool) -> int:
+    error_code, message = describe_failure(exc)
+    if as_json:
+        print(json.dumps({"ok": False, "error_code": error_code, "message": message}, ensure_ascii=False, sort_keys=True))
+    else:
+        print(f"Error: {error_code}: {message}" if message else f"Error: {error_code}", file=sys.stderr)
+    return 1
+
+
+COMMANDS = {
+    "login": run_login,
+    "discover-session": run_discover_session,
+    "discover-lms": run_discover_lms,
+    "course-detail": run_course_detail,
+    "resolve-media": run_resolve_media,
+    "download": run_download,
+    "batch-download": run_batch_download,
+}
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    if args.command == "login":
-        return run_login(args)
-    if args.command == "discover-session":
-        return run_discover_session(args)
-    if args.command == "discover-lms":
-        return run_discover_lms(args)
-    if args.command == "course-detail":
-        return run_course_detail(args)
-    if args.command == "resolve-media":
-        return run_resolve_media(args)
-    if args.command == "download":
-        return run_download(args)
-    if args.command == "batch-download":
-        return run_batch_download(args)
-    parser.error(f"unsupported command: {args.command}")
-    return 2
+    handler = COMMANDS.get(args.command)
+    if handler is None:
+        parser.error(f"unsupported command: {args.command}")
+        return 2
+    try:
+        return handler(args)
+    except KeyboardInterrupt:
+        print("Interrupted", file=sys.stderr)
+        return 130
+    except Exception as exc:  # noqa: BLE001 - last line of defence for the CLI
+        return report_failure(exc, as_json=bool(getattr(args, "json", False)))
 
 
 if __name__ == "__main__":

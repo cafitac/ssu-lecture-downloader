@@ -6,10 +6,6 @@ from dataclasses import dataclass
 from typing import Protocol
 from urllib.parse import urljoin, urlparse
 
-from bs4 import BeautifulSoup
-from cryptography.hazmat.primitives.asymmetric import padding
-from cryptography.hazmat.primitives.serialization import load_pem_private_key
-
 from ssu_lecture_downloader.errors import LoginFlowError
 
 LMS_SSO_CALLBACK_URL = "https://lms.ssu.ac.kr/xn-sso/gw-cb.php"
@@ -62,6 +58,8 @@ def extract_iframe_src(html: str, base_url: str | None = None) -> str:
     if script_match:
         return urljoin(base_url or "", script_match.group(1))
 
+    from bs4 import BeautifulSoup  # imported lazily: only the login flow needs HTML parsing
+
     soup = BeautifulSoup(html, "html.parser")
     iframe = soup.find("iframe")
     if iframe and iframe.get("src"):
@@ -71,6 +69,8 @@ def extract_iframe_src(html: str, base_url: str | None = None) -> str:
 
 
 def extract_canvas_login_form(html: str) -> CanvasLoginForm:
+    from bs4 import BeautifulSoup
+
     soup = BeautifulSoup(html, "html.parser")
     form = soup.find("form", {"id": "login_form"})
     if not form:
@@ -98,6 +98,9 @@ def extract_login_cryption(html: str) -> LoginCryption:
 
 
 def decrypt_canvas_token(encrypted_data_b64: str, private_key_pem: str) -> str:
+    from cryptography.hazmat.primitives.asymmetric import padding
+    from cryptography.hazmat.primitives.serialization import load_pem_private_key
+
     try:
         encrypted_bytes = base64.b64decode(encrypted_data_b64)
         private_key = load_pem_private_key(private_key_pem.encode("utf-8"), password=None)

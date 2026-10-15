@@ -2,6 +2,8 @@ import threading
 import time
 from pathlib import Path
 
+import pytest
+
 from ssu_lecture_downloader.auth import SessionState
 from ssu_lecture_downloader.lms import LearningXLister
 from ssu_lecture_downloader.login_flow import LoginDiscoveryResult
@@ -731,3 +733,375 @@ def test_service_resolves_download_from_module_metadata_when_attendance_detail_i
     assert result.native_download is not None
     assert result.native_download.referer == 'https://commons.ssu.ac.kr/em/6773aeec2250e'
     assert not any(call[1] == 'get_attendance_item_detail' for call in service.http.calls)
+
+
+# --- concurrency, session lifetime and recovery -------------------------------------------
+
+import types
+
+from curl_cffi.requests import exceptions as curl_exceptions
+
+from ssu_lecture_downloader.http_client import HttpClient
+
+
+def make_http_error(status, url):
+    error = curl_exceptions.HTTPError(f'HTTP {status}')
+    error.response = types.SimpleNamespace(status_code=status, url=url)
+    return error
+
+
+class StatusResponse(FakeResponse):
+    """A response whose raise_for_status raises curl_cffi's HTTPError like the real client."""
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise make_http_error(self.status_code, self.url)
+
+
+def test_service_serializes_cold_cache_logins_and_never_clears_cookies_under_a_running_request():
+    state = {'active_logins': 0, 'max_active_logins': 0, 'logins': 0}
+    guard = threading.Lock()
+    failures = []
+
+    def slow_login(username, password, http):
+        with guard:
+            state['active_logins'] += 1
+            state['max_active_logins'] = max(state['max_active_logins'], state['active_logins'])
+            state['logins'] += 1
+        time.sleep(0.05)
+        http.cookies['xn_api_token'] = 'fresh-token'
+        with guard:
+            state['active_logins'] -= 1
+        return LoginDiscoveryResult(ok=True, error_code=None, session=SessionState(cookie_names=['xn_api_token'], xn_api_token_present=True))
+
+    class CookieCheckingHttp(FakeHttp):
+        def get(self, step, url, **kwargs):
+            if step in {'list_courses', 'list_course_modules'}:
+                time.sleep(0.01)
+                if not self.cookies.get('xn_api_token'):
+                    failures.append(step)
+            return super().get(step, url, **kwargs)
+
+    http = CookieCheckingHttp()
+    http.cookies = {}
+    http.course_payloads_by_term = {46: {'courses': [{'id': 42, 'name': '현재 과목', 'term_id': 46, 'ended': False}]}}
+    service = SsuLectureService(http=http, login_func=slow_login, current_term_candidates=[46])
+    errors = []
+
+    def call(index):
+        try:
+            if index % 2:
+                service.list_terms('user', 'password')
+            else:
+                service.discover_courses('user', 'password')
+        except Exception as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    threads = [threading.Thread(target=call, args=(index,)) for index in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=20)
+
+    assert not errors
+    assert failures == []
+    assert state['max_active_logins'] == 1
+    assert state['logins'] == 1
+
+
+def test_service_clear_cache_waits_for_a_running_session_user():
+    entered = threading.Event()
+    release = threading.Event()
+
+    class BlockingHttp(FakeHttp):
+        def get(self, step, url, **kwargs):
+            if step == 'list_course_modules':
+                entered.set()
+                release.wait(5)
+                assert self.cookies.get('xn_api_token'), 'cookies were wiped under a running request'
+            return super().get(step, url, **kwargs)
+
+    service = SsuLectureService(http=BlockingHttp(), login_func=ok_login)
+    results = {}
+    worker = threading.Thread(target=lambda: results.setdefault('detail', service.get_course_detail('user', 'password', course_id=42)))
+    worker.start()
+    assert entered.wait(5)
+    cleared = threading.Thread(target=service.clear_cache)
+    cleared.start()
+    cleared.join(timeout=0.2)
+    assert cleared.is_alive(), 'clear_cache must wait for the in-flight request'
+    release.set()
+    worker.join(5)
+    cleared.join(5)
+
+    assert results['detail'].ok is True
+    assert not cleared.is_alive()
+
+
+def test_service_renews_login_after_session_ttl():
+    http = FakeHttp()
+    login = CountingLogin()
+    service = SsuLectureService(http=http, login_func=login, session_ttl_seconds=0)
+
+    service.login('user', 'password')
+    service.login('user', 'password')
+
+    assert len(login.calls) == 2
+
+
+def test_service_keeps_login_within_session_ttl():
+    login = CountingLogin()
+    service = SsuLectureService(http=FakeHttp(), login_func=login, session_ttl_seconds=60)
+
+    service.login('user', 'password')
+    service.login('user', 'password')
+
+    assert len(login.calls) == 1
+
+
+def test_service_relogs_in_once_and_retries_when_lms_rejects_the_session():
+    class ExpiringHttp(FakeHttp):
+        def __init__(self):
+            super().__init__()
+            self.module_calls = 0
+
+        def get(self, step, url, **kwargs):
+            if step == 'list_course_modules':
+                self.module_calls += 1
+                if self.module_calls == 1:
+                    return StatusResponse([], status_code=401, url='https://canvas.ssu.ac.kr/learningx/api/v1/courses/42/modules')
+            return super().get(step, url, **kwargs)
+
+    http = ExpiringHttp()
+    login = CountingLogin()
+    service = SsuLectureService(http=http, login_func=login)
+
+    result = service.get_course_detail('user', 'password', course_id=42, course_name='현재 과목')
+
+    assert result.ok is True
+    assert len(login.calls) == 2
+    assert http.module_calls == 2
+
+
+def test_service_does_not_retry_forever_when_the_lms_keeps_rejecting_the_session():
+    class AlwaysExpiredHttp(FakeHttp):
+        def get(self, step, url, **kwargs):
+            if step == 'list_course_modules':
+                return StatusResponse([], status_code=403, url='https://canvas.ssu.ac.kr/x')
+            return super().get(step, url, **kwargs)
+
+    login = CountingLogin()
+    service = SsuLectureService(http=AlwaysExpiredHttp(), login_func=login)
+
+    with pytest.raises(curl_exceptions.HTTPError):
+        service.get_course_detail('user', 'password', course_id=42)
+
+    assert len(login.calls) == 2
+
+
+def test_cdn_403_does_not_count_as_lms_session_expiry():
+    class CdnForbiddenHttp(FakeHttp):
+        def get(self, step, url, **kwargs):
+            if step == 'list_course_modules':
+                return StatusResponse([], status_code=403, url='https://ssu-toast.commonscdn.com/video.mp4?sig=x')
+            return super().get(step, url, **kwargs)
+
+    login = CountingLogin()
+    service = SsuLectureService(http=CdnForbiddenHttp(), login_func=login)
+
+    with pytest.raises(curl_exceptions.HTTPError):
+        service.get_course_detail('user', 'password', course_id=42)
+
+    assert len(login.calls) == 1
+
+
+def fake_resolved(module_item_id, *, raw_url='https://ssu-toast.commonscdn.com/video.mp4?sig=old'):
+    return _ResolvedMediaInternal(
+        result=ResolvedMediaResult(
+            ok=True,
+            error_code=None,
+            course_id=42,
+            module_item_id=module_item_id,
+            attendance_item_id='555',
+            title='강의',
+            content_id='content-1',
+            content_type='mp4',
+            duration=60,
+            download_url='https://commons.ssu.ac.kr/download',
+            download_size=4,
+        ),
+        raw_download_url=raw_url,
+        referer=None,
+        extension='mp4',
+    )
+
+
+def test_expired_signed_media_url_is_resolved_again_exactly_once(tmp_path: Path, monkeypatch):
+    login = CountingLogin()
+    service = SsuLectureService(http=FakeHttp(), login_func=login)
+    resolve_calls = []
+    download_urls = []
+
+    def fake_resolve(*, course_id, module_item_id):
+        resolve_calls.append(module_item_id)
+        signature = 'old' if len(resolve_calls) == 1 else 'new'
+        return fake_resolved(module_item_id, raw_url=f'https://ssu-toast.commonscdn.com/video.mp4?sig={signature}')
+
+    def fake_download(*, http, download_url, plan, referer=None, max_attempts=1, on_progress=None, should_cancel=None):
+        download_urls.append(download_url)
+        if len(download_urls) == 1:
+            raise make_http_error(403, download_url)
+        plan.file_path.parent.mkdir(parents=True, exist_ok=True)
+        plan.file_path.write_bytes(b'1234')
+        return plan.file_path
+
+    monkeypatch.setattr(service, '_resolve_media_authenticated', fake_resolve)
+    monkeypatch.setattr(service_mod, 'download_to_plan', fake_download)
+    events = []
+
+    result = service.download_lecture('user', 'password', course_id=42, module_item_id=111, course_name='과목', output_dir=tmp_path, dry_run=False, on_progress=events.append)
+
+    assert result.ok is True and result.written is True
+    assert resolve_calls == [111, 111]
+    assert download_urls == ['https://ssu-toast.commonscdn.com/video.mp4?sig=old', 'https://ssu-toast.commonscdn.com/video.mp4?sig=new']
+    assert len(login.calls) == 1, 'a CDN 403 must not trigger a new LMS login'
+    assert any(event['stage'] == 'download_reresolving' for event in events)
+
+
+def test_signed_media_url_failure_is_not_retried_a_second_time(tmp_path: Path, monkeypatch):
+    service = SsuLectureService(http=FakeHttp(), login_func=ok_login)
+    attempts = []
+
+    def fake_download(*, http, download_url, plan, referer=None, max_attempts=1, on_progress=None, should_cancel=None):
+        attempts.append(download_url)
+        raise make_http_error(403, download_url)
+
+    monkeypatch.setattr(service, '_resolve_media_authenticated', lambda *, course_id, module_item_id: fake_resolved(module_item_id))
+    monkeypatch.setattr(service_mod, 'download_to_plan', fake_download)
+
+    with pytest.raises(curl_exceptions.HTTPError):
+        service.download_lecture('user', 'password', course_id=42, module_item_id=111, course_name='과목', output_dir=tmp_path, dry_run=False)
+
+    assert len(attempts) == 2
+
+
+def test_downloads_use_a_private_http_client_that_is_closed_afterwards(tmp_path: Path, monkeypatch):
+    shared = HttpClient()
+    service = SsuLectureService(http=shared, login_func=ok_login)
+    used = []
+    closed = []
+    monkeypatch.setattr(HttpClient, 'close', lambda self: closed.append(self))
+
+    def fake_download(*, http, download_url, plan, referer=None, max_attempts=1, on_progress=None, should_cancel=None):
+        used.append(http)
+        plan.file_path.parent.mkdir(parents=True, exist_ok=True)
+        plan.file_path.write_bytes(b'1234')
+        return plan.file_path
+
+    monkeypatch.setattr(service, '_resolve_media_authenticated', lambda *, course_id, module_item_id: fake_resolved(module_item_id))
+    monkeypatch.setattr(service_mod, 'download_to_plan', fake_download)
+
+    service.download_lecture('user', 'password', course_id=42, module_item_id=111, course_name='과목', output_dir=tmp_path, dry_run=False)
+
+    assert len(used) == 1 and used[0] is not shared
+    assert closed == used
+    shared.session.close()
+
+
+def test_term_scan_runs_with_bounded_parallelism_and_is_shared_with_current_courses():
+    state = {'active': 0, 'max_active': 0, 'scans': 0}
+    guard = threading.Lock()
+
+    class SlowTermHttp(FakeHttp):
+        def get(self, step, url, **kwargs):
+            if step == 'list_courses':
+                with guard:
+                    state['scans'] += 1
+                    state['active'] += 1
+                    state['max_active'] = max(state['max_active'], state['active'])
+                time.sleep(0.03)
+                with guard:
+                    state['active'] -= 1
+                term_id = kwargs['params']['term_ids[]'][0]
+                if term_id == 47:
+                    raise RuntimeError('this term id is unavailable')
+            return super().get(step, url, **kwargs)
+
+    http = SlowTermHttp()
+    http.course_payloads_by_term = {
+        term_id: {'courses': [{'id': term_id, 'name': f'과목 {term_id}', 'term_id': term_id, 'ended': term_id != 52}]}
+        for term_id in range(44, 54)
+    }
+    service = SsuLectureService(http=http, login_func=ok_login, current_term_candidates=list(range(44, 54)), term_scan_workers=4)
+
+    terms = service.list_terms('user', 'password')
+    current = service.discover_courses('user', 'password')
+
+    assert [term['term_id'] for term in terms] == [term_id for term_id in range(44, 54) if term_id != 47]
+    assert [term['term_id'] for term in terms if term['is_current']] == [52]
+    assert 1 < state['max_active'] <= 4
+    # 9 successful terms are scanned once and reused; only the failing term 47 is retried.
+    assert [call[1] for call in http.calls].count('list_courses') == 9
+    assert state['scans'] == 11
+    assert current.ok is True and current.course_count == 1
+
+
+def test_batch_fetches_course_modules_once_for_all_items(tmp_path: Path):
+    def item(module_item_id, content_id):
+        return {
+            'module_item_id': module_item_id,
+            'title': f'강의 {module_item_id}',
+            'content_type': 'attendance_item',
+            'completed': False,
+            'url': f'https://canvas.ssu.ac.kr/learningx/lti/lecture_attendance/items/view/{module_item_id}',
+            'content_data': {
+                'item_id': module_item_id,
+                'course_id': 42,
+                'item_content_data': {'content_id': content_id, 'content_type': 'mp4', 'duration': 60, 'total_file_size': 4},
+            },
+        }
+
+    class MetadataHttp(FakeHttp):
+        def get(self, step, url, **kwargs):
+            self.calls.append(('GET', step, url, kwargs))
+            if step == 'list_course_modules':
+                return FakeResponse([{'id': 10, 'name': '1주차', 'module_items': [item(111, 'content-a'), item(112, 'content-b'), item(113, 'content-c')]}])
+            if step == 'get_commons_content':
+                content_id = url.rsplit('=', 1)[-1]
+                return FakeResponse({'result': {'content_id': content_id, 'title': f'강의 {content_id}', 'download_url': f'https://commons.ssu.ac.kr/download/{content_id}', 'total_file_size': 4}})
+            self.calls.pop()
+            return super().get(step, url, **kwargs)
+
+    http = MetadataHttp()
+    service = SsuLectureService(http=http, login_func=ok_login)
+
+    result = service.batch_download_lectures('user', 'password', course_id=42, course_name='과목', output_dir=tmp_path, dry_run=True, module_item_ids=[111, 112, 113])
+
+    assert result.ok is True and result.total_count == 3
+    assert [call[1] for call in http.calls].count('list_course_modules') == 1
+
+
+def test_batch_cancel_before_downloads_start_opens_no_connections(tmp_path: Path, monkeypatch):
+    service = SsuLectureService(http=FakeHttp(), login_func=ok_login)
+    cancel = {'on': False}
+    downloads = []
+
+    def resolve(*, course_id, module_item_id):
+        return fake_resolved(module_item_id)
+
+    def fake_download(**kwargs):
+        downloads.append(kwargs)
+
+    def should_cancel():
+        return cancel['on']
+
+    def on_progress(event):
+        if event['stage'] == 'batch_downloads_started':
+            cancel['on'] = True
+
+    monkeypatch.setattr(service, '_resolve_media_authenticated', resolve)
+    monkeypatch.setattr(service_mod, 'download_to_plan', fake_download)
+
+    service.batch_download_lectures('user', 'password', course_id=42, course_name='과목', output_dir=tmp_path, dry_run=False, module_item_ids=[111], on_progress=on_progress, should_cancel=should_cancel)
+
+    assert downloads == []

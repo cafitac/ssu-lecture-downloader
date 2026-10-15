@@ -757,13 +757,13 @@ def test_audio_extraction_job_succeeds_with_output_path(tmp_path, monkeypatch):
     video = tmp_path / 'lecture.mp4'
     video.write_bytes(b'video')
 
-    def fake_extract(request):
+    def fake_extract(request, on_progress=None, should_cancel=None):
         output = tmp_path / 'transcripts' / 'lecture.wav'
         output.parent.mkdir(exist_ok=True)
         output.write_bytes(b'audio')
         return AudioExtractionResult(ok=True, input_path=request.input_path, output_path=output, file_size=5)
 
-    monkeypatch.setattr('ssu_lecture_downloader.api.extract_audio', fake_extract)
+    monkeypatch.setattr('ssu_lecture_downloader.postprocess_media.extract_audio', fake_extract)
     client = TestClient(create_app(service_factory=FakeService, credential_store=FakeCredentialStore()))
 
     started = client.post('/api/media/audio/jobs', json={'input_path': str(video), 'format': 'wav', 'overwrite': True}).json()
@@ -776,7 +776,7 @@ def test_audio_extraction_job_succeeds_with_output_path(tmp_path, monkeypatch):
 
 
 def test_stt_status_explains_how_to_install_whisper(monkeypatch):
-    monkeypatch.setattr('ssu_lecture_downloader.api.check_stt_provider', lambda provider='faster_whisper': {'provider': provider, 'installed': False, 'available': False, 'install_hint': '앱 패키지에 포함된 faster-whisper를 찾지 못했습니다.'})
+    monkeypatch.setattr('ssu_lecture_downloader.stt.check_stt_provider', lambda provider='faster_whisper': {'provider': provider, 'installed': False, 'available': False, 'install_hint': '앱 패키지에 포함된 faster-whisper를 찾지 못했습니다.'})
     client = TestClient(create_app(service_factory=FakeService, credential_store=FakeCredentialStore()))
 
     response = client.get('/api/stt/providers/status')
@@ -787,8 +787,8 @@ def test_stt_status_explains_how_to_install_whisper(monkeypatch):
 
 
 def test_media_dependency_status_reports_ffmpeg_and_stt(monkeypatch):
-    monkeypatch.setattr('ssu_lecture_downloader.api.ffmpeg_status', lambda: {'name': 'ffmpeg', 'installed': True, 'available': True, 'source': 'bundled', 'path': '/app/ffmpeg', 'install_hint': None})
-    monkeypatch.setattr('ssu_lecture_downloader.api.check_stt_provider', lambda provider='faster_whisper': {'provider': provider, 'installed': provider == 'faster_whisper', 'available': provider == 'faster_whisper', 'install_hint': None})
+    monkeypatch.setattr('ssu_lecture_downloader.postprocess_media.ffmpeg_status', lambda: {'name': 'ffmpeg', 'installed': True, 'available': True, 'source': 'bundled', 'path': '/app/ffmpeg', 'install_hint': None})
+    monkeypatch.setattr('ssu_lecture_downloader.stt.check_stt_provider', lambda provider='faster_whisper': {'provider': provider, 'installed': provider == 'faster_whisper', 'available': provider == 'faster_whisper', 'install_hint': None})
     client = TestClient(create_app(service_factory=FakeService, credential_store=FakeCredentialStore()))
 
     response = client.get('/api/media/dependencies/status')
@@ -807,12 +807,12 @@ def test_stt_job_writes_transcript(tmp_path, monkeypatch):
     audio = tmp_path / 'lecture.wav'
     audio.write_bytes(b'audio')
 
-    def fake_transcribe(request):
+    def fake_transcribe(request, on_progress=None, should_cancel=None):
         text = tmp_path / 'lecture.transcript.txt'
         text.write_text('[00:00:00] 안녕하세요', encoding='utf-8')
         return TranscriptionResult(ok=True, audio_path=request.audio_path, text_path=text, md_path=None, json_path=None, segments=[TranscriptSegment(start=0, end=1, text='안녕하세요')])
 
-    monkeypatch.setattr('ssu_lecture_downloader.api.transcribe_audio', fake_transcribe)
+    monkeypatch.setattr('ssu_lecture_downloader.stt.transcribe_audio', fake_transcribe)
     client = TestClient(create_app(service_factory=FakeService, credential_store=FakeCredentialStore()))
 
     started = client.post('/api/stt/jobs', json={'audio_path': str(audio), 'provider': 'fake', 'overwrite': True}).json()
@@ -828,7 +828,7 @@ def test_artifact_download_job_supports_txt_only_selection(tmp_path, monkeypatch
     from ssu_lecture_downloader.postprocess_media import AudioExtractionResult
     from ssu_lecture_downloader.stt import TranscriptSegment, TranscriptionResult
 
-    def fake_extract(request, on_progress=None):
+    def fake_extract(request, on_progress=None, should_cancel=None):
         output = Path(request.output_dir or tmp_path) / f'{request.input_path.stem}.mp3'
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_bytes(b'audio')
@@ -836,7 +836,7 @@ def test_artifact_download_job_supports_txt_only_selection(tmp_path, monkeypatch
             on_progress({'stage': 'audio_progress', 'progress_percent': 100})
         return AudioExtractionResult(ok=True, input_path=request.input_path, output_path=output, file_size=5)
 
-    def fake_transcribe(request, on_progress=None):
+    def fake_transcribe(request, on_progress=None, should_cancel=None):
         text = Path(request.output_dir or tmp_path) / f'{request.audio_path.stem}.transcript.txt'
         text.write_text('[00:00:00] 안녕하세요', encoding='utf-8')
         if on_progress:
@@ -854,8 +854,8 @@ def test_artifact_download_job_supports_txt_only_selection(tmp_path, monkeypatch
                 result = BatchDownloadResult(**{**result.__dict__, 'items': [BatchDownloadItemResult(**{**item.__dict__, 'output_path': str(output), 'written': True, 'file_size': 5})]})
             return result
 
-    monkeypatch.setattr('ssu_lecture_downloader.api.extract_audio', fake_extract)
-    monkeypatch.setattr('ssu_lecture_downloader.api.transcribe_audio', fake_transcribe)
+    monkeypatch.setattr('ssu_lecture_downloader.postprocess_media.extract_audio', fake_extract)
+    monkeypatch.setattr('ssu_lecture_downloader.stt.transcribe_audio', fake_transcribe)
     client = TestClient(create_app(service_factory=ArtifactService, default_output_dir=tmp_path, credential_store=FakeCredentialStore(CredentialPair(username='u', password='p'))))
 
     started = client.post('/api/download/artifacts/jobs', json={'course_id': 44070, 'course_name': 'UX방법론', 'module_item_ids': [3268578], 'outputs': ['txt'], 'audio_format': 'mp3'}).json()
@@ -894,11 +894,11 @@ def test_artifact_txt_reuses_existing_mp3_without_downloading_video(tmp_path, mo
                 calls['download'] += 1
             return super().batch_download_lectures(*args, **kwargs)
 
-    def fake_extract(request, on_progress=None):
+    def fake_extract(request, on_progress=None, should_cancel=None):
         calls['extract'] += 1
         raise AssertionError('existing mp3 should be reused without audio extraction')
 
-    def fake_transcribe(request, on_progress=None):
+    def fake_transcribe(request, on_progress=None, should_cancel=None):
         calls['transcribe'] += 1
         assert request.audio_path == existing_mp3
         text = existing_mp3.with_name(f'{existing_mp3.stem}.transcript.txt')
@@ -907,8 +907,8 @@ def test_artifact_txt_reuses_existing_mp3_without_downloading_video(tmp_path, mo
             on_progress({'stage': 'transcript_progress', 'progress_percent': 100, 'segment_count': 1, 'duration': 1})
         return TranscriptionResult(ok=True, audio_path=request.audio_path, text_path=text, md_path=None, json_path=None, segments=[TranscriptSegment(start=0, end=1, text='기존 mp3에서 생성')])
 
-    monkeypatch.setattr('ssu_lecture_downloader.api.extract_audio', fake_extract)
-    monkeypatch.setattr('ssu_lecture_downloader.api.transcribe_audio', fake_transcribe)
+    monkeypatch.setattr('ssu_lecture_downloader.postprocess_media.extract_audio', fake_extract)
+    monkeypatch.setattr('ssu_lecture_downloader.stt.transcribe_audio', fake_transcribe)
     client = TestClient(create_app(service_factory=ExistingAudioService, default_output_dir=tmp_path, credential_store=FakeCredentialStore(CredentialPair(username='u', password='p'))))
 
     started = client.post('/api/download/artifacts/jobs', json={'course_id': 44070, 'course_name': 'UX방법론', 'module_item_ids': [3268578], 'outputs': ['txt'], 'audio_format': 'mp3', 'overwrite_artifacts': False}).json()
@@ -933,7 +933,7 @@ def test_artifact_txt_reuses_existing_mp3_without_downloading_video(tmp_path, mo
 
 
 def test_media_dependency_status_exposes_auto_install_availability(monkeypatch):
-    monkeypatch.setattr('ssu_lecture_downloader.api.install_supported', lambda: (True, None))
+    monkeypatch.setattr('ssu_lecture_downloader.dependency_installer.install_supported', lambda: (True, None))
     client = TestClient(create_app(service_factory=FakeService, credential_store=FakeCredentialStore()))
 
     payload = client.get('/api/media/dependencies/status').json()
@@ -945,13 +945,13 @@ def test_media_dependency_status_exposes_auto_install_availability(monkeypatch):
 def test_media_dependency_install_job_installs_only_requested_missing(monkeypatch):
     calls = []
 
-    def fake_install(components, on_progress=None):
+    def fake_install(components, on_progress=None, should_cancel=None):
         calls.append(components)
         if on_progress:
             on_progress({'stage': 'dependency_install_started', 'component': 'faster_whisper'})
         return {'ok': True, 'installed_components': ['faster_whisper'], 'missing_components': [], 'message': '필요한 구성요소 설치가 끝났습니다.'}
 
-    monkeypatch.setattr('ssu_lecture_downloader.api.install_missing_media_components', fake_install)
+    monkeypatch.setattr('ssu_lecture_downloader.dependency_installer.install_missing_media_components', fake_install)
     client = TestClient(create_app(service_factory=FakeService, credential_store=FakeCredentialStore()))
 
     started = client.post('/api/media/dependencies/install/jobs', json={'components': ['faster-whisper']}).json()
@@ -990,7 +990,7 @@ def test_native_plan_runtime_missing_content_id_returns_actionable_message(tmp_p
 
 
 def test_append_compacted_progress_replaces_repeated_download_ticks():
-    from ssu_lecture_downloader.api import _append_compacted_progress
+    from ssu_lecture_downloader.jobs import append_compacted_progress as _append_compacted_progress
 
     progress = []
 

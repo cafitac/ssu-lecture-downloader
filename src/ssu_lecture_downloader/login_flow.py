@@ -12,7 +12,7 @@ from ssu_lecture_downloader.auth import (
     extract_login_cryption,
     extract_sso_redirect,
 )
-from ssu_lecture_downloader.errors import LoginFlowError
+from ssu_lecture_downloader.errors import LoginFlowError, classify_network_error
 from ssu_lecture_downloader.http_client import HttpClient
 
 
@@ -50,7 +50,10 @@ def run_http_login_discovery(username: str, password: str, http=None) -> LoginDi
         session = login.verify_canvas_session()
     except LoginFlowError as exc:
         return LoginDiscoveryResult(ok=False, error_code=exc.code)
-    except Exception:
-        return LoginDiscoveryResult(ok=False, error_code="unknown_response_shape")
+    except Exception as exc:
+        # Transport failures (timeouts, DNS, 5xx) must not look like rejected
+        # credentials; only unrecognised page shapes stay in the auth-error class.
+        network_code = classify_network_error(exc)
+        return LoginDiscoveryResult(ok=False, error_code=network_code or "unknown_response_shape")
 
     return LoginDiscoveryResult(ok=True, error_code=None, session=session)
