@@ -83,7 +83,8 @@ class LearningXLister:
             for item in module.get("module_items", []) or []:
                 if not isinstance(item, dict) or not is_video_item(item):
                     continue
-                item_content_data = (item.get("content_data") or {}).get("item_content_data") or {}
+                content_data = item.get("content_data") or {}
+                item_content_data = content_data.get("item_content_data") or {}
                 lectures.append(
                     LectureItem(
                         module_id=module_id,
@@ -94,6 +95,10 @@ class LearningXLister:
                         completed=bool(item.get("completed", False)),
                         duration=item_content_data.get("duration"),
                         content_type=item_content_data.get("content_type"),
+                        unlock_at=content_data.get("unlock_at") or module.get("unlock_at"),
+                        due_at=content_data.get("due_at"),
+                        late_at=content_data.get("late_at"),
+                        lock_at=content_data.get("lock_at"),
                     )
                 )
         return lectures

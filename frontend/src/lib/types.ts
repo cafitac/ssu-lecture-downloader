@@ -28,6 +28,10 @@ export interface CourseSummary {
   module_count: number;
   lecture_count: number;
   uncompleted_lecture_count: number;
+  /** Earliest deadline still ahead among unwatched lectures (backend, optional). */
+  next_deadline_at?: string | null;
+  next_deadline_is_late?: boolean;
+  missed_lecture_count?: number;
 }
 
 export interface LectureItem {

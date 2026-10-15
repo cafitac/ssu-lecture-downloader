@@ -1,9 +1,19 @@
 import { itemKey, isSelectable, triState } from '../lib/content';
+import { lectureDeadline } from '../lib/deadline';
 import type { LectureTab, WeekGroup } from '../lib/content';
 import { formatBytes, formatDuration } from '../lib/format';
 import type { CourseContentItem } from '../lib/types';
 import { Checkbox } from './Checkbox';
 import { DownloadIcon, PlayIcon } from './Icons';
+
+function DeadlineCell({ item }: { item: CourseContentItem }) {
+  const info = lectureDeadline(item);
+  return (
+    <span className={`cell-deadline${info ? ` tone-${info.tone}` : ''}`} title={info?.title}>
+      {info && <><span className="deadline-badge">{info.badge}</span>{info.when && <span className="deadline-when">{info.when}</span>}</>}
+    </span>
+  );
+}
 
 function StatusChips({ item, tab, downloaded }: { item: CourseContentItem; tab: LectureTab; downloaded: boolean }) {
   return (
@@ -49,6 +59,7 @@ function LectureRow({ item, tab, checked, downloaded, actionBlockedReason, actio
       </span>
       {tab === 'video' && <span className="cell-num cell-length">{formatDuration(item.duration)}</span>}
       <span className="cell-num cell-size">{formatBytes(item.size_bytes)}</span>
+      {tab === 'video' && <DeadlineCell item={item} />}
       <StatusChips item={item} tab={tab} downloaded={downloaded} />
       <span className="cell-action">
         {canAct && (
@@ -103,6 +114,7 @@ export function LectureList({
         <span className="cell-title">제목</span>
         {tab === 'video' && <span className="cell-num cell-length">길이</span>}
         <span className="cell-num cell-size">크기</span>
+        {tab === 'video' && <span className="cell-deadline">기한</span>}
         <span className="cell-status">상태</span>
         <span className="cell-action" />
       </div>

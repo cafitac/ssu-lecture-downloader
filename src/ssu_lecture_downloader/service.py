@@ -808,13 +808,7 @@ class SsuLectureService:
             modules = self._course_modules(course_id, refresh=refresh)
             lectures = lister.extract_lecture_items(modules)
             content_items = lister.extract_course_content_items(modules)
-            course = CourseSummary(
-                id=course_id,
-                name=course_name or "",
-                module_count=len(modules),
-                lecture_count=len(lectures),
-                uncompleted_lecture_count=sum(1 for lecture in lectures if not lecture.completed),
-            )
+            course = CourseSummary.from_lectures(id=course_id, name=course_name or "", module_count=len(modules), lectures=lectures)
             return CourseDetailResult(ok=True, error_code=None, course=course, lectures=lectures, content_items=content_items)
 
         def load() -> CourseDetailResult:
