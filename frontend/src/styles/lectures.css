@@ -37,3 +37,6 @@
   .lecture-table.is-material { --cols: 36px minmax(0, 1fr) 96px 32px; }
   .cell-size { display: none; }
 }
+
+/* A week with a single row shows its label inline instead of a header row. */
+.week-tag { display: inline-block; min-width: 3.5em; margin-right: var(--sp-2); color: var(--text-muted); font-size: var(--fs-12); font-weight: var(--fw-regular); }

@@ -2,7 +2,20 @@ import { useCallback, useEffect, useState } from 'react';
 import { defaultDownloadDirectory, pickDownloadDirectory } from '../lib/desktop';
 
 const STORAGE_KEY = 'ssu.downloadDir';
-const FALLBACK = '~/Downloads';
+const APP_FOLDER = 'SSU Lecture Downloader';
+const FALLBACK = `~/Downloads/${APP_FOLDER}`;
+
+function appFolderIn(downloads: string): string {
+  return `${downloads.replace(/\/+$/, '')}/${APP_FOLDER}`;
+}
+
+function forget(): void {
+  try {
+    window.localStorage.removeItem(STORAGE_KEY);
+  } catch {
+    // Nothing remembered.
+  }
+}
 
 function readStored(): string | null {
   try {
@@ -20,16 +33,20 @@ function store(path: string): void {
   }
 }
 
-/** Download folder: the one the user picked last time, otherwise the OS Downloads folder. */
+/** Download folder: the one the user picked last time, otherwise an app folder inside the OS Downloads folder. */
 export function useDownloadDir() {
   const [dir, setDir] = useState<string>(() => readStored() ?? FALLBACK);
 
   useEffect(() => {
-    if (readStored()) return;
     let cancelled = false;
     defaultDownloadDirectory()
       .then((path) => {
-        if (!cancelled && path) setDir(path);
+        if (cancelled || !path) return;
+        const stored = readStored();
+        // Older versions remembered the bare Downloads folder as the default; move those to the app folder.
+        if (stored && stored.replace(/\/+$/, '') !== path.replace(/\/+$/, '')) return;
+        if (stored) forget();
+        setDir(appFolderIn(path));
       })
       .catch(() => {
         // Keep the fallback.
