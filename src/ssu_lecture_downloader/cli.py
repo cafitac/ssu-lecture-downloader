@@ -5,7 +5,8 @@ import json
 import os
 import re
 import sys
-from dataclasses import asdict, dataclass
+from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -13,6 +14,7 @@ from dotenv import load_dotenv
 from ssu_lecture_downloader.errors import LoginFlowError, classify_network_error
 from ssu_lecture_downloader.http_client import HttpClient
 from ssu_lecture_downloader.login_flow import run_http_login_discovery
+from ssu_lecture_downloader.payloads import batch_payload
 from ssu_lecture_downloader.redaction import redact_url
 from ssu_lecture_downloader.service import SsuLectureService
 
@@ -104,18 +106,13 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _missing_credentials_payload(status: CredentialStatus) -> dict[str, object]:
-    return {
-        "ok": False,
-        "error_code": "missing_credentials",
-        "credentials": status.as_dict(),
-    }
+def _print_json(payload: dict[str, object]) -> None:
+    print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
 
 
 def _print_missing_credentials(status: CredentialStatus, as_json: bool) -> None:
-    payload = _missing_credentials_payload(status)
     if as_json:
-        print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+        _print_json({"ok": False, "error_code": "missing_credentials", "credentials": status.as_dict()})
         return
 
     print("Login discovery cannot start: missing credentials")
@@ -124,37 +121,68 @@ def _print_missing_credentials(status: CredentialStatus, as_json: bool) -> None:
         print(f"  {name}: {state}")
 
 
-def run_login(args: argparse.Namespace) -> int:
+def _credentials_from_env(args: argparse.Namespace) -> tuple[str, str] | None:
+    """(username, password) from `.env`/environment, or None after reporting them missing."""
     load_dotenv(dotenv_path=Path.cwd() / ".env")
     status = credential_status()
     if not status.ok:
         _print_missing_credentials(status, args.json)
-        return 2
+        return None
+    return os.environ["SSU_USERNAME"], os.environ["SSU_PASSWORD"]
 
-    http = HttpClient()
-    result = run_http_login_discovery(os.environ["SSU_USERNAME"], os.environ["SSU_PASSWORD"], http=http)
+
+def _write_trace(args: argparse.Namespace, http: HttpClient) -> None:
     if args.trace:
         args.trace.parent.mkdir(parents=True, exist_ok=True)
         args.trace.write_text(http.trace.to_json(), encoding="utf-8")
 
-    payload = result.to_dict() | {"trace": str(args.trace) if args.trace else None}
+
+def _trace_field(args: argparse.Namespace) -> str | None:
+    return str(args.trace) if args.trace else None
+
+
+def _progress_printer(args: argparse.Namespace) -> tuple[list[dict[str, object]], Callable[[dict[str, object]], None]]:
+    progress: list[dict[str, object]] = []
+
+    def on_progress(event: dict[str, object]) -> None:
+        progress.append(event)
+        if not args.json:
+            print(format_progress_event(event))
+
+    return progress, on_progress
+
+
+def _print_trace_path(args: argparse.Namespace) -> None:
+    if args.trace:
+        print(f"Trace: {args.trace}")
+
+
+def run_login(args: argparse.Namespace) -> int:
+    credentials = _credentials_from_env(args)
+    if credentials is None:
+        return 2
+
+    http = HttpClient()
+    result = run_http_login_discovery(*credentials, http=http)
+    _write_trace(args, http)
+
+    payload = result.to_dict() | {"trace": _trace_field(args)}
     if args.json:
-        print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+        _print_json(payload)
     else:
         print("Login discovery complete" if result.ok else "Login discovery failed")
         print(f"Status: {'ok' if result.ok else result.error_code}")
         if result.session:
             print(f"xn_api_token: {'present' if result.session.xn_api_token_present else 'missing'}")
             print("Cookies: " + ", ".join(result.session.cookie_names))
-        if args.trace:
-            print(f"Trace: {args.trace}")
+        _print_trace_path(args)
     return 0 if result.ok else 1
 
 
 def run_discover_session(args: argparse.Namespace) -> int:
     payload = {"ok": False, "error_code": "not_implemented_yet"}
     if args.json:
-        print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+        _print_json(payload)
     else:
         print("Session discovery scaffold ready")
         print("Status: not_implemented_yet")
@@ -162,41 +190,33 @@ def run_discover_session(args: argparse.Namespace) -> int:
 
 
 def run_discover_lms(args: argparse.Namespace) -> int:
-    load_dotenv(dotenv_path=Path.cwd() / ".env")
-    status = credential_status()
-    if not status.ok:
-        _print_missing_credentials(status, args.json)
+    credentials = _credentials_from_env(args)
+    if credentials is None:
         return 2
 
     http = HttpClient()
-    service = SsuLectureService(http=http)
-    result = service.discover_courses(os.environ["SSU_USERNAME"], os.environ["SSU_PASSWORD"], term_ids=args.term_ids)
+    result = SsuLectureService(http=http).discover_courses(*credentials, term_ids=args.term_ids)
+    _write_trace(args, http)
     if not result.ok:
         payload = result.login.to_dict() | {"courses": [], "course_count": 0}
         if args.trace:
-            args.trace.parent.mkdir(parents=True, exist_ok=True)
-            args.trace.write_text(http.trace.to_json(), encoding="utf-8")
             payload["trace"] = str(args.trace)
         if args.json:
-            print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+            _print_json(payload)
         else:
             print("LMS discovery failed")
             print(f"Status: {result.error_code}")
         return 1
-
-    if args.trace:
-        args.trace.parent.mkdir(parents=True, exist_ok=True)
-        args.trace.write_text(http.trace.to_json(), encoding="utf-8")
 
     payload = {
         "ok": True,
         "error_code": None,
         "course_count": result.course_count,
         "courses": [course.model_dump() for course in result.courses],
-        "trace": str(args.trace) if args.trace else None,
+        "trace": _trace_field(args),
     }
     if args.json:
-        print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+        _print_json(payload)
     else:
         print(f"Courses: {result.course_count}")
         for course in result.courses:
@@ -204,33 +224,22 @@ def run_discover_lms(args: argparse.Namespace) -> int:
                 f"- {course.id} {course.name} | modules={course.module_count} "
                 f"lectures={course.lecture_count} uncompleted={course.uncompleted_lecture_count}"
             )
-        if args.trace:
-            print(f"Trace: {args.trace}")
+        _print_trace_path(args)
     return 0
 
 
 def run_course_detail(args: argparse.Namespace) -> int:
-    load_dotenv(dotenv_path=Path.cwd() / ".env")
-    status = credential_status()
-    if not status.ok:
-        _print_missing_credentials(status, args.json)
+    credentials = _credentials_from_env(args)
+    if credentials is None:
         return 2
 
     http = HttpClient()
-    service = SsuLectureService(http=http)
-    result = service.get_course_detail(
-        os.environ["SSU_USERNAME"],
-        os.environ["SSU_PASSWORD"],
-        course_id=args.course_id,
-        course_name=args.course_name,
-    )
-    if args.trace:
-        args.trace.parent.mkdir(parents=True, exist_ok=True)
-        args.trace.write_text(http.trace.to_json(), encoding="utf-8")
+    result = SsuLectureService(http=http).get_course_detail(*credentials, course_id=args.course_id, course_name=args.course_name)
+    _write_trace(args, http)
     if not result.ok or result.course is None:
         payload = {"ok": False, "error_code": result.error_code, "course": None, "lectures": []}
         if args.json:
-            print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+            _print_json(payload)
         else:
             print(f"Course detail failed: {result.error_code}")
         return 1
@@ -241,10 +250,10 @@ def run_course_detail(args: argparse.Namespace) -> int:
         "course": result.course.model_dump(),
         "lecture_count": len(result.lectures),
         "lectures": [lecture.model_dump() for lecture in result.lectures],
-        "trace": str(args.trace) if args.trace else None,
+        "trace": _trace_field(args),
     }
     if args.json:
-        print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+        _print_json(payload)
     else:
         print(f"Course: {result.course.id} {result.course.name}")
         print(f"Lectures: {len(result.lectures)}")
@@ -253,33 +262,27 @@ def run_course_detail(args: argparse.Namespace) -> int:
                 f"- module={lecture.module_name} module_item_id={lecture.module_item_id} "
                 f"completed={lecture.completed} title={lecture.title}"
             )
-        if args.trace:
-            print(f"Trace: {args.trace}")
+        _print_trace_path(args)
     return 0
 
 
+def _print_login_failure(args: argparse.Namespace, error_code: str | None) -> int:
+    if args.json:
+        _print_json({"ok": False, "error_code": error_code})
+    else:
+        print(f"Login failed: {error_code}")
+    return 1
+
+
 def run_resolve_media(args: argparse.Namespace) -> int:
-    load_dotenv(dotenv_path=Path.cwd() / ".env")
-    status = credential_status()
-    if not status.ok:
-        _print_missing_credentials(status, args.json)
+    credentials = _credentials_from_env(args)
+    if credentials is None:
         return 2
 
     http = HttpClient()
-    service = SsuLectureService(http=http)
-    result = service.resolve_media(
-        os.environ["SSU_USERNAME"],
-        os.environ["SSU_PASSWORD"],
-        course_id=args.course_id,
-        module_item_id=args.module_item_id,
-    )
+    result = SsuLectureService(http=http).resolve_media(*credentials, course_id=args.course_id, module_item_id=args.module_item_id)
     if not result.ok:
-        payload = {"ok": False, "error_code": result.error_code}
-        if args.json:
-            print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
-        else:
-            print(f"Login failed: {result.error_code}")
-        return 1
+        return _print_login_failure(args, result.error_code)
     payload = {
         "ok": True,
         "error_code": None,
@@ -296,42 +299,29 @@ def run_resolve_media(args: argparse.Namespace) -> int:
         "head_location": result.head_location,
         "head_content_type": result.head_content_type,
         "head_content_length": result.head_content_length,
-        "trace": str(args.trace) if args.trace else None,
+        "trace": _trace_field(args),
     }
-    if args.trace:
-        args.trace.parent.mkdir(parents=True, exist_ok=True)
-        args.trace.write_text(http.trace.to_json(), encoding="utf-8")
+    _write_trace(args, http)
     if args.json:
-        print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+        _print_json(payload)
     else:
         print(f"Title: {payload['title']}")
         print(f"Content: {payload['content_id']} ({payload['content_type']}, {payload['duration']}s)")
         print(f"Download size: {payload['download_size']}")
         print(f"HEAD: {payload['head_status']} {payload['head_content_type']} {payload['head_content_length']}")
-        if args.trace:
-            print(f"Trace: {args.trace}")
+        _print_trace_path(args)
     return 0
 
 
 def run_download(args: argparse.Namespace) -> int:
-    load_dotenv(dotenv_path=Path.cwd() / ".env")
-    status = credential_status()
-    if not status.ok:
-        _print_missing_credentials(status, args.json)
+    credentials = _credentials_from_env(args)
+    if credentials is None:
         return 2
 
     http = HttpClient()
-    progress: list[dict[str, object]] = []
-
-    def on_progress(event: dict[str, object]) -> None:
-        progress.append(event)
-        if not args.json:
-            print(format_progress_event(event))
-
-    service = SsuLectureService(http=http)
-    result = service.download_lecture(
-        os.environ["SSU_USERNAME"],
-        os.environ["SSU_PASSWORD"],
+    progress, on_progress = _progress_printer(args)
+    result = SsuLectureService(http=http).download_lecture(
+        *credentials,
         course_id=args.course_id,
         module_item_id=args.module_item_id,
         course_name=args.course_name,
@@ -340,17 +330,9 @@ def run_download(args: argparse.Namespace) -> int:
         on_progress=on_progress,
     )
     if not result.ok:
-        payload = {"ok": False, "error_code": result.error_code}
-        if args.json:
-            print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
-        else:
-            print(f"Login failed: {result.error_code}")
-        return 1
+        return _print_login_failure(args, result.error_code)
 
-    if args.trace:
-        args.trace.parent.mkdir(parents=True, exist_ok=True)
-        args.trace.write_text(http.trace.to_json(), encoding="utf-8")
-
+    _write_trace(args, http)
     payload = {
         "ok": True,
         "error_code": None,
@@ -366,46 +348,36 @@ def run_download(args: argparse.Namespace) -> int:
         "output_path": result.output_path,
         "file_size": result.file_size,
         "progress": progress,
-        "trace": str(args.trace) if args.trace else None,
+        "trace": _trace_field(args),
     }
     if args.json:
-        print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+        _print_json(payload)
     else:
         print("Download planned" if args.dry_run else "Download complete")
         print(f"Title: {payload['title']}")
         print(f"Output: {result.output_path}")
         if result.file_size is not None:
             print(f"File size: {result.file_size}")
-        if args.trace:
-            print(f"Trace: {args.trace}")
+        _print_trace_path(args)
     return 0
 
 
 def run_batch_download(args: argparse.Namespace) -> int:
-    load_dotenv(dotenv_path=Path.cwd() / ".env")
-    status = credential_status()
-    if not status.ok:
-        _print_missing_credentials(status, args.json)
+    credentials = _credentials_from_env(args)
+    if credentials is None:
         return 2
     if not args.uncompleted and not args.include_completed and not args.module_item_ids:
         message = "batch-download needs --module-item-id, --uncompleted, or --include-completed"
         if args.json:
-            print(json.dumps({"ok": False, "error_code": "missing_batch_selection", "message": message}, ensure_ascii=False, sort_keys=True))
+            _print_json({"ok": False, "error_code": "missing_batch_selection", "message": message})
         else:
             print(message)
         return 2
 
     http = HttpClient()
-    progress: list[dict[str, object]] = []
-    def on_progress(event: dict[str, object]) -> None:
-        progress.append(event)
-        if not args.json:
-            print(format_progress_event(event))
-
-    service = SsuLectureService(http=http)
-    result = service.batch_download_lectures(
-        os.environ["SSU_USERNAME"],
-        os.environ["SSU_PASSWORD"],
+    progress, on_progress = _progress_printer(args)
+    result = SsuLectureService(http=http).batch_download_lectures(
+        *credentials,
         course_id=args.course_id,
         course_name=args.course_name,
         output_dir=args.output_dir,
@@ -414,32 +386,17 @@ def run_batch_download(args: argparse.Namespace) -> int:
         include_completed=args.include_completed,
         on_progress=on_progress,
     )
-    if args.trace:
-        args.trace.parent.mkdir(parents=True, exist_ok=True)
-        args.trace.write_text(http.trace.to_json(), encoding="utf-8")
+    _write_trace(args, http)
 
-    payload = {
-        "ok": result.ok,
-        "error_code": result.error_code,
-        "dry_run": result.dry_run,
-        "course_id": result.course_id,
-        "course_name": result.course_name,
-        "total_count": result.total_count,
-        "success_count": result.success_count,
-        "failure_count": result.failure_count,
-        "items": [asdict(item) for item in result.items],
-        "progress": progress,
-        "trace": str(args.trace) if args.trace else None,
-    }
+    payload = batch_payload(result, progress) | {"trace": _trace_field(args)}
     if args.json:
-        print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+        _print_json(payload)
     else:
         print("Batch download planned" if args.dry_run else "Batch download complete")
         print(f"Total: {result.total_count} success={result.success_count} failed={result.failure_count}")
         for item in result.items:
             print(f"- {'ok' if item.ok else 'failed'} module_item_id={item.module_item_id} title={item.title} output={item.output_path}")
-        if args.trace:
-            print(f"Trace: {args.trace}")
+        _print_trace_path(args)
     return 0 if result.ok else 1
 
 
@@ -462,7 +419,7 @@ def describe_failure(exc: BaseException) -> tuple[str, str]:
 def report_failure(exc: BaseException, *, as_json: bool) -> int:
     error_code, message = describe_failure(exc)
     if as_json:
-        print(json.dumps({"ok": False, "error_code": error_code, "message": message}, ensure_ascii=False, sort_keys=True))
+        _print_json({"ok": False, "error_code": error_code, "message": message})
     else:
         print(f"Error: {error_code}: {message}" if message else f"Error: {error_code}", file=sys.stderr)
     return 1

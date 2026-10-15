@@ -1,11 +1,9 @@
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 from typing import Any
 
 from ssu_lecture_downloader.errors import LoginFlowError
-from ssu_lecture_downloader.postprocess_media import AudioExtractionRequest, AudioExtractionResult, extract_audio, ffmpeg_install_hint, plan_audio_output_path
 
 
 @dataclass(frozen=True)
@@ -50,14 +48,6 @@ def extract_lti_launch_form(html: str) -> LtiLaunchForm:
         if isinstance(name, str) and name:
             fields[name] = input_el.get("value", "")
     return LtiLaunchForm(action=action, fields=fields)
-
-
-def extract_mp4_urls(text: str) -> list[str]:
-    urls: list[str] = []
-    for match in re.findall(r"https?://[^\"'<>\s]+?\.mp4", text):
-        if match not in urls:
-            urls.append(match)
-    return urls
 
 
 def parse_attendance_item_media(payload: dict[str, Any]) -> AttendanceItemMedia:

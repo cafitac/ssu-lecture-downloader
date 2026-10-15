@@ -603,7 +603,7 @@ def test_service_batch_downloads_files_in_parallel_with_per_file_progress(tmp_pa
     active = 0
     max_active = 0
 
-    def fake_resolve(*, course_id, module_item_id):
+    def fake_resolve(client, *, course_id, module_item_id):
         return _ResolvedMediaInternal(
             result=ResolvedMediaResult(
                 ok=True,
@@ -647,7 +647,7 @@ def test_service_batch_downloads_files_in_parallel_with_per_file_progress(tmp_pa
             with lock:
                 active -= 1
 
-    monkeypatch.setattr(service, '_resolve_media_authenticated', fake_resolve)
+    monkeypatch.setattr(service, '_resolve_media_with', fake_resolve)
     monkeypatch.setattr(service_mod, 'download_to_plan', fake_download_to_plan)
 
     result = service.batch_download_lectures(
@@ -942,7 +942,7 @@ def test_expired_signed_media_url_is_resolved_again_exactly_once(tmp_path: Path,
     resolve_calls = []
     download_urls = []
 
-    def fake_resolve(*, course_id, module_item_id):
+    def fake_resolve(*, course_id, module_item_id, refresh=False):
         resolve_calls.append(module_item_id)
         signature = 'old' if len(resolve_calls) == 1 else 'new'
         return fake_resolved(module_item_id, raw_url=f'https://ssu-toast.commonscdn.com/video.mp4?sig={signature}')
@@ -976,7 +976,7 @@ def test_signed_media_url_failure_is_not_retried_a_second_time(tmp_path: Path, m
         attempts.append(download_url)
         raise make_http_error(403, download_url)
 
-    monkeypatch.setattr(service, '_resolve_media_authenticated', lambda *, course_id, module_item_id: fake_resolved(module_item_id))
+    monkeypatch.setattr(service, '_resolve_media_authenticated', lambda *, course_id, module_item_id, refresh=False: fake_resolved(module_item_id))
     monkeypatch.setattr(service_mod, 'download_to_plan', fake_download)
 
     with pytest.raises(curl_exceptions.HTTPError):
@@ -998,7 +998,7 @@ def test_downloads_use_a_private_http_client_that_is_closed_afterwards(tmp_path:
         plan.file_path.write_bytes(b'1234')
         return plan.file_path
 
-    monkeypatch.setattr(service, '_resolve_media_authenticated', lambda *, course_id, module_item_id: fake_resolved(module_item_id))
+    monkeypatch.setattr(service, '_resolve_media_authenticated', lambda *, course_id, module_item_id, refresh=False: fake_resolved(module_item_id))
     monkeypatch.setattr(service_mod, 'download_to_plan', fake_download)
 
     service.download_lecture('user', 'password', course_id=42, module_item_id=111, course_name='과목', output_dir=tmp_path, dry_run=False)

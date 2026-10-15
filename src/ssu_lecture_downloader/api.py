@@ -6,18 +6,22 @@ security middleware, JSON error handlers, shared state and the routers.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from ssu_lecture_downloader.api_errors import UnhandledErrorMiddleware, background_job_error_code
+from ssu_lecture_downloader.api_errors import (
+    UnhandledErrorMiddleware,
+    background_job_error_code,
+)
 from ssu_lecture_downloader.app_context import AppContext, default_download_dir
 from ssu_lecture_downloader.credentials import CredentialStore, default_credential_store
-from ssu_lecture_downloader.jobs import JobRunner, append_compacted_progress as _append_compacted_progress
+from ssu_lecture_downloader.jobs import JobRunner
 from ssu_lecture_downloader.routers import credentials as credentials_routes
 from ssu_lecture_downloader.routers import download as download_routes
 from ssu_lecture_downloader.routers import health as health_routes
@@ -34,7 +38,7 @@ from ssu_lecture_downloader.security import (
 
 ServiceFactory = Callable[[], Any]
 
-__all__ = ["create_app", "app", "_append_compacted_progress"]
+__all__ = ["app", "create_app"]
 
 
 def _json_error_body(detail: Any, status_code: int) -> dict[str, Any]:
@@ -79,7 +83,8 @@ def create_app(
         runner=JobRunner(error_code_for=lambda exc: background_job_error_code(exc, service)),
     )
     for module in (health_routes, credentials_routes, download_routes, media_routes, watch_routes):
-        app.include_router(module.build_router(ctx))
+        # The routes are already built; attach them as-is instead of having FastAPI rebuild each one.
+        app.router.routes.extend(module.build_router(ctx).routes)
     return app
 
 

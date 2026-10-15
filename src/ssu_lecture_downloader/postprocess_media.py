@@ -10,14 +10,15 @@ import threading
 import xml.etree.ElementTree as ET
 import zipfile
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterator, Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict
 
+from ssu_lecture_downloader.progress import emit_progress
 
 AudioFormat = Literal['wav', 'm4a', 'mp3']
 SUPPORTED_VIDEO_EXTENSIONS = {'.mp4', '.mov', '.m4v', '.mkv', '.webm'}
@@ -63,45 +64,35 @@ def ffmpeg_install_hint() -> str:
     return '앱 패키지에 포함된 ffmpeg를 찾지 못했습니다. 개발 모드에서는 uv sync 후 다시 실행하고, 배포 앱에서는 앱을 재설치해 주세요.'
 
 
-def bundled_or_system_ffmpeg() -> str | None:
+def _locate_ffmpeg() -> tuple[str | None, str]:
+    """(path, source) of the ffmpeg to use; source is 'system', 'bundled' or 'missing'."""
     system_ffmpeg = shutil.which('ffmpeg')
     if system_ffmpeg:
-        return system_ffmpeg
+        return system_ffmpeg, 'system'
     try:
         from imageio_ffmpeg import get_ffmpeg_exe
-    except Exception:
-        return None
-    try:
+
         bundled_ffmpeg = get_ffmpeg_exe()
     except Exception:
-        return None
-    return bundled_ffmpeg if Path(bundled_ffmpeg).exists() else None
+        return None, 'missing'
+    if bundled_ffmpeg and Path(bundled_ffmpeg).exists():
+        return bundled_ffmpeg, 'bundled'
+    return None, 'missing'
+
+
+def bundled_or_system_ffmpeg() -> str | None:
+    return _locate_ffmpeg()[0]
 
 
 def ffmpeg_status() -> dict[str, object]:
-    system_ffmpeg = shutil.which('ffmpeg')
-    if system_ffmpeg:
-        return {
-            'name': 'ffmpeg',
-            'installed': True,
-            'available': True,
-            'source': 'system',
-            'path': system_ffmpeg,
-            'install_hint': None,
-        }
-    try:
-        from imageio_ffmpeg import get_ffmpeg_exe
-
-        bundled_ffmpeg = get_ffmpeg_exe()
-    except Exception:
-        bundled_ffmpeg = None
-    available = bool(bundled_ffmpeg and Path(bundled_ffmpeg).exists())
+    path, source = _locate_ffmpeg()
+    available = path is not None
     return {
         'name': 'ffmpeg',
         'installed': available,
         'available': available,
-        'source': 'bundled' if available else 'missing',
-        'path': bundled_ffmpeg if available else None,
+        'source': source,
+        'path': path,
         'install_hint': None if available else ffmpeg_install_hint(),
     }
 
@@ -270,11 +261,6 @@ def _parse_ffmpeg_out_time(value: str) -> int | None:
     return int(seconds * 1000)
 
 
-def _emit_progress(on_progress: Callable[[dict[str, Any]], None] | None, event: dict[str, Any]) -> None:
-    if on_progress:
-        on_progress(event)
-
-
 def _run_ffmpeg_with_progress(
     command: list[str],
     *,
@@ -302,7 +288,7 @@ def _run_ffmpeg_with_progress(
         percent = min(99, max(0, round((state['latest_ms'] / duration_ms) * 100))) if duration_ms else None
         if percent == state['last_percent']:
             return
-        _emit_progress(
+        emit_progress(
             on_progress,
             {
                 'stage': 'audio_progress',
@@ -316,7 +302,7 @@ def _run_ffmpeg_with_progress(
         state['last_percent'] = percent
 
     _run_ffmpeg(command, on_stdout_line=handle_line, should_cancel=should_cancel)
-    _emit_progress(
+    emit_progress(
         on_progress,
         {
             'stage': 'audio_progress',
@@ -456,7 +442,7 @@ def _extract_inner_video_if_available(
             candidate_path.unlink(missing_ok=True)
             continue
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        _emit_progress(
+        emit_progress(
             on_progress,
             {
                 'stage': 'video_inner_media_extract_started',
@@ -468,7 +454,7 @@ def _extract_inner_video_if_available(
         _remux_inner_video(ffmpeg, candidate_path, output_path, should_cancel)
         decode_warning = _decode_check_stderr(ffmpeg, output_path, should_cancel)
         if decode_warning:
-            _emit_progress(
+            emit_progress(
                 on_progress,
                 {
                     'stage': 'video_inner_media_normalize_started',
@@ -480,7 +466,7 @@ def _extract_inner_video_if_available(
             source_kind = 'readystream_inner_video_normalized'
         else:
             source_kind = 'readystream_inner_video'
-        _emit_progress(
+        emit_progress(
             on_progress,
             {
                 'stage': 'video_inner_media_extract_done',
@@ -806,9 +792,9 @@ def reconstruct_ready_stream_video(
 
             source = _prepare_slideshow_source(archive, ffprobe=ffprobe, temp_path=temp_path)
             output_path.parent.mkdir(parents=True, exist_ok=True)
-            _emit_progress(on_progress, {'stage': 'video_reconstruction_started', 'input_path': str(input_path), 'output_path': str(output_path), 'slide_count': source.slide_count, 'duration_ms': int(source.total_duration * 1000)})
+            emit_progress(on_progress, {'stage': 'video_reconstruction_started', 'input_path': str(input_path), 'output_path': str(output_path), 'slide_count': source.slide_count, 'duration_ms': int(source.total_duration * 1000)})
             _encode_slideshow(ffmpeg, source, output_path, should_cancel)
-            _emit_progress(on_progress, {'stage': 'video_reconstruction_done', 'input_path': str(input_path), 'output_path': str(output_path), 'file_size': output_path.stat().st_size, 'progress_percent': 100})
+            emit_progress(on_progress, {'stage': 'video_reconstruction_done', 'input_path': str(input_path), 'output_path': str(output_path), 'file_size': output_path.stat().st_size, 'progress_percent': 100})
     except _ReconstructionError as exc:
         return failure(exc.code, exc.message)
     except MediaCancelled:
@@ -857,7 +843,7 @@ def extract_audio(
         with _extractable_media_input(input_path) as ffmpeg_input_path:
             if on_progress:
                 duration_ms = _media_duration_ms(ffmpeg, ffmpeg_input_path)
-                _emit_progress(on_progress, {'stage': 'audio_probe_done', 'input_path': str(input_path), 'duration_ms': duration_ms})
+                emit_progress(on_progress, {'stage': 'audio_probe_done', 'input_path': str(input_path), 'duration_ms': duration_ms})
                 command = _ffmpeg_progress_command(ffmpeg, ffmpeg_input_path, partial_path, request.format)
                 _run_ffmpeg_with_progress(command, input_path=input_path, output_path=output_path, duration_ms=duration_ms, on_progress=on_progress, should_cancel=should_cancel)
             else:

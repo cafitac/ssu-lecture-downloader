@@ -1,10 +1,8 @@
-"""Request models, request validation and response payload builders for the HTTP API."""
+"""Request models and request validation for the HTTP API."""
 
 from __future__ import annotations
 
-from dataclasses import asdict
 from pathlib import Path
-from typing import Any
 
 from fastapi import HTTPException
 from pydantic import BaseModel
@@ -24,8 +22,8 @@ class DownloadPlanRequest(BaseModel):
     conflict_strategy: str = "rename"
 
 
-class DownloadRequest(DownloadPlanRequest):
-    pass
+# Starting a download takes the same fields as planning one.
+DownloadRequest = DownloadPlanRequest
 
 
 class BatchDownloadRequest(BaseModel):
@@ -92,48 +90,3 @@ def validate_artifact_request(request: ArtifactDownloadRequest) -> list[str]:
     if request.audio_format not in AUDIO_FORMATS:
         raise bad_request("invalid_audio_format")
     return outputs
-
-
-def download_payload(result, progress: list[dict[str, Any]]) -> dict[str, Any]:
-    return {**result.__dict__, "progress": progress}
-
-
-def native_download_payload(plan_result) -> dict[str, Any]:
-    if isinstance(plan_result, dict):
-        result = plan_result["result"]
-        native_download = plan_result.get("native_download")
-    else:
-        result = plan_result.result
-        native_download = plan_result.native_download
-    payload = download_payload(result, [])
-    payload["native_download"] = asdict(native_download) if native_download is not None and not isinstance(native_download, dict) else native_download
-    return payload
-
-
-def viewer_plan_payload(result) -> dict[str, Any]:
-    return result if isinstance(result, dict) else asdict(result)
-
-
-def batch_payload(result, progress: list[dict[str, Any]]) -> dict[str, Any]:
-    return {
-        "ok": result.ok,
-        "error_code": result.error_code,
-        "dry_run": result.dry_run,
-        "course_id": result.course_id,
-        "course_name": result.course_name,
-        "total_count": result.total_count,
-        "success_count": result.success_count,
-        "failure_count": result.failure_count,
-        "items": [asdict(item) for item in result.items],
-        "progress": progress,
-    }
-
-
-def artifact_payload(download: dict[str, Any], artifacts: list[dict[str, Any]], progress: list[dict[str, Any]]) -> dict[str, Any]:
-    return {
-        "ok": True,
-        "error_code": None,
-        "download": download,
-        "artifacts": artifacts,
-        "progress": progress,
-    }

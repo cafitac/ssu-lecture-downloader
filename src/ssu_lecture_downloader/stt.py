@@ -11,6 +11,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict
 
+from ssu_lecture_downloader.progress import emit_progress
 
 STTProvider = Literal['fake', 'faster_whisper', 'whisper_cpp']
 DEFAULT_STT_LANGUAGE = 'ko'
@@ -113,10 +114,6 @@ def transcript_output_paths(audio_path: Path, output_dir: Path | None) -> tuple[
     )
 
 
-def _transcript_paths(audio_path: Path, output_dir: Path | None) -> tuple[Path, Path, Path]:
-    return transcript_output_paths(audio_path, output_dir)
-
-
 def write_transcript_files(
     *,
     audio_path: Path,
@@ -128,7 +125,7 @@ def write_transcript_files(
     overwrite: bool,
 ) -> TranscriptionResult:
     audio_path = audio_path.expanduser()
-    text_path, md_path, json_path = _transcript_paths(audio_path, output_dir)
+    text_path, md_path, json_path = transcript_output_paths(audio_path, output_dir)
     existing = [path for path in (text_path, md_path, json_path) if path.exists()]
     if existing and not overwrite:
         return TranscriptionResult(ok=False, audio_path=audio_path, text_path=text_path, md_path=md_path, json_path=json_path, segments=segments, error_code='transcript_exists', message='이미 생성된 STT 파일이 있습니다.')
@@ -174,11 +171,6 @@ def _fake_segments(audio_path: Path) -> list[TranscriptSegment]:
     return [TranscriptSegment(start=0, end=1, text=f'{audio_path.stem} 음성 파일의 STT 테스트 결과입니다.')]
 
 
-def _emit_progress(on_progress: Callable[[dict[str, Any]], None] | None, event: dict[str, Any]) -> None:
-    if on_progress:
-        on_progress(event)
-
-
 class TranscriptionCancelled(Exception):
     """Raised inside the segment loop when the caller asked to stop."""
 
@@ -214,7 +206,7 @@ def _faster_whisper_segments(
         import faster_whisper  # noqa: F401 - fail early with a stable error code
     except Exception as exc:  # pragma: no cover - guarded by provider check in normal path
         raise RuntimeError('faster_whisper_import_failed') from exc
-    _emit_progress(on_progress, {'stage': 'transcript_model_loading', 'provider': request.provider, 'model': request.model, 'audio_path': str(request.audio_path)})
+    emit_progress(on_progress, {'stage': 'transcript_model_loading', 'provider': request.provider, 'model': request.model, 'audio_path': str(request.audio_path)})
     model = _load_whisper_model(request.model, 'auto', 'auto')
     if should_cancel and should_cancel():
         raise TranscriptionCancelled('transcription cancelled')
@@ -228,7 +220,7 @@ def _faster_whisper_segments(
         temperature=0.0,
     )
     duration = float(getattr(_info, 'duration', 0) or 0)
-    _emit_progress(on_progress, {'stage': 'transcript_started', 'provider': request.provider, 'model': request.model, 'audio_path': str(request.audio_path), 'duration': duration})
+    emit_progress(on_progress, {'stage': 'transcript_started', 'provider': request.provider, 'model': request.model, 'audio_path': str(request.audio_path), 'duration': duration})
     collected: list[TranscriptSegment] = []
     last_percent = -1
     for segment in segments:
@@ -240,7 +232,7 @@ def _faster_whisper_segments(
         if duration > 0:
             percent = min(99, max(0, round((item.end / duration) * 100)))
         if percent is None or percent != last_percent:
-            _emit_progress(
+            emit_progress(
                 on_progress,
                 {
                     'stage': 'transcript_progress',
@@ -255,7 +247,7 @@ def _faster_whisper_segments(
             )
             if percent is not None:
                 last_percent = percent
-    _emit_progress(on_progress, {'stage': 'transcript_progress', 'provider': request.provider, 'model': request.model, 'audio_path': str(request.audio_path), 'segment_count': len(collected), 'duration': duration, 'progress_percent': 100})
+    emit_progress(on_progress, {'stage': 'transcript_progress', 'provider': request.provider, 'model': request.model, 'audio_path': str(request.audio_path), 'segment_count': len(collected), 'duration': duration, 'progress_percent': 100})
     return collected
 
 
@@ -274,9 +266,9 @@ def transcribe_audio(
         return TranscriptionResult(ok=False, audio_path=audio_path, error_code='stt_provider_not_installed', message='STT 엔진이 설치되어 있지 않습니다.', install_hint=status.install_hint)
     try:
         if request.provider == 'fake':
-            _emit_progress(on_progress, {'stage': 'transcript_started', 'provider': request.provider, 'model': request.model, 'audio_path': str(audio_path), 'duration': 1})
+            emit_progress(on_progress, {'stage': 'transcript_started', 'provider': request.provider, 'model': request.model, 'audio_path': str(audio_path), 'duration': 1})
             segments = _fake_segments(audio_path)
-            _emit_progress(on_progress, {'stage': 'transcript_progress', 'provider': request.provider, 'model': request.model, 'audio_path': str(audio_path), 'segment_count': len(segments), 'duration': 1, 'progress_percent': 100})
+            emit_progress(on_progress, {'stage': 'transcript_progress', 'provider': request.provider, 'model': request.model, 'audio_path': str(audio_path), 'segment_count': len(segments), 'duration': 1, 'progress_percent': 100})
         elif request.provider == 'faster_whisper':
             segments = _faster_whisper_segments(request, on_progress=on_progress, should_cancel=should_cancel)
         else:

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict
 
 
 class LectureItem(BaseModel):
@@ -31,6 +31,7 @@ class CourseContentItem(BaseModel):
     content_type: str | None = None
     inner_content_type: str | None = None
     kind: str
+    content_id: str | None = None
     completed: bool | None = None
     attendance_status: str | None = None
     duration: int | float | None = None
@@ -61,7 +62,7 @@ class CourseSummary(BaseModel):
         course: dict[str, Any],
         modules: list[dict[str, Any]],
         lectures: list[LectureItem],
-    ) -> "CourseSummary":
+    ) -> CourseSummary:
         course_id = course.get("id") or course.get("course_id")
         return cls(
             id=course_id,
@@ -70,11 +71,3 @@ class CourseSummary(BaseModel):
             lecture_count=len(lectures),
             uncompleted_lecture_count=sum(1 for lecture in lectures if not lecture.completed),
         )
-
-
-class CourseDetail(BaseModel):
-    model_config = ConfigDict(frozen=True)
-
-    course: CourseSummary
-    lectures: list[LectureItem]
-    content_items: list[CourseContentItem] = Field(default_factory=list)

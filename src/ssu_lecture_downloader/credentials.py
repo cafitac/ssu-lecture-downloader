@@ -72,10 +72,6 @@ class InMemoryCredentialStore:
         self._pair = None
 
 
-Runner = callable
-
-
-
 class MacOSKeychainCredentialStore:
     def __init__(self, *, service_name: str = "ssu-lecture-downloader", runner=None) -> None:
         self.service_name = service_name

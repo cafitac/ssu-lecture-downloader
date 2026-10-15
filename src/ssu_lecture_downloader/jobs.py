@@ -76,11 +76,11 @@ class JobOutcome:
     error_code: str | None = None
 
     @classmethod
-    def succeeded(cls, result: dict[str, Any] | None = None) -> "JobOutcome":
+    def succeeded(cls, result: dict[str, Any] | None = None) -> JobOutcome:
         return cls("succeeded", result=result)
 
     @classmethod
-    def failed(cls, error_code: str, result: dict[str, Any] | None = None) -> "JobOutcome":
+    def failed(cls, error_code: str, result: dict[str, Any] | None = None) -> JobOutcome:
         return cls("failed", result=result, error_code=error_code)
 
 
@@ -169,14 +169,6 @@ class JobRegistry:
     def get(self, job_id: str) -> Job | None:
         with self._lock:
             return self._jobs.get(job_id)
-
-    def __len__(self) -> int:
-        with self._lock:
-            return len(self._jobs)
-
-    def prune(self) -> None:
-        with self._lock:
-            self._prune_locked()
 
     def _prune_locked(self) -> None:
         """Drop finished jobs past the TTL or beyond the newest `max_finished`. Active jobs stay."""

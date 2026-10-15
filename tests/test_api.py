@@ -9,6 +9,7 @@ from ssu_lecture_downloader.credentials import CredentialPair
 from ssu_lecture_downloader.models import CourseContentItem, CourseSummary, LectureItem
 from ssu_lecture_downloader.service import BatchDownloadItemResult, BatchDownloadResult, CourseDetailResult, CourseDiscoveryResult, DownloadLectureResult, OfficialViewerBridgeCookie, OfficialViewerPlanResult, OfficialViewerSessionBridgeResult
 from ssu_lecture_downloader.login_flow import LoginDiscoveryResult
+from ssu_lecture_downloader.stt import STTProviderStatus
 from ssu_lecture_downloader.trace import NetworkTrace, TraceEntry
 
 
@@ -776,7 +777,7 @@ def test_audio_extraction_job_succeeds_with_output_path(tmp_path, monkeypatch):
 
 
 def test_stt_status_explains_how_to_install_whisper(monkeypatch):
-    monkeypatch.setattr('ssu_lecture_downloader.stt.check_stt_provider', lambda provider='faster_whisper': {'provider': provider, 'installed': False, 'available': False, 'install_hint': '앱 패키지에 포함된 faster-whisper를 찾지 못했습니다.'})
+    monkeypatch.setattr('ssu_lecture_downloader.stt.check_stt_provider', lambda provider='faster_whisper': STTProviderStatus(provider=provider, installed=False, available=False, install_hint='앱 패키지에 포함된 faster-whisper를 찾지 못했습니다.'))
     client = TestClient(create_app(service_factory=FakeService, credential_store=FakeCredentialStore()))
 
     response = client.get('/api/stt/providers/status')
@@ -788,7 +789,7 @@ def test_stt_status_explains_how_to_install_whisper(monkeypatch):
 
 def test_media_dependency_status_reports_ffmpeg_and_stt(monkeypatch):
     monkeypatch.setattr('ssu_lecture_downloader.postprocess_media.ffmpeg_status', lambda: {'name': 'ffmpeg', 'installed': True, 'available': True, 'source': 'bundled', 'path': '/app/ffmpeg', 'install_hint': None})
-    monkeypatch.setattr('ssu_lecture_downloader.stt.check_stt_provider', lambda provider='faster_whisper': {'provider': provider, 'installed': provider == 'faster_whisper', 'available': provider == 'faster_whisper', 'install_hint': None})
+    monkeypatch.setattr('ssu_lecture_downloader.stt.check_stt_provider', lambda provider='faster_whisper': STTProviderStatus(provider=provider, installed=provider == 'faster_whisper', available=provider == 'faster_whisper'))
     client = TestClient(create_app(service_factory=FakeService, credential_store=FakeCredentialStore()))
 
     response = client.get('/api/media/dependencies/status')
@@ -1006,3 +1007,84 @@ def test_append_compacted_progress_replaces_repeated_download_ticks():
     assert progress == [
         {'stage': 'download_progress', 'module_item_id': 1, 'output_path': '/tmp/a.mp4', 'bytes_written': 2048}
     ]
+
+
+def test_api_saving_the_same_credentials_again_keeps_the_service_session(tmp_path):
+    service = ClearableFakeService()
+    store = FakeCredentialStore()
+    client = TestClient(create_app(service_factory=lambda: service, default_output_dir=tmp_path, credential_store=store))
+    body = {'username': 'student-id', 'password': 'secret-password'}
+
+    assert client.post('/api/credentials', json=body).status_code == 200
+    assert client.post('/api/credentials', json=body).status_code == 200
+    assert service.clear_calls == 1
+    assert client.post('/api/credentials', json={**body, 'password': 'changed'}).status_code == 200
+    assert service.clear_calls == 2
+
+
+def test_api_refresh_flag_is_forwarded_only_when_requested(tmp_path):
+    seen = []
+
+    class RefreshAwareService(FakeService):
+        def list_terms(self, username, password, **kwargs):
+            seen.append(('terms', kwargs))
+            return super().list_terms(username, password)
+
+        def discover_courses(self, username, password, term_ids=None, **kwargs):
+            seen.append(('courses', kwargs))
+            return super().discover_courses(username, password, term_ids=term_ids)
+
+        def get_course_detail(self, username, password, *, course_id, course_name=None, **kwargs):
+            seen.append(('detail', kwargs))
+            return super().get_course_detail(username, password, course_id=course_id, course_name=course_name)
+
+    store = FakeCredentialStore(CredentialPair(username='student-id', password='secret-password'))
+    client = TestClient(create_app(service_factory=RefreshAwareService, default_output_dir=tmp_path, credential_store=store))
+
+    for path in ('/api/terms', '/api/courses', '/api/courses/44070'):
+        assert client.get(path).status_code == 200
+        assert client.get(path + '?refresh=true').status_code == 200
+
+    assert seen == [
+        ('terms', {}), ('terms', {'refresh': True}),
+        ('courses', {}), ('courses', {'refresh': True}),
+        ('detail', {}), ('detail', {'refresh': True}),
+    ]
+
+
+def test_course_detail_marks_lectures_that_are_already_on_disk(tmp_path):
+    store = FakeCredentialStore(CredentialPair(username='student-id', password='secret-password'))
+
+    class DetailService(FakeService):
+        def get_course_detail(self, username, password, *, course_id, course_name=None):
+            result = super().get_course_detail(username, password, course_id=course_id, course_name=course_name)
+            items = [item.model_copy(update={'content_id': cid}) for item, cid in zip(result.content_items, ['abc123', 'zzz999'])]
+            return CourseDetailResult(ok=True, error_code=None, course=result.course, lectures=result.lectures, content_items=items)
+
+    course_dir = tmp_path / 'UX방법론'
+    course_dir.mkdir()
+    (course_dir / '1주차 [abc123].mp4').write_bytes(b'1234')
+    (course_dir / '2주차 [zzz999].mp4.part').write_bytes(b'12')
+    client = TestClient(create_app(service_factory=DetailService, default_output_dir=tmp_path, credential_store=store))
+
+    items = client.get('/api/courses/44070', params={'course_name': 'UX방법론'}).json()['content_items']
+
+    assert items[0]['downloaded_path'] == str(course_dir / '1주차 [abc123].mp4')
+    assert items[1]['downloaded_path'] is None  # unfinished .part files do not count
+
+
+def test_polling_a_finished_job_never_touches_the_service(tmp_path):
+    store = FakeCredentialStore(CredentialPair(username='student-id', password='secret-password'))
+    service = FakeService()
+    client = TestClient(create_app(service_factory=lambda: service, default_output_dir=tmp_path, credential_store=store))
+    job = client.post('/api/download/jobs', json={'course_id': 44070, 'module_item_id': 3268578, 'course_name': 'UX방법론'}).json()
+    for _ in range(100):
+        if client.get(f"/api/download/jobs/{job['job_id']}").json()['status'] not in {'queued', 'running'}:
+            break
+        time.sleep(0.02)
+
+    for name in ('login', 'list_terms', 'discover_courses', 'get_course_detail', 'download_lecture', 'batch_download_lectures'):
+        setattr(service, name, lambda *a, _n=name, **k: (_ for _ in ()).throw(AssertionError(f'status polling called service.{_n}')))
+    polled = [client.get(f"/api/download/jobs/{job['job_id']}") for _ in range(5)]
+
+    assert all(response.status_code == 200 and response.json()['status'] == 'succeeded' for response in polled)

@@ -16,7 +16,7 @@ from ssu_lecture_downloader.errors import (
     NETWORK_TIMEOUT,
     LoginFlowError,
     classify_network_error,
-    is_lms_auth_failure,
+    is_session_lost,
 )
 
 logger = logging.getLogger("ssu_lecture_downloader.api")
@@ -89,16 +89,14 @@ def clear_service_cache(service: Any) -> None:
 
 
 def last_trace_entry(service: Any) -> dict[str, Any] | None:
-    http = getattr(service, "http", None)
-    trace = getattr(http, "trace", None)
-    to_dict = getattr(trace, "to_dict", None)
-    if not to_dict:
+    trace = getattr(getattr(service, "http", None), "trace", None)
+    last_entry = getattr(trace, "last_entry", None)
+    if not last_entry:
         return None
     try:
-        entries = to_dict().get("entries", [])
-    except Exception:
+        return last_entry()
+    except Exception:  # noqa: BLE001 - diagnostics must never mask the original error
         return None
-    return entries[-1] if entries else None
 
 
 def lms_http_error_detail(exc: Exception, service: Any) -> tuple[str, str, dict[str, Any]]:
@@ -151,15 +149,8 @@ def _log_unexpected(exc: BaseException) -> None:
     logger.error("unhandled %s at %s", type(exc).__name__, where)
 
 
-def _is_session_lost(exc: Exception) -> bool:
-    """LMS 401/403, or the LearningX lister noticing the xn_api_token cookie is gone."""
-    if is_lms_auth_failure(exc):
-        return True
-    return isinstance(exc, ValueError) and "xn_api_token" in str(exc)
-
-
 def service_exception_error(exc: Exception, service: Any) -> HTTPException:
-    if _is_session_lost(exc):
+    if is_session_lost(exc):
         clear_service_cache(service)
         return service_error("session_expired")
     if isinstance(exc, LoginFlowError):
@@ -181,7 +172,7 @@ def service_exception_error(exc: Exception, service: Any) -> HTTPException:
 
 def background_job_error_code(exc: Exception, service: Any) -> str:
     """error_code stored on a failed background job."""
-    if _is_session_lost(exc):
+    if is_session_lost(exc):
         clear_service_cache(service)
         return "session_expired"
     if isinstance(exc, LoginFlowError):

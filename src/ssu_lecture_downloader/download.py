@@ -7,6 +7,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
+from ssu_lecture_downloader.errors import response_status
+from ssu_lecture_downloader.progress import emit_progress
+
 
 class DownloadCancelled(Exception):
     """Raised when a caller requests cancellation during byte transfer."""
@@ -93,6 +96,28 @@ def plan_download_path(
     )
 
 
+def find_downloaded_files(output_dir: Path, course_name: str, content_ids: Iterable[str]) -> dict[str, str]:
+    """Already downloaded media per content id, found by the `[content_id]` in the file name.
+
+    Looks only into the course folder `plan_download_path` would use; unfinished `.part`
+    files do not count. Costs one directory listing, no LMS requests.
+    """
+    wanted = {content_id for content_id in content_ids if content_id}
+    if not wanted:
+        return {}
+    course_dir = output_dir / safe_filename(course_name, fallback='course')
+    found: dict[str, str] = {}
+    try:
+        entries = sorted(entry for entry in course_dir.iterdir() if entry.is_file() and entry.suffix != '.part')
+    except OSError:
+        return {}
+    for entry in entries:
+        for content_id in wanted:
+            if content_id not in found and f'[{content_id}]' in entry.name:
+                found[content_id] = str(entry)
+    return found
+
+
 def _response_chunks(response: Any, chunk_size: int) -> Iterable[bytes]:
     if hasattr(response, 'iter_content'):
         yield from response.iter_content(chunk_size=chunk_size)
@@ -132,11 +157,6 @@ def _is_identity_encoded(response: Any) -> bool:
     return encoding in {'', 'identity'}
 
 
-def _emit(on_progress: Callable[[dict[str, Any]], None] | None, event: dict[str, Any]) -> None:
-    if on_progress:
-        on_progress(event)
-
-
 def _close_response(response: Any) -> None:
     close = getattr(response, 'close', None)
     if callable(close):
@@ -146,13 +166,8 @@ def _close_response(response: Any) -> None:
             pass
 
 
-def _status_of(exc: BaseException) -> int | None:
-    status = getattr(getattr(exc, 'response', None), 'status_code', None)
-    return status if isinstance(status, int) else None
-
-
 def _is_retryable(exc: BaseException) -> bool:
-    status = _status_of(exc)
+    status = response_status(exc)
     if status is not None and 400 <= status < 500:
         return status in RETRYABLE_CLIENT_ERROR_STATUSES
     return True
@@ -203,7 +218,7 @@ def download_to_plan(
     def finalize() -> Path:
         part_path.replace(plan.file_path)
         size = plan.file_path.stat().st_size
-        _emit(on_progress, {'stage': 'download_done', 'attempt': attempt, 'bytes_written': size, 'total_bytes': size if total_bytes is None else total_bytes, 'output_path': str(plan.file_path)})
+        emit_progress(on_progress, {'stage': 'download_done', 'attempt': attempt, 'bytes_written': size, 'total_bytes': size if total_bytes is None else total_bytes, 'output_path': str(plan.file_path)})
         return plan.file_path
 
     for attempt in range(1, attempts + 1):
@@ -232,7 +247,7 @@ def download_to_plan(
             total_bytes = resume_from + response_total if response_total is not None else None
             bytes_written = resume_from
             verify_length = total_bytes is not None and _is_identity_encoded(response)
-            _emit(
+            emit_progress(
                 on_progress,
                 {
                     'stage': 'download_started',
@@ -254,7 +269,7 @@ def download_to_plan(
                     streamed_any = True
                     handle.write(chunk)
                     bytes_written += len(chunk)
-                    _emit(
+                    emit_progress(
                         on_progress,
                         {
                             'stage': 'download_progress',
@@ -274,7 +289,7 @@ def download_to_plan(
             last_error = exc
             partial_size = part_path.stat().st_size if part_path.exists() else 0
             if isinstance(exc, DownloadCancelled):
-                _emit(
+                emit_progress(
                     on_progress,
                     {
                         'stage': 'download_cancelled',
@@ -288,7 +303,7 @@ def download_to_plan(
             if not isinstance(exc, Exception):
                 raise
             if attempt < attempts and _is_retryable(exc):
-                _emit(
+                emit_progress(
                     on_progress,
                     {
                         'stage': 'download_retrying',
@@ -303,7 +318,7 @@ def download_to_plan(
                 if not streamed_any:
                     _backoff(attempt, should_cancel)
                 continue
-            _emit(
+            emit_progress(
                 on_progress,
                 {
                     'stage': 'download_failed',

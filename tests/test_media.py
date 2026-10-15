@@ -12,8 +12,15 @@ import time
 import pytest
 
 from ssu_lecture_downloader import postprocess_media
-from ssu_lecture_downloader.media import AudioExtractionRequest, extract_audio, plan_audio_output_path
-from ssu_lecture_downloader.postprocess_media import MediaCancelled, _run_ffmpeg, ensure_playable_mp4, reconstruct_ready_stream_video
+from ssu_lecture_downloader.postprocess_media import (
+    AudioExtractionRequest,
+    MediaCancelled,
+    _run_ffmpeg,
+    ensure_playable_mp4,
+    extract_audio,
+    plan_audio_output_path,
+    reconstruct_ready_stream_video,
+)
 
 
 def input_of(command):
