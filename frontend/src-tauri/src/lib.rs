@@ -1,5 +1,7 @@
 mod backend;
+mod launch_agent;
 mod native_download;
+mod reminders;
 mod viewer;
 
 use std::ffi::CStr;
@@ -9,6 +11,91 @@ use std::sync::Arc;
 use tauri::Manager;
 
 use backend::BackendManager;
+use reminders::ReminderService;
+
+#[derive(serde::Serialize)]
+struct RemindersStatus {
+    enabled: bool,
+    agent_installed: bool,
+    last_saved_at: Option<i64>,
+    /// The background (LaunchAgent) part works only in a packaged release app.
+    supported: bool,
+}
+
+fn reminders_status_for(service: &ReminderService) -> RemindersStatus {
+    RemindersStatus {
+        enabled: service.enabled(),
+        agent_installed: real_user_home_dir()
+            .map(|home| launch_agent::is_installed(&home))
+            .unwrap_or(false),
+        last_saved_at: reminders::read_cache(service.dir()).map(|cache| cache.saved_at),
+        supported: launch_agent::supported(),
+    }
+}
+
+/// Installs (or refreshes) the LaunchAgent for the running executable.
+fn install_reminder_agent() -> Result<(), String> {
+    let home = real_user_home_dir().ok_or("홈 폴더를 찾을 수 없습니다.")?;
+    let exe = std::env::current_exe().map_err(|error| error.to_string())?;
+    launch_agent::install(
+        &home,
+        &exe,
+        unsafe { libc::getuid() },
+        &launch_agent::SystemLaunchctl,
+    )
+}
+
+fn remove_reminder_agent() -> Result<(), String> {
+    let home = real_user_home_dir().ok_or("홈 폴더를 찾을 수 없습니다.")?;
+    launch_agent::uninstall(
+        &home,
+        unsafe { libc::getuid() },
+        &launch_agent::SystemLaunchctl,
+    )
+}
+
+#[tauri::command]
+fn deadline_cache_write(
+    service: tauri::State<'_, Arc<ReminderService>>,
+    items: Vec<reminders::CachedItem>,
+) -> Result<(), String> {
+    reminders::write_cache(service.dir(), items, reminders::unix_now())?;
+    service.check_soon();
+    Ok(())
+}
+
+#[tauri::command]
+fn reminders_status(service: tauri::State<'_, Arc<ReminderService>>) -> RemindersStatus {
+    reminders_status_for(&service)
+}
+
+#[tauri::command]
+fn reminders_set_enabled(
+    service: tauri::State<'_, Arc<ReminderService>>,
+    enabled: bool,
+) -> Result<RemindersStatus, String> {
+    reminders::write_enabled_setting(service.dir(), enabled)?;
+    if launch_agent::supported() {
+        if enabled {
+            install_reminder_agent()?;
+        } else {
+            remove_reminder_agent()?;
+        }
+    }
+    if enabled {
+        service.check_soon();
+    }
+    Ok(reminders_status_for(&service))
+}
+
+#[tauri::command]
+fn reminders_test() -> Result<(), String> {
+    use reminders::Notifier;
+    reminders::OsascriptNotifier.notify(
+        "기한 임박: 알림 테스트",
+        "과제 · 샘플 알림 · 실제 기한은 이렇게 알려 드려요",
+    )
+}
 
 #[tauri::command]
 fn real_download_dir() -> Result<String, String> {
@@ -100,6 +187,11 @@ fn shutdown_backend(app: &tauri::AppHandle) {
 }
 
 pub fn run() {
+    // Started by the reminders LaunchAgent: check the cache, notify, exit. No Tauri, no
+    // backend, no window.
+    if reminders::is_check_invocation(std::env::args()) {
+        std::process::exit(reminders::run_check_cli(real_user_home_dir()));
+    }
     let project_root =
         backend::project_root_from_manifest_dir(Path::new(env!("CARGO_MANIFEST_DIR")));
     let built = tauri::Builder::default()
@@ -121,10 +213,32 @@ pub fn run() {
             app.manage(native_download::NativeDownloadJobs::new());
             app.manage(viewer::ViewerState::new());
             manager.start_in_background();
+
+            // Reminders: on by default in a packaged app, in-app checks every 10 minutes.
+            let data_dir = app
+                .path()
+                .app_data_dir()
+                .ok()
+                .or_else(|| real_user_home_dir().map(|home| reminders::data_dir_for_home(&home)))
+                .unwrap_or_else(|| std::env::temp_dir().join("ssu-lecture-downloader"));
+            let packaged = launch_agent::supported();
+            let service =
+                ReminderService::start(data_dir, packaged, Arc::new(reminders::OsascriptNotifier));
+            if packaged && service.enabled() {
+                // Also repairs the agent when the app was moved or the plist went missing.
+                if let Err(error) = install_reminder_agent() {
+                    eprintln!("reminders: {error}");
+                }
+            }
+            app.manage(service);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             real_download_dir,
+            deadline_cache_write,
+            reminders_status,
+            reminders_set_enabled,
+            reminders_test,
             open_path_in_finder,
             open_url_in_browser,
             viewer::open_assisted_official_viewer,

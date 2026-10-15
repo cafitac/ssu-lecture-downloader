@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { fetchDeadlines, isAuthenticationError } from '../lib/api';
+import { writeDeadlineCache } from '../lib/desktop';
 import { friendlyError } from '../lib/errors';
+import { buildDeadlineCache } from '../lib/reminders';
 import type { CourseSummary, DeadlineEntryDto } from '../lib/types';
 
 export type DeadlinesState = 'idle' | 'loading' | 'ready' | 'error';
@@ -34,6 +36,8 @@ export function useDeadlines(termId: number | null, courses: CourseSummary[], on
         if (cancelled) return;
         setItems(response.deadlines);
         setState('ready');
+        // Reminders read this copy while the app is closed; a failed write must never disturb the list.
+        void writeDeadlineCache(buildDeadlineCache(response.deadlines)).catch(() => undefined);
       })
       .catch((failure: unknown) => {
         if (cancelled) return;
