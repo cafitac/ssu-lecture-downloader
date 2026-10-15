@@ -1,12 +1,39 @@
 from __future__ import annotations
 
+from collections.abc import Iterable, Mapping
 from typing import Any
 
 from ssu_lecture_downloader.models import CourseContentItem, LectureItem
 
 COURSES_API_URL = "https://canvas.ssu.ac.kr/learningx/api/v1/learn_activities/courses"
 MODULES_API_URL_TEMPLATE = "https://canvas.ssu.ac.kr/learningx/api/v1/courses/{course_id}/modules"
+LEARNINGX_DASHBOARD_URL = "https://canvas.ssu.ac.kr/learningx/dashboard"
 DEFAULT_TERM_ID_CANDIDATES = list(range(35, 61))
+
+
+def learningx_api_headers(cookies: Any, referer: str = LEARNINGX_DASHBOARD_URL) -> dict[str, str]:
+    """Bearer headers for the LearningX JSON API (the single place that reads `xn_api_token`)."""
+    token = cookies.get("xn_api_token")
+    if not token:
+        raise ValueError("xn_api_token cookie is required for LearningX API")
+    return {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/json",
+        "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Referer": referer,
+    }
+
+
+def latest_current_courses(courses_by_term: Mapping[int, list[dict[str, Any]] | None], term_order: Iterable[int]) -> list[dict[str, Any]]:
+    """Unended courses of the latest term (in `term_order`) that has any; failed terms are None."""
+    latest: int | None = None
+    for term_id in term_order:
+        courses = courses_by_term.get(term_id)
+        if courses and any(course.get("ended") is False for course in courses):
+            latest = term_id
+    if latest is None:
+        return []
+    return [course for course in courses_by_term[latest] or [] if course.get("ended") is False]
 
 
 class LearningXLister:
@@ -14,15 +41,7 @@ class LearningXLister:
         self.http = http
 
     def _api_headers(self) -> dict[str, str]:
-        token = self.http.cookies.get("xn_api_token")
-        if not token:
-            raise ValueError("xn_api_token cookie is required for LearningX API")
-        return {
-            "Authorization": f"Bearer {token}",
-            "Accept": "application/json",
-            "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
-            "Referer": "https://canvas.ssu.ac.kr/learningx/dashboard",
-        }
+        return learningx_api_headers(self.http.cookies)
 
     def list_courses(self, term_ids: list[int] | None = None) -> list[dict[str, Any]]:
         params = {"term_ids[]": term_ids} if term_ids else None
@@ -37,19 +56,13 @@ class LearningXLister:
 
     def list_current_courses(self, term_id_candidates: list[int] | None = None) -> list[dict[str, Any]]:
         candidates = term_id_candidates or DEFAULT_TERM_ID_CANDIDATES
-        latest_current_term_id: int | None = None
-        courses_by_term: dict[int, list[dict[str, Any]]] = {}
+        courses_by_term: dict[int, list[dict[str, Any]] | None] = {}
         for term_id in candidates:
             try:
-                courses = self.list_courses(term_ids=[term_id])
-            except Exception:
-                continue
-            courses_by_term[term_id] = courses
-            if any(course.get("ended") is False for course in courses):
-                latest_current_term_id = term_id
-        if latest_current_term_id is not None:
-            return [course for course in courses_by_term[latest_current_term_id] if course.get("ended") is False]
-        return []
+                courses_by_term[term_id] = self.list_courses(term_ids=[term_id])
+            except Exception:  # noqa: BLE001 - a term that fails to load is simply skipped
+                courses_by_term[term_id] = None
+        return latest_current_courses(courses_by_term, candidates)
 
     def list_course_modules(self, course_id: int | str) -> list[dict[str, Any]]:
         response = self.http.get(
@@ -127,6 +140,7 @@ class LearningXLister:
                         content_type=content_type,
                         inner_content_type=inner_content_type,
                         kind=kind,
+                        content_id=str(item_content_data.get("content_id")) if item_content_data.get("content_id") else None,
                         completed=item.get("completed") if "completed" in item else None,
                         attendance_status=item.get("attendance_status"),
                         duration=item_content_data.get("duration"),

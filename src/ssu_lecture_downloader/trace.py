@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import threading
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -38,14 +39,25 @@ class TraceEntry:
         }
 
 
+# A long-lived backend traces every LMS request; keeping them all would grow without
+# bound. One CLI run or one troubleshooting session stays far below this.
+DEFAULT_MAX_TRACE_ENTRIES = 1000
+
+
 class NetworkTrace:
-    def __init__(self) -> None:
-        self._entries: list[TraceEntry] = []
+    def __init__(self, max_entries: int = DEFAULT_MAX_TRACE_ENTRIES) -> None:
+        self._entries: deque[TraceEntry] = deque(maxlen=max_entries)
         self._lock = threading.Lock()
 
     def add(self, entry: TraceEntry) -> None:
         with self._lock:
             self._entries.append(entry)
+
+    def last_entry(self) -> dict[str, Any] | None:
+        """The most recent request, redacted, without converting the whole history."""
+        with self._lock:
+            entry = self._entries[-1] if self._entries else None
+        return entry.to_dict() if entry is not None else None
 
     def to_dict(self) -> dict[str, Any]:
         with self._lock:

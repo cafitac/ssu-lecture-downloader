@@ -52,6 +52,13 @@ def is_lms_auth_failure(exc: BaseException) -> bool:
     return host is None or host in LMS_SESSION_HOSTS
 
 
+def is_session_lost(exc: BaseException) -> bool:
+    """LMS 401/403, or the LearningX helpers noticing the xn_api_token cookie is gone."""
+    if is_lms_auth_failure(exc):
+        return True
+    return isinstance(exc, ValueError) and "xn_api_token" in str(exc)
+
+
 def is_signed_url_failure(exc: BaseException) -> bool:
     """True for a 401/403/410 from a non-LMS host, i.e. an expired signed media URL."""
     if response_status(exc) not in {401, 403, 410}:

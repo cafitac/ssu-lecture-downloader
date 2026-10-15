@@ -7,8 +7,11 @@ from typing import Any
 from fastapi import APIRouter, HTTPException
 
 from ssu_lecture_downloader import dependency_installer, postprocess_media, stt
-from ssu_lecture_downloader.api_models import MediaDependencyInstallRequest, VideoEnsurePlayableRequest
-from ssu_lecture_downloader.app_context import AppContext, job_or_404
+from ssu_lecture_downloader.api_models import (
+    MediaDependencyInstallRequest,
+    VideoEnsurePlayableRequest,
+)
+from ssu_lecture_downloader.app_context import AppContext, add_job_routes
 from ssu_lecture_downloader.jobs import Job, JobOutcome, ProgressCollector
 from ssu_lecture_downloader.postprocess_media import AudioExtractionRequest
 from ssu_lecture_downloader.stt import TranscriptionRequest
@@ -60,26 +63,14 @@ def build_router(ctx: AppContext) -> APIRouter:
             job.append_progress({"stage": "audio_done", "output_path": str(result.output_path) if result.output_path else None, "file_size": result.file_size})
             return JobOutcome.succeeded(payload)
 
-        return ctx.runner.start(ctx.audio_jobs, work, wait_seconds=QUICK_JOB_WAIT_SECONDS).snapshot()
+        return ctx.start_job(ctx.audio_jobs, work, wait_seconds=QUICK_JOB_WAIT_SECONDS)
 
-    @router.get("/api/media/audio/jobs/{job_id}")
-    def audio_extraction_job_status(job_id: str) -> dict[str, Any]:
-        return job_or_404(ctx.audio_jobs, job_id, "audio_job_not_found").snapshot()
-
-    @router.post("/api/media/audio/jobs/{job_id}/cancel")
-    def cancel_audio_extraction_job(job_id: str) -> dict[str, Any]:
-        job = job_or_404(ctx.audio_jobs, job_id, "audio_job_not_found")
-        job.mark_cancel_requested()
-        return job.snapshot()
+    add_job_routes(router, ctx.audio_jobs, path="/api/media/audio/jobs", not_found_code="audio_job_not_found")
 
     # -------------------------------------------------------------- STT
 
     def stt_provider_status_payload() -> list[dict[str, object]]:
-        providers = []
-        for provider in ["faster_whisper", "whisper_cpp"]:
-            status = stt.check_stt_provider(provider)
-            providers.append(status if isinstance(status, dict) else status.model_dump())
-        return providers
+        return [stt.check_stt_provider(provider).model_dump() for provider in ("faster_whisper", "whisper_cpp")]
 
     @router.get("/api/stt/providers/status")
     def stt_provider_status() -> dict[str, object]:
@@ -96,17 +87,9 @@ def build_router(ctx: AppContext) -> APIRouter:
             job.append_progress({"stage": "transcript_done", "text_path": str(result.text_path) if result.text_path else None})
             return JobOutcome.succeeded(payload)
 
-        return ctx.runner.start(ctx.stt_jobs, work, wait_seconds=QUICK_JOB_WAIT_SECONDS).snapshot()
+        return ctx.start_job(ctx.stt_jobs, work, wait_seconds=QUICK_JOB_WAIT_SECONDS)
 
-    @router.get("/api/stt/jobs/{job_id}")
-    def stt_job_status(job_id: str) -> dict[str, Any]:
-        return job_or_404(ctx.stt_jobs, job_id, "stt_job_not_found").snapshot()
-
-    @router.post("/api/stt/jobs/{job_id}/cancel")
-    def cancel_stt_job(job_id: str) -> dict[str, Any]:
-        job = job_or_404(ctx.stt_jobs, job_id, "stt_job_not_found")
-        job.mark_cancel_requested()
-        return job.snapshot()
+    add_job_routes(router, ctx.stt_jobs, path="/api/stt/jobs", not_found_code="stt_job_not_found")
 
     # ----------------------------------------------------- dependencies
 
@@ -136,16 +119,8 @@ def build_router(ctx: AppContext) -> APIRouter:
                 return JobOutcome.failed(str(result.get("error_code") or "dependency_install_failed"), result=result)
             return JobOutcome.succeeded(result)
 
-        return ctx.runner.start(ctx.dependency_jobs, work, wait_seconds=QUICK_JOB_WAIT_SECONDS).snapshot()
+        return ctx.start_job(ctx.dependency_jobs, work, wait_seconds=QUICK_JOB_WAIT_SECONDS)
 
-    @router.get("/api/media/dependencies/install/jobs/{job_id}")
-    def media_dependency_install_job_status(job_id: str) -> dict[str, Any]:
-        return job_or_404(ctx.dependency_jobs, job_id, "dependency_install_job_not_found").snapshot()
-
-    @router.post("/api/media/dependencies/install/jobs/{job_id}/cancel")
-    def cancel_media_dependency_install_job(job_id: str) -> dict[str, Any]:
-        job = job_or_404(ctx.dependency_jobs, job_id, "dependency_install_job_not_found")
-        job.mark_cancel_requested()
-        return job.snapshot()
+    add_job_routes(router, ctx.dependency_jobs, path="/api/media/dependencies/install/jobs", not_found_code="dependency_install_job_not_found")
 
     return router

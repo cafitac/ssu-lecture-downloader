@@ -54,3 +54,16 @@ def test_trace_json_is_stable_and_pretty():
 
     assert json.loads(output)["entries"][0]["step"] == "entry"
     assert "\n" in output
+
+
+def test_trace_keeps_only_the_most_recent_entries_and_exposes_the_last_one_cheaply():
+    trace = NetworkTrace(max_entries=3)
+    assert trace.last_entry() is None
+
+    for number in range(5):
+        trace.add(TraceEntry(step=f"step-{number}", method="GET", url="https://lms.ssu.ac.kr/?token=secret"))
+
+    assert [entry["step"] for entry in trace.to_dict()["entries"]] == ["step-2", "step-3", "step-4"]
+    last = trace.last_entry()
+    assert last["step"] == "step-4"
+    assert "secret" not in last["url"]

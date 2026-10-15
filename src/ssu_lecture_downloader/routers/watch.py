@@ -5,9 +5,9 @@ from __future__ import annotations
 from fastapi import APIRouter
 
 from ssu_lecture_downloader.api_errors import raise_for_result_error
-from ssu_lecture_downloader.api_models import DownloadPlanRequest, viewer_plan_payload
+from ssu_lecture_downloader.api_models import DownloadPlanRequest
 from ssu_lecture_downloader.app_context import AppContext
-from ssu_lecture_downloader.routers.credentials import call_service
+from ssu_lecture_downloader.payloads import viewer_plan_payload
 
 
 def build_router(ctx: AppContext) -> APIRouter:
@@ -17,9 +17,8 @@ def build_router(ctx: AppContext) -> APIRouter:
     @router.post("/api/watch/viewer-plan")
     def official_viewer_plan(request: DownloadPlanRequest) -> dict[str, object]:
         username, password = ctx.require_credentials()
-        result = call_service(
-            ctx,
-            lambda: service.official_viewer_plan(username, password, course_id=request.course_id, module_item_id=request.module_item_id),
+        result = ctx.call_service(
+            lambda: service.official_viewer_plan(username, password, course_id=request.course_id, module_item_id=request.module_item_id)
         )
         if not result.ok:
             raise_for_result_error(result.error_code)
@@ -30,9 +29,8 @@ def build_router(ctx: AppContext) -> APIRouter:
         # Returns live LMS cookies: only reachable with the API token (when configured),
         # from an allow-listed origin and a loopback Host (see security.py).
         username, password = ctx.require_credentials()
-        result = call_service(
-            ctx,
-            lambda: service.official_viewer_session_bridge_plan(username, password, course_id=request.course_id, module_item_id=request.module_item_id),
+        result = ctx.call_service(
+            lambda: service.official_viewer_session_bridge_plan(username, password, course_id=request.course_id, module_item_id=request.module_item_id)
         )
         if not result.ok:
             raise_for_result_error(result.error_code)

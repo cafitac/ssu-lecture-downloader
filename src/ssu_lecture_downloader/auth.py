@@ -58,7 +58,9 @@ def extract_iframe_src(html: str, base_url: str | None = None) -> str:
     if script_match:
         return urljoin(base_url or "", script_match.group(1))
 
-    from bs4 import BeautifulSoup  # imported lazily: only the login flow needs HTML parsing
+    from bs4 import (
+        BeautifulSoup,  # imported lazily: only the login flow needs HTML parsing
+    )
 
     soup = BeautifulSoup(html, "html.parser")
     iframe = soup.find("iframe")

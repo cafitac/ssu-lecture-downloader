@@ -1,35 +1,62 @@
 from __future__ import annotations
 
-import queue
+import dataclasses
 import threading
-from collections.abc import Iterator
+from collections.abc import Callable, Iterable, Iterator
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
 from time import monotonic
-from typing import Any, Callable, TypeVar
+from typing import Any, TypeVar
 from urllib.parse import urljoin
 
-from ssu_lecture_downloader.download import DownloadCancelled, download_to_plan, plan_download_path
-from ssu_lecture_downloader.errors import is_lms_auth_failure, is_signed_url_failure
+from ssu_lecture_downloader.cache import TtlCache
+from ssu_lecture_downloader.download import (
+    DownloadCancelled,
+    DownloadPlan,
+    download_to_plan,
+    plan_download_path,
+)
+from ssu_lecture_downloader.errors import is_session_lost, is_signed_url_failure
 from ssu_lecture_downloader.http_client import HttpClient
-from ssu_lecture_downloader.lms import DEFAULT_TERM_ID_CANDIDATES, LearningXLister
+from ssu_lecture_downloader.lms import (
+    DEFAULT_TERM_ID_CANDIDATES,
+    LearningXLister,
+    latest_current_courses,
+    learningx_api_headers,
+)
 from ssu_lecture_downloader.login_flow import LoginDiscoveryResult
-from ssu_lecture_downloader.media import AttendanceItemMedia, extract_lti_launch_form, parse_attendance_item_media, parse_commons_download
+from ssu_lecture_downloader.media import (
+    AttendanceItemMedia,
+    extract_lti_launch_form,
+    parse_attendance_item_media,
+    parse_commons_download,
+)
 from ssu_lecture_downloader.models import CourseSummary
+from ssu_lecture_downloader.progress import emit_progress
 from ssu_lecture_downloader.redaction import redact_url
-
 
 MEDIA_DOWNLOAD_MAX_ATTEMPTS = 8
 # A login older than this is renewed even without an auth failure, so long-lived
 # backends do not keep using a silently expired LMS session.
 SESSION_TTL_SECONDS = 30 * 60
-# Parallelism of the term-id discovery scan (separate HTTP clients, bounded).
+# Parallelism of the term-id discovery scan and of per-course module fetches
+# (separate pooled HTTP clients, bounded).
 TERM_SCAN_WORKERS = 4
+# Parallelism of per-lecture media resolution in batch plans.
+RESOLVE_WORKERS = 4
 # Course module lists are reused while resolving several items of one course.
 MODULES_CACHE_TTL_SECONDS = 300
+# A batch reuses module lists fetched this recently (plan -> download, dry run -> real run)
+# instead of asking the LMS again; older ones are refreshed so completion state stays current.
+BATCH_MODULES_REUSE_SECONDS = 60
+# A resolved media item (including its signed URL) is reused by the follow-up download.
+# An expired URL is still recovered by `_download_resolved` re-resolving once.
+RESOLVED_MEDIA_TTL_SECONDS = 120
+# Warm worker clients kept between parallel phases.
+MAX_IDLE_WORKER_CLIENTS = 8
 
 T = TypeVar("T")
 
@@ -221,7 +248,7 @@ class _ResolvedViewerInternal:
 def _bridge_cookies(cookies: object) -> list[OfficialViewerBridgeCookie]:
     raw_cookies = getattr(cookies, "jar", None)
     if raw_cookies is None:
-        items = getattr(cookies, "items", lambda: [])()
+        items = getattr(cookies, "items", list)()
         return [
             OfficialViewerBridgeCookie(
                 name=str(name),
@@ -259,35 +286,18 @@ def _bridge_cookies(cookies: object) -> list[OfficialViewerBridgeCookie]:
 
 
 
-class _TtlCache:
-    def __init__(self, ttl_seconds: float) -> None:
-        self.ttl_seconds = ttl_seconds
-        self._values: dict[tuple, tuple[float, Any]] = {}
-        self._lock = threading.Lock()
-
-    def get(self, key: tuple):
-        with self._lock:
-            entry = self._values.get(key)
-            if entry is None:
-                return None
-            expires_at, value = entry
-            if expires_at <= monotonic():
-                self._values.pop(key, None)
-                return None
-            return value
-
-    def set(self, key: tuple, value: Any) -> Any:
-        with self._lock:
-            self._values[key] = (monotonic() + self.ttl_seconds, value)
-        return value
-
-    def clear(self) -> None:
-        with self._lock:
-            self._values.clear()
+def _term_label(term_id: int, courses: list[dict[str, Any]]) -> str:
+    """The LMS's own name for a term when the course payloads carry one, else `term <id>`."""
+    for course in courses:
+        term = course.get("term")
+        for candidate in (course.get("term_name"), term.get("name") if isinstance(term, dict) else None):
+            if isinstance(candidate, str) and candidate.strip():
+                return candidate.strip()
+    return f"term {term_id}"
 
 
 def _credential_fingerprint(username: str, password: str) -> str:
-    return sha256(f"{username}\0{password}".encode("utf-8")).hexdigest()
+    return sha256(f"{username}\0{password}".encode()).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -300,21 +310,69 @@ class _AttendanceLaunch:
     media: AttendanceItemMedia
 
 
-def _login_failed_download_result(login_result: LoginDiscoveryResult, *, dry_run: bool, course_id: int | str, module_item_id: int | str) -> DownloadLectureResult:
+@dataclass
+class _PooledClient:
+    client: Any
+    epoch: int = -1  # cookie epoch the client's jar was last synced to
+
+
+# Marks a batch item that was never started because the job was cancelled first.
+_NOT_STARTED = object()
+
+
+def _failure(cls: type[T], error_code: str | None, **fixed: Any) -> T:
+    """A failed result dataclass: every field without a default is None unless given in `fixed`."""
+    values: dict[str, Any] = {
+        field.name: None
+        for field in dataclasses.fields(cls)  # type: ignore[arg-type]
+        if field.default is dataclasses.MISSING and field.default_factory is dataclasses.MISSING
+    }
+    values.update(ok=False, error_code=error_code, **fixed)
+    return cls(**values)
+
+
+def _planned_file(resolved: _ResolvedMediaInternal, *, output_dir: Path, course_name: str, fallback_title: str, conflict_strategy: str) -> tuple[DownloadPlan, int | None]:
+    """Where a resolved item would be written, and the size of what is already there."""
+    result = resolved.result
+    plan = plan_download_path(
+        output_dir=output_dir,
+        course_name=course_name,
+        lecture_title=result.title or fallback_title,
+        content_id=result.content_id or "content",
+        extension=resolved.extension or "mp4",
+        conflict_strategy=conflict_strategy,
+    )
+    file_size = plan.file_path.stat().st_size if plan.file_exists and plan.file_path.exists() else None
+    return plan, file_size
+
+
+def _download_result(
+    result: ResolvedMediaResult,
+    plan: DownloadPlan,
+    *,
+    dry_run: bool,
+    written: bool,
+    skipped: bool,
+    file_size: int | None,
+    conflict_strategy: str,
+) -> DownloadLectureResult:
     return DownloadLectureResult(
-        ok=False,
-        error_code=login_result.error_code,
+        ok=True,
+        error_code=None,
         dry_run=dry_run,
-        written=False,
-        course_id=course_id,
-        module_item_id=module_item_id,
-        attendance_item_id=None,
-        title=None,
-        content_id=None,
-        download_url=None,
-        download_size=None,
-        output_path=None,
-        file_size=None,
+        written=written,
+        course_id=result.course_id,
+        module_item_id=result.module_item_id,
+        attendance_item_id=result.attendance_item_id,
+        title=result.title,
+        content_id=result.content_id,
+        download_url=result.download_url,
+        download_size=result.download_size,
+        output_path=str(plan.file_path),
+        file_size=file_size,
+        file_exists=plan.file_exists,
+        skipped=skipped,
+        conflict_strategy=conflict_strategy,
     )
 
 
@@ -367,8 +425,15 @@ class SsuLectureService:
     Thread-safety model: `self.http` is one shared curl session whose cookie jar is
     mutated by login, so every use of it happens while holding `self._lock` (an
     RLock). Long byte transfers never hold the lock; they run on their own
-    `HttpClient` created by `_download_http_client()`, and the term scan fans out on
-    separate clients as well.
+    `HttpClient` created by `_download_http_client()`. Parallel read-only phases (term
+    scan, per-course module fetches, batch media resolution) are driven by a thread
+    holding the lock and fan out on pooled worker clients that carry a copy of the
+    session cookies, so nothing else can log in or clear cookies underneath them.
+
+    Caching: every LMS lookup has an explicit TTL (`cache_ttl_seconds`, modules and
+    resolved media shorter). Public lookups are single-flight (concurrent identical
+    requests share one upstream call) and all caches are dropped by `clear_cache()`
+    and whenever a different account logs in.
     """
 
     def __init__(
@@ -380,56 +445,88 @@ class SsuLectureService:
         cache_ttl_seconds: float = 900,
         session_ttl_seconds: float = SESSION_TTL_SECONDS,
         term_scan_workers: int = TERM_SCAN_WORKERS,
+        resolve_workers: int = RESOLVE_WORKERS,
+        resolved_media_ttl_seconds: float = RESOLVED_MEDIA_TTL_SECONDS,
+        worker_client_factory: Callable[[], Any] | None = None,
     ) -> None:
         self.http = http or HttpClient()
         self.login_func = login_func or _default_login_func
         self.current_term_candidates = current_term_candidates or DEFAULT_TERM_ID_CANDIDATES
         self.session_ttl_seconds = session_ttl_seconds
         self.term_scan_workers = max(1, term_scan_workers)
+        self.resolve_workers = max(1, resolve_workers)
+        if worker_client_factory is None and isinstance(self.http, HttpClient):
+            worker_client_factory = self._new_http_client
+        # None means "no private clients": workers share `self.http` (test doubles).
+        self._worker_client_factory = worker_client_factory
         self._lock = threading.RLock()
         self._session_cache: dict[str, tuple[LoginDiscoveryResult, float]] = {}
-        self._terms_cache = _TtlCache(cache_ttl_seconds)
-        self._term_courses_cache = _TtlCache(cache_ttl_seconds)
-        self._courses_cache = _TtlCache(cache_ttl_seconds)
-        self._course_detail_cache = _TtlCache(cache_ttl_seconds)
-        self._modules_cache = _TtlCache(min(cache_ttl_seconds, MODULES_CACHE_TTL_SECONDS))
+        self._active_key: str | None = None
+        self._cookie_epoch = 0
+        self._pool_lock = threading.Lock()
+        self._idle_clients: list[_PooledClient] = []
+        self._terms_cache: TtlCache[list[dict[str, Any]]] = TtlCache(cache_ttl_seconds)
+        self._term_courses_cache: TtlCache[list[dict[str, Any]]] = TtlCache(cache_ttl_seconds)
+        self._courses_cache: TtlCache[CourseDiscoveryResult] = TtlCache(cache_ttl_seconds)
+        self._course_detail_cache: TtlCache[CourseDetailResult] = TtlCache(cache_ttl_seconds)
+        self._modules_cache: TtlCache[list[dict[str, Any]]] = TtlCache(min(cache_ttl_seconds, MODULES_CACHE_TTL_SECONDS))
+        self._resolved_cache: TtlCache[_ResolvedMediaInternal] = TtlCache(min(cache_ttl_seconds, resolved_media_ttl_seconds))
 
     # ------------------------------------------------------------------ session
 
+    def _reset_derived_state(self, *, keep_inflight: bool = False) -> None:
+        """Forget everything learned under the current session (caller holds the lock)."""
+        self._session_cache.clear()
+        for cache in (self._terms_cache, self._term_courses_cache, self._courses_cache, self._course_detail_cache, self._modules_cache, self._resolved_cache):
+            cache.clear(keep_inflight=keep_inflight)
+
     def clear_cache(self) -> None:
         with self._lock:
-            self._session_cache.clear()
-            self._terms_cache.clear()
-            self._term_courses_cache.clear()
-            self._courses_cache.clear()
-            self._course_detail_cache.clear()
-            self._modules_cache.clear()
+            self._reset_derived_state()
+            self._active_key = None
             self._clear_http_cookies()
+            self._close_idle_clients()
 
     def _clear_http_cookies(self) -> None:
         cookies = getattr(self.http, "cookies", None)
         clear = getattr(cookies, "clear", None)
         if clear:
             clear()
+        self._cookie_epoch += 1
 
     def _forget_credential_session(self, credential_key: str) -> None:
         with self._lock:
             self._session_cache.pop(credential_key, None)
             self._term_courses_cache.clear()
             self._modules_cache.clear()
+            self._resolved_cache.clear()
             self._clear_http_cookies()
+
+    def _fresh_login(self, credential_key: str) -> LoginDiscoveryResult | None:
+        cached = self._session_cache.get(credential_key)
+        if cached is not None and monotonic() - cached[1] < self.session_ttl_seconds:
+            return cached[0]
+        return None
 
     def login(self, username: str, password: str) -> LoginDiscoveryResult:
         credential_key = _credential_fingerprint(username, password)
+        # A valid session needs neither the lock nor another login round trip.
+        result = self._fresh_login(credential_key)
+        if result is not None:
+            return result
         with self._lock:
-            cached = self._session_cache.get(credential_key)
-            if cached is not None:
-                result, logged_in_at = cached
-                if monotonic() - logged_in_at < self.session_ttl_seconds:
-                    return result
-                self._session_cache.pop(credential_key, None)
+            result = self._fresh_login(credential_key)
+            if result is not None:
+                return result
+            self._session_cache.pop(credential_key, None)
+            if self._active_key != credential_key:
+                # The cookie jar is about to belong to a different account. Usually called from
+                # inside a lookup's loader, whose own result must still be cached afterwards.
+                self._reset_derived_state(keep_inflight=True)
             self._clear_http_cookies()
             result = self.login_func(username, password, self.http)
+            self._cookie_epoch += 1
+            self._active_key = credential_key
             if result.ok:
                 self._session_cache[credential_key] = (result, monotonic())
             return result
@@ -448,7 +545,7 @@ class SsuLectureService:
             try:
                 return login_result, operation()
             except Exception as exc:
-                if not is_lms_auth_failure(exc):
+                if not is_session_lost(exc):
                     raise
                 self._forget_credential_session(_credential_fingerprint(username, password))
                 login_result = self.login(username, password)
@@ -456,92 +553,140 @@ class SsuLectureService:
                     return login_result, None
                 return login_result, operation()
 
-    def _clone_http_client(self):
-        """A private client carrying the current cookies, or the shared fake in tests."""
-        if isinstance(self.http, HttpClient):
-            with self._lock:
-                client = HttpClient(trace=self.http.trace)
-                client.cookies.update(self.http.cookies)
-            return client
-        return self.http
+    def _resolve_authenticated(self, username: str, password: str, course_id: int | str, module_item_id: int | str, *, refresh: bool = False):
+        """(login result, resolved media or None) for one item, on the shared session."""
+        extra = {"refresh": True} if refresh else {}
+        return self._authenticated(
+            username, password, lambda: self._resolve_media_authenticated(course_id=course_id, module_item_id=module_item_id, **extra)
+        )
+
+    # ------------------------------------------------------------ worker clients
+
+    def _new_http_client(self) -> HttpClient:
+        return HttpClient(trace=self.http.trace)
+
+    def _close_idle_clients(self) -> None:
+        with self._pool_lock:
+            idle, self._idle_clients = self._idle_clients, []
+        for entry in idle:
+            entry.client.close()
+
+    @contextmanager
+    def _worker_client(self) -> Iterator[Any]:
+        """An exclusive client for one parallel task, reusing warm connections between phases.
+
+        Its cookie jar mirrors the session's (re-synced whenever the session changed).
+        Callers hold `self._lock`, so the session cannot change while the client is in use.
+        """
+        if self._worker_client_factory is None:
+            yield self.http
+            return
+        with self._pool_lock:
+            entry = self._idle_clients.pop() if self._idle_clients else None
+        if entry is None:
+            entry = _PooledClient(self._worker_client_factory())
+        epoch = self._cookie_epoch
+        if entry.epoch != epoch:
+            entry.client.cookies.clear()
+            entry.client.cookies.update(self.http.cookies)
+            entry.epoch = epoch
+        try:
+            yield entry.client
+        finally:
+            with self._pool_lock:
+                keep = len(self._idle_clients) < MAX_IDLE_WORKER_CLIENTS
+                if keep:
+                    self._idle_clients.append(entry)
+            if not keep:
+                entry.client.close()
+
+    def _parallel_map(self, fn: Callable[[Any, Any], Any], items: Iterable[Any], *, workers: int) -> list[Any]:
+        """`fn(client, item)` for every item on at most `workers` threads, results in order.
+
+        An exception raised for an item is returned in its slot rather than raised, so
+        the caller decides whether it is fatal. Must be called with `self._lock` held:
+        a single item (or `workers == 1`) runs inline on the shared session.
+        """
+        items = list(items)
+        if len(items) <= 1 or workers <= 1:
+            outcomes: list[Any] = []
+            for item in items:
+                try:
+                    outcomes.append(fn(self.http, item))
+                except Exception as exc:  # noqa: BLE001
+                    outcomes.append(exc)
+            return outcomes
+
+        def run(item: Any) -> Any:
+            try:
+                with self._worker_client() as client:
+                    return fn(client, item)
+            except Exception as exc:  # noqa: BLE001
+                return exc
+
+        with ThreadPoolExecutor(max_workers=min(workers, len(items)), thread_name_prefix="ssu-fetch") as executor:
+            return list(executor.map(run, items))
 
     @contextmanager
     def _download_http_client(self) -> Iterator[Any]:
-        client = self._clone_http_client()
+        """A private client for one long byte transfer (never holds the session lock while streaming)."""
+        if self._worker_client_factory is None:
+            yield self.http
+            return
+        with self._lock:
+            client = self._worker_client_factory()
+            client.cookies.update(self.http.cookies)
         try:
             yield client
         finally:
-            if client is not self.http:
-                client.close()
+            client.close()
 
     # -------------------------------------------------------------------- terms
 
-    def _fetch_term_courses(self, term_ids: list[int]) -> dict[int, list[dict[str, Any]] | None]:
-        """Fetch several terms concurrently, each worker on its own HTTP client."""
-        workers = max(1, min(self.term_scan_workers, len(term_ids)))
-        clients = [self._clone_http_client() for _ in range(workers)]
-        available: queue.Queue = queue.Queue()
-        for client in clients:
-            available.put(client)
-
-        def fetch(term_id: int) -> tuple[int, list[dict[str, Any]] | None]:
-            client = available.get()
-            try:
-                return term_id, LearningXLister(client).list_courses(term_ids=[term_id])
-            except Exception:
-                return term_id, None
-            finally:
-                available.put(client)
-
-        try:
-            with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="ssu-terms") as executor:
-                return dict(executor.map(fetch, term_ids))
-        finally:
-            for client in clients:
-                if client is not self.http:
-                    client.close()
-
-    def _scan_term_courses(self, credential_key: str) -> dict[int, list[dict[str, Any]] | None]:
+    def _scan_term_courses(self, credential_key: str, *, refresh: bool = False) -> dict[int, list[dict[str, Any]] | None]:
         """Courses per candidate term id; cached so terms and current courses share one scan."""
-        candidates = list(self.current_term_candidates)
         scanned: dict[int, list[dict[str, Any]] | None] = {}
         missing: list[int] = []
-        for term_id in candidates:
-            cached = self._term_courses_cache.get((credential_key, term_id))
+        for term_id in self.current_term_candidates:
+            cached = None if refresh else self._term_courses_cache.get((credential_key, term_id))
             if cached is None:
                 missing.append(term_id)
             else:
                 scanned[term_id] = cached
-        if missing:
-            for term_id, courses in self._fetch_term_courses(missing).items():
-                scanned[term_id] = courses
-                if courses is not None:
-                    self._term_courses_cache.set((credential_key, term_id), courses)
+        outcomes = self._parallel_map(
+            lambda client, term_id: LearningXLister(client).list_courses(term_ids=[term_id]), missing, workers=self.term_scan_workers
+        )
+        for term_id, outcome in zip(missing, outcomes):
+            if isinstance(outcome, BaseException):
+                scanned[term_id] = None
+            else:
+                scanned[term_id] = outcome
+                self._term_courses_cache.set((credential_key, term_id), outcome)
         return scanned
 
-    def list_terms(self, username: str, password: str) -> list[dict[str, Any]]:
+    def list_terms(self, username: str, password: str, *, refresh: bool = False) -> list[dict[str, Any]]:
         credential_key = _credential_fingerprint(username, password)
         cache_key = (credential_key, tuple(self.current_term_candidates))
-        with self._lock:
-            cached = self._terms_cache.get(cache_key)
-            if cached is not None:
-                return cached
 
-            terms = self._discover_terms(username, password, credential_key)
-            if not terms:
-                # Cached login state can outlive the LearningX xn_api_token cookie. Empty
-                # term discovery after a cached login is therefore not enough to prove the
-                # student has no courses; invalidate the cached session and try a fresh
-                # SmartID/LMS login once before API routes surface an auth-verification error.
-                self._forget_credential_session(credential_key)
-                terms = self._discover_terms(username, password, credential_key)
-            return self._terms_cache.set(cache_key, terms)
+        def load() -> list[dict[str, Any]]:
+            with self._lock:
+                terms = self._discover_terms(username, password, credential_key, refresh=refresh)
+                if not terms:
+                    # Cached login state can outlive the LearningX xn_api_token cookie. Empty
+                    # term discovery after a cached login is therefore not enough to prove the
+                    # student has no courses; invalidate the cached session and try a fresh
+                    # SmartID/LMS login once before API routes surface an auth-verification error.
+                    self._forget_credential_session(credential_key)
+                    terms = self._discover_terms(username, password, credential_key, refresh=True)
+                return terms
 
-    def _discover_terms(self, username: str, password: str, credential_key: str) -> list[dict[str, Any]]:
+        return self._terms_cache.get_or_load(cache_key, load, refresh=refresh, cache_if=bool)
+
+    def _discover_terms(self, username: str, password: str, credential_key: str, *, refresh: bool = False) -> list[dict[str, Any]]:
         login_result = self.login(username, password)
         if not login_result.ok:
             return []
-        scanned = self._scan_term_courses(credential_key)
+        scanned = self._scan_term_courses(credential_key, refresh=refresh)
         terms: list[dict[str, Any]] = []
         latest_current: int | None = None
         for term_id in self.current_term_candidates:
@@ -558,7 +703,7 @@ class SsuLectureService:
                         "course_count": len(courses),
                         "current_course_count": current_count,
                         "is_current": False,
-                        "label": f"term {term_id}",
+                        "label": _term_label(term_id, courses),
                     }
                 )
         if latest_current is not None:
@@ -566,53 +711,84 @@ class SsuLectureService:
                 term["is_current"] = term["term_id"] == latest_current
         return terms
 
-    def _current_courses(self, credential_key: str) -> list[dict[str, Any]]:
-        scanned = self._scan_term_courses(credential_key)
-        latest_current_term_id: int | None = None
-        for term_id in self.current_term_candidates:
-            courses = scanned.get(term_id)
-            if courses and any(course.get("ended") is False for course in courses):
-                latest_current_term_id = term_id
-        if latest_current_term_id is None:
-            return []
-        return [course for course in scanned[latest_current_term_id] or [] if course.get("ended") is False]
+    def _current_courses(self, credential_key: str, *, refresh: bool = False) -> list[dict[str, Any]]:
+        scanned = self._scan_term_courses(credential_key, refresh=refresh)
+        return latest_current_courses(scanned, self.current_term_candidates)
+
+    def _term_courses(self, credential_key: str, term_ids: list[int], *, refresh: bool = False) -> list[dict[str, Any]]:
+        """Courses of explicit terms; one term shares the cache the terms scan filled."""
+        if len(term_ids) != 1:
+            return LearningXLister(self.http).list_courses(term_ids=term_ids)
+        key = (credential_key, term_ids[0])
+        cached = None if refresh else self._term_courses_cache.get(key)
+        if cached is not None:
+            return cached
+        return self._term_courses_cache.set(key, LearningXLister(self.http).list_courses(term_ids=term_ids))
 
     # ------------------------------------------------------------------ courses
 
-    def _course_modules(self, course_id: int | str, *, refresh: bool = False) -> list[dict[str, Any]]:
+    def _course_modules(self, course_id: int | str, *, refresh: bool = False, max_age: float | None = None, http: Any = None) -> list[dict[str, Any]]:
+        """Module list of a course: cached, or fetched when `refresh`/older than `max_age`."""
         key = (str(course_id),)
         if not refresh:
+            age = self._modules_cache.age(key)
             cached = self._modules_cache.get(key)
-            if cached is not None:
+            if cached is not None and age is not None and (max_age is None or age <= max_age):
                 return cached
-        modules = LearningXLister(self.http).list_course_modules(course_id)
+        modules = LearningXLister(http or self.http).list_course_modules(course_id)
         return self._modules_cache.set(key, modules)
 
-    def discover_courses(self, username: str, password: str, term_ids: list[int] | None = None) -> CourseDiscoveryResult:
+    def _fetch_modules(self, course_ids: list[int | str], *, refresh: bool = False) -> dict[str, list[dict[str, Any]]]:
+        """Module lists for several courses, the missing ones fetched in parallel."""
+        modules_by_id: dict[str, list[dict[str, Any]]] = {}
+        wanted: list[int | str] = []
+        for course_id in course_ids:
+            key = str(course_id)
+            if key in modules_by_id or any(str(w) == key for w in wanted):
+                continue
+            cached = None if refresh else self._modules_cache.get((key,))
+            if cached is not None:
+                modules_by_id[key] = cached
+            else:
+                wanted.append(course_id)
+        outcomes = self._parallel_map(
+            lambda client, course_id: LearningXLister(client).list_course_modules(course_id), wanted, workers=self.term_scan_workers
+        )
+        first_error: BaseException | None = None
+        for course_id, outcome in zip(wanted, outcomes):
+            if isinstance(outcome, BaseException):
+                first_error = first_error or outcome
+            else:
+                modules_by_id[str(course_id)] = self._modules_cache.set((str(course_id),), outcome)
+        if first_error is not None:
+            raise first_error
+        return modules_by_id
+
+    def discover_courses(self, username: str, password: str, term_ids: list[int] | None = None, *, refresh: bool = False) -> CourseDiscoveryResult:
         credential_key = _credential_fingerprint(username, password)
         cache_key = (credential_key, tuple(term_ids) if term_ids else ("current", tuple(self.current_term_candidates)))
-        with self._lock:
-            cached = self._courses_cache.get(cache_key)
-            if cached is not None:
-                return cached
 
-            def operation() -> list[CourseSummary]:
-                lister = LearningXLister(self.http)
-                courses = lister.list_courses(term_ids=term_ids) if term_ids else self._current_courses(credential_key)
-                summary: list[CourseSummary] = []
-                for course in courses:
-                    course_id = course.get("id") or course.get("course_id")
-                    if course_id is None:
-                        continue
-                    modules = self._course_modules(course_id, refresh=True)
-                    lectures = lister.extract_lecture_items(modules)
-                    summary.append(CourseSummary.from_course_and_modules(course, modules, lectures))
-                return summary
+        def operation() -> list[CourseSummary]:
+            lister = LearningXLister(self.http)
+            courses = self._term_courses(credential_key, term_ids, refresh=refresh) if term_ids else self._current_courses(credential_key, refresh=refresh)
+            course_ids = [course.get("id") or course.get("course_id") for course in courses]
+            # Fresh module lists (completion state) whenever the course list itself is rebuilt.
+            modules_by_id = self._fetch_modules([course_id for course_id in course_ids if course_id is not None], refresh=True)
+            summary: list[CourseSummary] = []
+            for course, course_id in zip(courses, course_ids):
+                if course_id is None:
+                    continue
+                modules = modules_by_id[str(course_id)]
+                summary.append(CourseSummary.from_course_and_modules(course, modules, lister.extract_lecture_items(modules)))
+            return summary
 
+        def load() -> CourseDiscoveryResult:
             login_result, summary = self._authenticated(username, password, operation)
             if not login_result.ok or summary is None:
                 return CourseDiscoveryResult(ok=False, error_code=login_result.error_code, login=login_result, courses=[])
-            return self._courses_cache.set(cache_key, CourseDiscoveryResult(ok=True, error_code=None, login=login_result, courses=summary))
+            return CourseDiscoveryResult(ok=True, error_code=None, login=login_result, courses=summary)
+
+        return self._courses_cache.get_or_load(cache_key, load, refresh=refresh, cache_if=lambda result: result.ok)
 
     def get_course_detail(
         self,
@@ -621,53 +797,40 @@ class SsuLectureService:
         *,
         course_id: int | str,
         course_name: str | None = None,
+        refresh: bool = False,
     ) -> CourseDetailResult:
         credential_key = _credential_fingerprint(username, password)
         cache_key = (credential_key, str(course_id), course_name or "")
-        with self._lock:
-            cached = self._course_detail_cache.get(cache_key)
-            if cached is not None:
-                return cached
 
-            def operation() -> CourseDetailResult:
-                lister = LearningXLister(self.http)
-                modules = self._course_modules(course_id, refresh=True)
-                lectures = lister.extract_lecture_items(modules)
-                content_items = lister.extract_course_content_items(modules)
-                course = CourseSummary(
-                    id=course_id,
-                    name=course_name or "",
-                    module_count=len(modules),
-                    lecture_count=len(lectures),
-                    uncompleted_lecture_count=sum(1 for lecture in lectures if not lecture.completed),
-                )
-                return CourseDetailResult(ok=True, error_code=None, course=course, lectures=lectures, content_items=content_items)
+        def operation() -> CourseDetailResult:
+            lister = LearningXLister(self.http)
+            # Usually already fetched by the course list a moment ago.
+            modules = self._course_modules(course_id, refresh=refresh)
+            lectures = lister.extract_lecture_items(modules)
+            content_items = lister.extract_course_content_items(modules)
+            course = CourseSummary(
+                id=course_id,
+                name=course_name or "",
+                module_count=len(modules),
+                lecture_count=len(lectures),
+                uncompleted_lecture_count=sum(1 for lecture in lectures if not lecture.completed),
+            )
+            return CourseDetailResult(ok=True, error_code=None, course=course, lectures=lectures, content_items=content_items)
 
+        def load() -> CourseDetailResult:
             login_result, detail = self._authenticated(username, password, operation)
             if not login_result.ok or detail is None:
                 return CourseDetailResult(ok=False, error_code=login_result.error_code, course=None, lectures=[], content_items=[])
-            return self._course_detail_cache.set(cache_key, detail)
+            return detail
+
+        return self._course_detail_cache.get_or_load(cache_key, load, refresh=refresh, cache_if=lambda result: result.ok)
 
     # -------------------------------------------------------------------- media
 
     def resolve_media(self, username: str, password: str, *, course_id: int | str, module_item_id: int | str) -> ResolvedMediaResult:
-        login_result, resolved = self._authenticated(
-            username, password, lambda: self._resolve_media_authenticated(course_id=course_id, module_item_id=module_item_id)
-        )
+        login_result, resolved = self._resolve_authenticated(username, password, course_id, module_item_id)
         if not login_result.ok or resolved is None:
-            return ResolvedMediaResult(
-                ok=False,
-                error_code=login_result.error_code,
-                course_id=course_id,
-                module_item_id=module_item_id,
-                attendance_item_id=None,
-                title=None,
-                content_id=None,
-                content_type=None,
-                duration=None,
-                download_url=None,
-                download_size=None,
-            )
+            return _failure(ResolvedMediaResult, login_result.error_code, course_id=course_id, module_item_id=module_item_id)
         return resolved.result
 
     def download_lecture(
@@ -684,28 +847,18 @@ class SsuLectureService:
         should_cancel: Callable[[], bool] | None = None,
         conflict_strategy: str = 'rename',
     ) -> DownloadLectureResult:
-        login_result, resolved = self._authenticated(
-            username, password, lambda: self._resolve_media_authenticated(course_id=course_id, module_item_id=module_item_id)
-        )
+        login_result, resolved = self._resolve_authenticated(username, password, course_id, module_item_id)
         if not login_result.ok or resolved is None:
-            return _login_failed_download_result(login_result, dry_run=dry_run, course_id=course_id, module_item_id=module_item_id)
+            return _failure(
+                DownloadLectureResult, login_result.error_code, dry_run=dry_run, written=False, course_id=course_id, module_item_id=module_item_id
+            )
 
-        result = resolved.result
-        plan = plan_download_path(
-            output_dir=output_dir,
-            course_name=course_name,
-            lecture_title=result.title or "lecture",
-            content_id=result.content_id or "content",
-            extension=resolved.extension or "mp4",
-            conflict_strategy=conflict_strategy,
-        )
+        plan, file_size = _planned_file(resolved, output_dir=output_dir, course_name=course_name, fallback_title="lecture", conflict_strategy=conflict_strategy)
         written = False
         skipped = False
-        file_size: int | None = plan.file_path.stat().st_size if plan.file_exists and plan.file_path.exists() else None
         if plan.file_exists and conflict_strategy == 'skip':
             skipped = True
-            if on_progress:
-                on_progress({'stage': 'download_skipped', 'module_item_id': module_item_id, 'output_path': str(plan.file_path), 'file_size': file_size})
+            emit_progress(on_progress, {'stage': 'download_skipped', 'module_item_id': module_item_id, 'output_path': str(plan.file_path), 'file_size': file_size})
         elif not dry_run:
             self._download_resolved(
                 username,
@@ -720,24 +873,7 @@ class SsuLectureService:
             written = True
             file_size = plan.file_path.stat().st_size
 
-        return DownloadLectureResult(
-            ok=True,
-            error_code=None,
-            dry_run=dry_run,
-            written=written,
-            course_id=course_id,
-            module_item_id=module_item_id,
-            attendance_item_id=result.attendance_item_id,
-            title=result.title,
-            content_id=result.content_id,
-            download_url=result.download_url,
-            download_size=result.download_size,
-            output_path=str(plan.file_path),
-            file_size=file_size,
-            file_exists=plan.file_exists,
-            skipped=skipped,
-            conflict_strategy=conflict_strategy,
-        )
+        return _download_result(resolved.result, plan, dry_run=dry_run, written=written, skipped=skipped, file_size=file_size, conflict_strategy=conflict_strategy)
 
     def _download_resolved(
         self,
@@ -754,7 +890,8 @@ class SsuLectureService:
         """Transfer the bytes on a private HTTP client.
 
         A 401/403 from the media host means the signed URL expired: resolve the item
-        again once and resume into the same `.part` file.
+        again once (bypassing the resolved-media cache) and resume into the same
+        `.part` file.
         """
 
         def transfer(current: _ResolvedMediaInternal) -> None:
@@ -774,11 +911,8 @@ class SsuLectureService:
         except Exception as exc:
             if not is_signed_url_failure(exc):
                 raise
-            if on_progress:
-                on_progress({'stage': 'download_reresolving', 'module_item_id': module_item_id, 'output_path': str(plan.file_path)})
-            login_result, fresh = self._authenticated(
-                username, password, lambda: self._resolve_media_authenticated(course_id=course_id, module_item_id=module_item_id)
-            )
+            emit_progress(on_progress, {'stage': 'download_reresolving', 'module_item_id': module_item_id, 'output_path': str(plan.file_path)})
+            login_result, fresh = self._resolve_authenticated(username, password, course_id, module_item_id, refresh=True)
             if not login_result.ok or fresh is None:
                 raise
             transfer(fresh)
@@ -794,51 +928,25 @@ class SsuLectureService:
         output_dir: Path,
         conflict_strategy: str = 'rename',
     ) -> NativeDownloadPlanResult:
-        login_result, resolved = self._authenticated(
-            username, password, lambda: self._resolve_media_authenticated(course_id=course_id, module_item_id=module_item_id)
-        )
+        # The desktop shell transfers right away, and re-plans after a CDN rejection, so it
+        # always needs a freshly signed URL rather than the short-lived resolved-media cache.
+        login_result, resolved = self._resolve_authenticated(username, password, course_id, module_item_id, refresh=True)
         if not login_result.ok or resolved is None:
-            return NativeDownloadPlanResult(
-                result=_login_failed_download_result(login_result, dry_run=True, course_id=course_id, module_item_id=module_item_id),
-                native_download=None,
+            failed = _failure(
+                DownloadLectureResult, login_result.error_code, dry_run=True, written=False, course_id=course_id, module_item_id=module_item_id
             )
+            return NativeDownloadPlanResult(result=failed, native_download=None)
 
-        result = resolved.result
-        plan = plan_download_path(
-            output_dir=output_dir,
-            course_name=course_name,
-            lecture_title=result.title or "lecture",
-            content_id=result.content_id or "content",
-            extension=resolved.extension or "mp4",
-            conflict_strategy=conflict_strategy,
-        )
+        plan, file_size = _planned_file(resolved, output_dir=output_dir, course_name=course_name, fallback_title="lecture", conflict_strategy=conflict_strategy)
         skipped = plan.file_exists and conflict_strategy == 'skip'
-        file_size: int | None = plan.file_path.stat().st_size if plan.file_exists and plan.file_path.exists() else None
-        download_result = DownloadLectureResult(
-            ok=True,
-            error_code=None,
-            dry_run=True,
-            written=False,
-            course_id=course_id,
-            module_item_id=module_item_id,
-            attendance_item_id=result.attendance_item_id,
-            title=result.title,
-            content_id=result.content_id,
-            download_url=result.download_url,
-            download_size=result.download_size,
-            output_path=str(plan.file_path),
-            file_size=file_size,
-            file_exists=plan.file_exists,
-            skipped=skipped,
-            conflict_strategy=conflict_strategy,
-        )
+        download_result = _download_result(resolved.result, plan, dry_run=True, written=False, skipped=skipped, file_size=file_size, conflict_strategy=conflict_strategy)
         return NativeDownloadPlanResult(
             result=download_result,
             native_download=None if skipped else NativeDownloadTransferPlan(
                 download_url=resolved.raw_download_url,
                 referer=resolved.referer,
                 output_path=str(plan.file_path),
-                total_bytes=result.download_size,
+                total_bytes=resolved.result.download_size,
             ),
         )
 
@@ -856,18 +964,7 @@ class SsuLectureService:
             username, password, lambda: self._resolve_official_viewer_authenticated(course_id=course_id, module_item_id=module_item_id)
         )
         if not login_result.ok or resolved is None:
-            return OfficialViewerPlanResult(
-                ok=False,
-                error_code=login_result.error_code,
-                course_id=course_id,
-                module_item_id=module_item_id,
-                attendance_item_id=None,
-                title=None,
-                content_id=None,
-                content_type=None,
-                duration=None,
-                viewer_url=None,
-            )
+            return _failure(OfficialViewerPlanResult, login_result.error_code, course_id=course_id, module_item_id=module_item_id)
         return resolved.result
 
     def official_viewer_session_bridge_plan(
@@ -885,18 +982,11 @@ class SsuLectureService:
 
         login_result, outcome = self._authenticated(username, password, operation)
         if not login_result.ok or outcome is None:
-            return OfficialViewerSessionBridgeResult(
-                ok=False,
-                error_code=login_result.error_code,
+            return _failure(
+                OfficialViewerSessionBridgeResult,
+                login_result.error_code,
                 course_id=course_id,
                 module_item_id=module_item_id,
-                attendance_item_id=None,
-                title=None,
-                content_id=None,
-                content_type=None,
-                duration=None,
-                viewer_url=None,
-                launch_url=None,
                 cookies=[],
                 diagnostics={"cookie_count": 0, "cookie_names": []},
             )
@@ -942,16 +1032,15 @@ class SsuLectureService:
         max_parallel_downloads: int = 4,
     ) -> BatchDownloadResult:
         def emit(event: dict[str, Any]) -> None:
-            if on_progress:
-                on_progress(event)
+            emit_progress(on_progress, event)
 
         def cancelled() -> bool:
             return bool(should_cancel and should_cancel())
 
         def load_content_items() -> list:
             # One module fetch per course; item resolution below reuses it through the modules cache.
-            lister = LearningXLister(self.http)
-            return lister.extract_course_content_items(self._course_modules(course_id, refresh=True))
+            modules = self._course_modules(course_id, max_age=BATCH_MODULES_REUSE_SECONDS)
+            return LearningXLister(self.http).extract_course_content_items(modules)
 
         login_result, content_items = self._authenticated(username, password, load_content_items)
         if not login_result.ok or content_items is None:
@@ -959,33 +1048,50 @@ class SsuLectureService:
 
         selected_lectures = _select_batch_lectures(content_items, module_item_ids=module_item_ids, include_completed=include_completed)
         total = len(selected_lectures)
+        numbered = list(enumerate(selected_lectures, start=1))
+
+        def plan_one(client: Any, entry: tuple[int, Any]) -> Any:
+            index, lecture = entry
+            if cancelled():
+                return _NOT_STARTED
+            emit({"stage": "resolving", "index": index, "total": total, "module_item_id": lecture.module_item_id, "title": lecture.title})
+            return self._plan_batch_item(
+                client,
+                index=index,
+                total=total,
+                lecture=lecture,
+                course_id=course_id,
+                course_name=course_name,
+                output_dir=output_dir,
+                dry_run=dry_run,
+                conflict_strategy=conflict_strategy,
+                emit=emit,
+            )
+
+        def plan_all() -> list[Any]:
+            # Lectures are resolved concurrently; items finished before a session expiry
+            # are served from the resolved-media cache when `_authenticated` retries.
+            outcomes = self._parallel_map(plan_one, numbered, workers=self.resolve_workers)
+            for outcome in outcomes:
+                if isinstance(outcome, Exception) and is_session_lost(outcome):
+                    raise outcome
+            return outcomes
+
+        login_result, outcomes = self._authenticated(username, password, plan_all)
+        if not login_result.ok or outcomes is None:
+            outcomes = [login_result.error_code or "authentication_failed"] * len(numbered)  # str outcome = login failure code
+
         immediate_results: dict[int, BatchDownloadItemResult] = {}
         download_tasks: list[dict[str, Any]] = []
-
-        for index, lecture in enumerate(selected_lectures, start=1):
-            if cancelled():
-                break
+        for (index, lecture), outcome in zip(numbered, outcomes):
+            if outcome is _NOT_STARTED:
+                continue
             module_item_id = lecture.module_item_id
-            assert module_item_id is not None
-            emit({"stage": "resolving", "index": index, "total": total, "module_item_id": module_item_id, "title": lecture.title})
-            try:
-                outcome = self._plan_batch_item(
-                    username,
-                    password,
-                    index=index,
-                    total=total,
-                    lecture=lecture,
-                    course_id=course_id,
-                    course_name=course_name,
-                    output_dir=output_dir,
-                    dry_run=dry_run,
-                    conflict_strategy=conflict_strategy,
-                    emit=emit,
-                )
-            except Exception as exc:
-                emit({"stage": "failed", "index": index, "total": total, "module_item_id": module_item_id, "title": lecture.title, "error_code": type(exc).__name__})
-                outcome = _batch_item_result(course_id=course_id, module_item_id=module_item_id, lecture=lecture, dry_run=dry_run, ok=False, error_code=type(exc).__name__)
-            if isinstance(outcome, BatchDownloadItemResult):
+            if isinstance(outcome, (Exception, str)):
+                code = outcome if isinstance(outcome, str) else type(outcome).__name__
+                emit({"stage": "failed", "index": index, "total": total, "module_item_id": module_item_id, "title": lecture.title, "error_code": code})
+                immediate_results[index] = _batch_item_result(course_id=course_id, module_item_id=module_item_id, lecture=lecture, dry_run=dry_run, ok=False, error_code=code)
+            elif isinstance(outcome, BatchDownloadItemResult):
                 immediate_results[index] = outcome
             else:
                 download_tasks.append(outcome)
@@ -1025,8 +1131,7 @@ class SsuLectureService:
 
     def _plan_batch_item(
         self,
-        username: str,
-        password: str,
+        client: Any,
         *,
         index: int,
         total: int,
@@ -1038,32 +1143,19 @@ class SsuLectureService:
         conflict_strategy: str,
         emit: Callable[[dict[str, Any]], None],
     ) -> BatchDownloadItemResult | dict[str, Any]:
-        """Resolve one lecture: a finished item result (planned/skipped/login failure) or a download task."""
+        """Resolve one lecture on `client`: a finished item result (planned/skipped) or a download task."""
         module_item_id = lecture.module_item_id
-        login_result, resolved = self._authenticated(
-            username, password, lambda: self._resolve_media_authenticated(course_id=course_id, module_item_id=module_item_id)
-        )
-        if not login_result.ok or resolved is None:
-            emit({"stage": "failed", "index": index, "total": total, "module_item_id": module_item_id, "title": lecture.title, "error_code": login_result.error_code})
-            return _batch_item_result(course_id=course_id, module_item_id=module_item_id, lecture=lecture, dry_run=dry_run, ok=False, error_code=login_result.error_code)
-
+        resolved = self._resolve_media_cached(client, course_id=course_id, module_item_id=module_item_id)
         result = resolved.result
-        plan = plan_download_path(
-            output_dir=output_dir,
-            course_name=course_name,
-            lecture_title=result.title or lecture.title or "lecture",
-            content_id=result.content_id or "content",
-            extension=resolved.extension or "mp4",
-            conflict_strategy=conflict_strategy,
-        )
-        file_size: int | None = plan.file_path.stat().st_size if plan.file_exists and plan.file_path.exists() else None
+        plan, file_size = _planned_file(resolved, output_dir=output_dir, course_name=course_name, fallback_title=lecture.title or "lecture", conflict_strategy=conflict_strategy)
         title = result.title or lecture.title
+        item_kwargs = {"course_id": course_id, "module_item_id": module_item_id, "lecture": lecture, "dry_run": dry_run, "resolved": resolved, "plan": plan, "title": title, "file_size": file_size, "conflict_strategy": conflict_strategy}
         if dry_run:
             emit({"stage": "planned", "index": index, "total": total, "module_item_id": module_item_id, "title": title, "output_path": str(plan.file_path), "file_exists": plan.file_exists, "total_bytes": result.download_size})
-            return _batch_item_result(course_id=course_id, module_item_id=module_item_id, lecture=lecture, dry_run=dry_run, resolved=resolved, plan=plan, title=title, file_size=file_size, conflict_strategy=conflict_strategy)
+            return _batch_item_result(**item_kwargs)
         if plan.file_exists and conflict_strategy == 'skip':
             emit({"stage": "skipped", "index": index, "total": total, "module_item_id": module_item_id, "title": title, "output_path": str(plan.file_path), "file_size": file_size, "bytes_written": file_size, "total_bytes": file_size})
-            return _batch_item_result(course_id=course_id, module_item_id=module_item_id, lecture=lecture, dry_run=dry_run, resolved=resolved, plan=plan, title=title, file_size=file_size, skipped=True, conflict_strategy=conflict_strategy)
+            return _batch_item_result(**item_kwargs, skipped=True)
         return {
             "index": index,
             "lecture": lecture,
@@ -1148,34 +1240,28 @@ class SsuLectureService:
                 except Exception as exc:
                     title = planned.get("title") or lecture.title
                     emit({"stage": "failed", "index": index, "total": total, "module_item_id": planned["module_item_id"], "title": title, "error_code": type(exc).__name__})
-                    results[index] = BatchDownloadItemResult(
-                        ok=False,
-                        error_code=type(exc).__name__,
-                        dry_run=dry_run,
-                        written=False,
+                    results[index] = _batch_item_result(
                         course_id=course_id,
                         module_item_id=planned["module_item_id"],
+                        lecture=lecture,
+                        dry_run=dry_run,
+                        plan=planned.get("plan"),
                         title=title,
-                        completed=lecture.completed,
-                        attendance_item_id=None,
-                        content_id=None,
-                        download_url=None,
-                        download_size=None,
-                        output_path=str(planned["plan"].file_path) if planned.get("plan") else None,
-                        file_size=None,
+                        ok=False,
+                        error_code=type(exc).__name__,
                     )
         return results
 
     # ------------------------------------------------------- resolution (locked)
 
-    def _launch_attendance_item(self, *, course_id: int | str, module_item_id: int | str) -> _AttendanceLaunch:
+    def _launch_attendance_item(self, client: Any, *, course_id: int | str, module_item_id: int | str) -> _AttendanceLaunch:
         """Canvas module item -> LTI launch form -> LearningX attendance item detail."""
         module_item_url = f"https://canvas.ssu.ac.kr/courses/{course_id}/modules/items/{module_item_id}"
-        module_item_response = self.http.get("fetch_module_item_html", module_item_url, allow_redirects=True)
+        module_item_response = client.get("fetch_module_item_html", module_item_url, allow_redirects=True)
         module_item_response.raise_for_status()
         form = extract_lti_launch_form(module_item_response.text)
 
-        lti_response = self.http.post(
+        lti_response = client.post(
             "submit_lti_launch",
             form.action,
             data=form.fields,
@@ -1185,13 +1271,9 @@ class SsuLectureService:
         lti_response.raise_for_status()
         attendance_item_id = form.action.rstrip("/").split("/")[-1]
 
-        api_headers = {
-            "Authorization": f"Bearer {self.http.cookies.get('xn_api_token')}",
-            "Accept": "application/json",
-            "Referer": form.action,
-        }
+        api_headers = learningx_api_headers(client.cookies, referer=form.action)
         attendance_url = f"https://canvas.ssu.ac.kr/learningx/api/v1/courses/{course_id}/attendance_items/{attendance_item_id}"
-        attendance_response = self.http.get("get_attendance_item_detail", attendance_url, headers=api_headers)
+        attendance_response = client.get("get_attendance_item_detail", attendance_url, headers=api_headers)
         attendance_response.raise_for_status()
         return _AttendanceLaunch(
             action=form.action,
@@ -1202,7 +1284,7 @@ class SsuLectureService:
 
     def _resolve_official_viewer_authenticated(self, *, course_id: int | str, module_item_id: int | str) -> _ResolvedViewerInternal:
         with self._lock:
-            launch = self._launch_attendance_item(course_id=course_id, module_item_id=module_item_id)
+            launch = self._launch_attendance_item(self.http, course_id=course_id, module_item_id=module_item_id)
         media = launch.media
         if not media.viewer_url:
             raise RuntimeError("attendance item does not expose official viewer_url")
@@ -1222,8 +1304,8 @@ class SsuLectureService:
             raw_viewer_url=media.viewer_url,
         )
 
-    def _module_item_media_from_course_modules(self, *, course_id: int | str, module_item_id: int | str) -> AttendanceItemMedia | None:
-        modules = self._course_modules(course_id)
+    def _module_item_media_from_course_modules(self, client: Any, *, course_id: int | str, module_item_id: int | str) -> AttendanceItemMedia | None:
+        modules = self._course_modules(course_id, http=client)
         for module in modules:
             for item in module.get("module_items", []) or []:
                 if not isinstance(item, dict) or str(item.get("module_item_id")) != str(module_item_id):
@@ -1251,6 +1333,7 @@ class SsuLectureService:
 
     def _resolve_commons_download(
         self,
+        client: Any,
         *,
         course_id: int | str,
         module_item_id: int | str,
@@ -1263,11 +1346,11 @@ class SsuLectureService:
             raise RuntimeError("attendance item does not expose Commons content_id")
 
         commons_url = f"https://canvas.ssu.ac.kr/learningx/api/v1/commons/contents?content_id={media.content_id}"
-        commons_response = self.http.get("get_commons_content", commons_url, headers=api_headers)
+        commons_response = client.get("get_commons_content", commons_url, headers=api_headers)
         commons_response.raise_for_status()
         download = parse_commons_download(commons_response.json())
 
-        head_response = self.http.request(
+        head_response = client.request(
             "head_commons_download",
             "HEAD",
             download.download_url,
@@ -1300,33 +1383,42 @@ class SsuLectureService:
             extension=(media.content_type or "mp4").lower(),
         )
 
-    def _resolve_media_authenticated(self, *, course_id: int | str, module_item_id: int | str) -> _ResolvedMediaInternal:
-        with self._lock:
-            api_headers = {
-                "Authorization": f"Bearer {self.http.cookies.get('xn_api_token')}",
-                "Accept": "application/json",
-                "Referer": "https://canvas.ssu.ac.kr/learningx/dashboard",
-            }
-            module_media = self._module_item_media_from_course_modules(course_id=course_id, module_item_id=module_item_id)
-            if module_media is not None:
-                return self._resolve_commons_download(
-                    course_id=course_id,
-                    module_item_id=module_item_id,
-                    attendance_item_id=module_media.item_id,
-                    media=module_media,
-                    api_headers=api_headers,
-                    referer=f"https://canvas.ssu.ac.kr/courses/{course_id}/modules/items/{module_item_id}",
-                )
-
-            launch = self._launch_attendance_item(course_id=course_id, module_item_id=module_item_id)
+    def _resolve_media_with(self, client: Any, *, course_id: int | str, module_item_id: int | str) -> _ResolvedMediaInternal:
+        """Module item -> Commons download metadata, all requests on `client` (no locking, no cache)."""
+        module_media = self._module_item_media_from_course_modules(client, course_id=course_id, module_item_id=module_item_id)
+        if module_media is not None:
             return self._resolve_commons_download(
+                client,
                 course_id=course_id,
                 module_item_id=module_item_id,
-                attendance_item_id=launch.attendance_item_id,
-                media=launch.media,
-                api_headers=launch.api_headers,
-                referer=launch.action,
+                attendance_item_id=module_media.item_id,
+                media=module_media,
+                api_headers=learningx_api_headers(client.cookies),
+                referer=f"https://canvas.ssu.ac.kr/courses/{course_id}/modules/items/{module_item_id}",
             )
+
+        launch = self._launch_attendance_item(client, course_id=course_id, module_item_id=module_item_id)
+        return self._resolve_commons_download(
+            client,
+            course_id=course_id,
+            module_item_id=module_item_id,
+            attendance_item_id=launch.attendance_item_id,
+            media=launch.media,
+            api_headers=launch.api_headers,
+            referer=launch.action,
+        )
+
+    def _resolve_media_cached(self, client: Any, *, course_id: int | str, module_item_id: int | str, refresh: bool = False) -> _ResolvedMediaInternal:
+        """`_resolve_media_with` behind the short-lived resolved-media cache (plan -> download reuse)."""
+        key = (str(course_id), str(module_item_id))
+        cached = None if refresh else self._resolved_cache.get(key)
+        if cached is not None:
+            return cached
+        return self._resolved_cache.set(key, self._resolve_media_with(client, course_id=course_id, module_item_id=module_item_id))
+
+    def _resolve_media_authenticated(self, *, course_id: int | str, module_item_id: int | str, refresh: bool = False) -> _ResolvedMediaInternal:
+        with self._lock:
+            return self._resolve_media_cached(self.http, course_id=course_id, module_item_id=module_item_id, refresh=refresh)
 
 
 def _select_batch_lectures(content_items: list, *, module_item_ids: list[int | str] | None, include_completed: bool) -> list:

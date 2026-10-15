@@ -5,8 +5,8 @@ import shutil
 import subprocess
 import sys
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable
 
 from ssu_lecture_downloader.postprocess_media import ffmpeg_status
 from ssu_lecture_downloader.stt import check_stt_provider
@@ -15,7 +15,6 @@ InstallProgress = Callable[[dict[str, object]], None]
 INSTALL_TIMEOUT_SECONDS = 900
 INSTALL_POLL_SECONDS = 0.5
 
-SUPPORTED_COMPONENTS = {'ffmpeg', 'faster_whisper'}
 PACKAGE_BY_COMPONENT = {
     'ffmpeg': 'imageio-ffmpeg',
     'faster_whisper': 'faster-whisper',
@@ -37,7 +36,7 @@ def normalize_components(components: list[str] | None) -> list[str]:
     normalized: list[str] = []
     for component in values:
         value = component.strip().lower().replace('-', '_')
-        if value == 'faster_whisper' or value == 'ffmpeg':
+        if value in PACKAGE_BY_COMPONENT:
             if value not in normalized:
                 normalized.append(value)
             continue

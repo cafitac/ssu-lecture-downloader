@@ -37,6 +37,9 @@ def main() -> None:
         port=args.port,
         log_level=args.log_level,
         access_log=False,
+        # The API has no WebSocket routes; skipping the protocol avoids importing
+        # `websockets` (~40 ms) at start-up.
+        ws="none",
     )
 
 

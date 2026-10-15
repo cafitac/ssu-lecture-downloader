@@ -9,15 +9,17 @@ complete when they were swapped in atomically (see postprocess_media / stt).
 from __future__ import annotations
 
 import threading
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from ssu_lecture_downloader import postprocess_media, stt
-from ssu_lecture_downloader.api_models import ArtifactDownloadRequest, artifact_payload, batch_payload
+from ssu_lecture_downloader.api_models import ArtifactDownloadRequest
 from ssu_lecture_downloader.app_context import AppContext
 from ssu_lecture_downloader.jobs import Job, JobOutcome
+from ssu_lecture_downloader.payloads import artifact_payload, batch_payload
 
 MAX_ARTIFACT_POSTPROCESS_WORKERS = 1
 
@@ -31,7 +33,7 @@ class _ItemPaths:
     json: Path
 
     @classmethod
-    def for_video(cls, video_path: Path, audio_format: str) -> "_ItemPaths":
+    def for_video(cls, video_path: Path, audio_format: str) -> _ItemPaths:
         audio = postprocess_media.plan_audio_output_path(video_path, video_path.parent, audio_format)  # type: ignore[arg-type]
         text, md, json_path = stt.transcript_output_paths(audio, video_path.parent)
         return cls(video=video_path, audio=audio, text=text, md=md, json=json_path)
