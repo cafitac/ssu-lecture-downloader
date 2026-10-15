@@ -256,6 +256,8 @@ export interface STTProviderStatus {
   install_hint: string | null;
   recommended_model?: string | null;
   quality_note?: string | null;
+  /** False when this machine cannot run the provider at all; installing will not help. */
+  platform_supported?: boolean;
 }
 
 export interface STTProviderStatusResponse {

@@ -19,6 +19,8 @@ interface Props {
   sizeText: string | null;
   formats: DownloadOutputFormat[];
   formatsLocked: boolean;
+  /** Formats this machine cannot produce, with the reason shown on hover. */
+  unsupportedFormats: Partial<Record<DownloadOutputFormat, string>>;
   onToggleFormat: (format: DownloadOutputFormat) => void;
   missingComponents: MediaComponent[];
   installing: boolean;
@@ -83,8 +85,8 @@ export function ActionBar(props: Props) {
                   type="button"
                   className="format-toggle"
                   aria-pressed={on}
-                  title={hint}
-                  disabled={props.formatsLocked || (on && formats.length === 1)}
+                  title={props.unsupportedFormats[format] ?? hint}
+                  disabled={props.formatsLocked || (on && formats.length === 1) || (!on && format in props.unsupportedFormats)}
                   onClick={() => props.onToggleFormat(format)}
                 >
                   {on && <CheckIcon />}{label}
