@@ -50,12 +50,12 @@ export function useLmsSession() {
     }
   }, [reset]);
 
-  const loadCourses = useCallback(async (id: number | null) => {
+  const loadCourses = useCallback(async (id: number | null, refresh = false) => {
     const request = ++requestRef.current;
     setListState('loading');
     setListError(null);
     try {
-      const response = await fetchCourses(id);
+      const response = await fetchCourses(id, refresh);
       if (request !== requestRef.current) return;
       setCourses(response.courses);
       setListState('ready');
@@ -148,8 +148,9 @@ export function useLmsSession() {
     void loadCourses(id);
   }, [loadCourses]);
 
+  // An explicit refresh skips the backend's LMS caches.
   const refresh = useCallback(() => {
-    void loadCourses(termId);
+    void loadCourses(termId, true);
   }, [loadCourses, termId]);
 
   return { phase, notice, signingIn, terms, termId, courses, listState, listError, signIn, signOut, expire, changeTerm, refresh };

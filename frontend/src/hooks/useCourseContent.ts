@@ -7,11 +7,12 @@ import type { CourseContentItem, CourseSummary } from '../lib/types';
 export type ContentState = 'idle' | 'loading' | 'ready' | 'error';
 
 /** Lecture and material rows of the selected course; a newer selection discards older responses. */
-export function useCourseContent(course: CourseSummary | null, onAuthError: (message: string) => void) {
+export function useCourseContent(course: CourseSummary | null, outputDir: string, onAuthError: (message: string) => void) {
   const [items, setItems] = useState<CourseContentItem[]>([]);
   const [state, setState] = useState<ContentState>('idle');
   const [error, setError] = useState<string | null>(null);
   const [attempt, setAttempt] = useState(0);
+  const refreshRef = useRef(false);
   const onAuthErrorRef = useRef(onAuthError);
   useEffect(() => {
     onAuthErrorRef.current = onAuthError;
@@ -29,7 +30,9 @@ export function useCourseContent(course: CourseSummary | null, onAuthError: (mes
     }
     let cancelled = false;
     setState('loading');
-    fetchCourseDetail(courseId, courseName)
+    const refresh = refreshRef.current;
+    refreshRef.current = false;
+    fetchCourseDetail(courseId, courseName, { refresh, outputDir })
       .then((detail) => {
         if (cancelled) return;
         setItems(detail.content_items?.length ? detail.content_items : detail.lectures.map(legacyLectureToContentItem));
@@ -47,9 +50,13 @@ export function useCourseContent(course: CourseSummary | null, onAuthError: (mes
     return () => {
       cancelled = true;
     };
-  }, [courseId, courseName, attempt]);
+  }, [courseId, courseName, outputDir, attempt]);
 
-  const reload = useCallback(() => setAttempt((current) => current + 1), []);
+  /** Loads the rows again; `refresh` also skips the backend's LMS caches. */
+  const reload = useCallback((refresh = false) => {
+    refreshRef.current = refresh;
+    setAttempt((current) => current + 1);
+  }, []);
 
   return { items, state, error, reload };
 }

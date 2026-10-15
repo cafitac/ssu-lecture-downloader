@@ -53,8 +53,8 @@ function Workspace({ session }: { session: LmsSession }) {
   }, [courses]);
   const course = useMemo(() => courses.find((candidate) => String(candidate.id) === selectedCourseId) ?? null, [courses, selectedCourseId]);
 
-  const content = useCourseContent(course, onAuthError);
   const { dir, pick } = useDownloadDir();
+  const content = useCourseContent(course, dir, onAuthError);
   const downloads = useDownloads({ downloadDir: dir, onAuthError, onError });
   const media = useMediaDependencies({ onMessage: push, downloadBusy: downloads.active });
   const viewer = useOfficialViewer({ notify: push, onAuthError });
@@ -76,7 +76,12 @@ function Workspace({ session }: { session: LmsSession }) {
     [selected, visibleItems],
   );
 
-  const sizes = sumSizes(selectedItems);
+  // Files already in the download folder, as reported by the backend.
+  const savedKeys = useMemo(
+    () => new Set(content.items.filter((item) => item.downloaded_path).map((item) => itemKey(item) as string)),
+    [content.items],
+  );
+    const sizes = sumSizes(selectedItems);
   const sizeText = sizes.bytes > 0 ? (sizes.unknown > 0 ? `${formatBytes(sizes.bytes)} 이상` : formatBytes(sizes.bytes)) : null;
   const missing = tab === 'video' ? media.missingFor(formats) : [];
   const busyElsewhere = media.isInstalling;
@@ -162,7 +167,7 @@ function Workspace({ session }: { session: LmsSession }) {
         listState={session.listState}
         busy={busyElsewhere}
         onTermChange={session.changeTerm}
-        onRefresh={session.refresh}
+        onRefresh={() => { session.refresh(); content.reload(true); }}
         onOpenSettings={() => setSettingsOpen(true)}
       />
       <div className="workspace">
@@ -191,7 +196,7 @@ function Workspace({ session }: { session: LmsSession }) {
               queue={viewer.queue}
               openingKey={viewer.openingKey}
               actionBlockedReason={actionBlockedReason}
-              isDownloaded={(key) => course !== null && downloads.isDownloaded(course.id, key)}
+              isDownloaded={(key) => course !== null && (downloads.isDownloaded(course.id, key) || savedKeys.has(key))}
               onTabChange={setTab}
               onUnwatchedOnlyChange={setUnwatchedOnly}
               onToggle={(key, checked) => setChecked([key], checked)}
