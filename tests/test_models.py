@@ -125,7 +125,7 @@ def test_course_summary_reports_task_deadlines_and_overdue_tasks():
     assert summary.missed_lecture_count == 0
 
 
-def test_deadline_rows_cover_open_late_upcoming_and_recent_missed_items_only():
+def test_deadline_rows_cover_open_late_upcoming_and_all_missed_items():
     from ssu_lecture_downloader.models import build_deadline_items, sort_deadline_rows
 
     items = [
@@ -146,6 +146,7 @@ def test_deadline_rows_cover_open_late_upcoming_and_recent_missed_items_only():
         ('open', 'open'),
         ('upcoming', 'upcoming'),
         ('missed recently', 'missed'),
+        ('missed long ago', 'missed'),
     ]
     first = result[1].model_dump()
     assert first == {
