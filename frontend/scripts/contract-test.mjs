@@ -37,6 +37,10 @@ const requiredFiles = [
   'src/components/DeadlinesPane.tsx',
   'src/lib/deadline.ts',
   'src/hooks/useDeadlines.ts',
+  'src/hooks/useReminders.ts',
+  'src/lib/reminders.ts',
+  'src-tauri/src/reminders.rs',
+  'src-tauri/src/launch_agent.rs',
   'src/components/ActionBar.tsx',
   'src/components/DownloadDrawer.tsx',
   'src/components/SettingsDialog.tsx',
@@ -687,4 +691,45 @@ console.log('frontend contract ok');
   assert.equal(lmsItemUrl('https://canvas.ssu.ac.kr/courses/1/quizzes/3'), 'https://canvas.ssu.ac.kr/courses/1/quizzes/3');
   assert.equal(lmsItemUrl('https://evil.example/ssu.ac.kr'), null);
   assert.equal(lmsItemUrl('http://canvas.ssu.ac.kr/x'), null);
+}
+
+// Deadline reminders: the cache the UI hands to the app, the settings section and the commands.
+{
+  process.env.TZ = 'Asia/Seoul';
+  const { buildDeadlineCache, deadlineCacheId } = await import('../src/lib/reminders.ts');
+  const now = new Date('2026-10-15T03:00:00Z');
+  const base = { course_id: 7, course_name: '운영체제(2026123401)', kind: 'assignment', title: '과제 1', module_item_id: 42, url: 'https://canvas.ssu.ac.kr/courses/7/assignments/42', unlock_at: null, due_at: null, late_at: null, lock_at: null, completed: false, state: 'open' };
+  const cache = buildDeadlineCache([
+    { ...base, due_at: '2026-10-19T14:59:00Z' },
+    { ...base, module_item_id: 43, title: '완료', completed: true, due_at: '2026-10-19T14:59:00Z' },
+    { ...base, module_item_id: 44, title: '놓침', due_at: '2026-10-01T14:59:00Z' },
+    { ...base, module_item_id: 45, kind: 'video', title: '지각 구간', due_at: '2026-10-10T14:59:00Z', late_at: '2026-10-18T14:59:59Z' },
+    { ...base, module_item_id: null, kind: 'quiz', title: '열리기 전', unlock_at: '2026-10-27T00:00:00Z', due_at: '2026-10-30T14:59:00Z' },
+    { ...base, module_item_id: 46, title: '기한 없음' },
+  ], now);
+  assert.deepEqual(cache.map((entry) => entry.title), ['과제 1', '지각 구간', '열리기 전']);
+  assert.deepEqual(cache[0], { id: '7:assignment:42', course: '운영체제', kind: 'assignment', title: '과제 1', deadline_at: Date.parse('2026-10-19T14:59:00Z') / 1000, late: false });
+  assert.equal(cache[1].late, true);
+  assert.equal(cache[1].deadline_at, Date.parse('2026-10-18T14:59:59Z') / 1000);
+  assert.match(cache[2].id, /^7:quiz:t[0-9a-z]+$/);
+  assert.equal(cache[2].id, deadlineCacheId({ ...base, module_item_id: null, kind: 'quiz', title: '열리기 전' }));
+  for (const entry of cache) {
+    assert.deepEqual(Object.keys(entry).sort(), ['course', 'deadline_at', 'id', 'kind', 'late', 'title']);
+  }
+
+  const hook = readFileSync(new URL('../src/hooks/useDeadlines.ts', import.meta.url), 'utf8');
+  assert.ok(/setState\('ready'\);[\s\S]*writeDeadlineCache\(buildDeadlineCache\(response\.deadlines\)\)/.test(hook), 'the deadline cache must be written right after the deadlines load');
+  const desktop = readFileSync(new URL('../src/lib/desktop.ts', import.meta.url), 'utf8');
+  for (const command of ['deadline_cache_write', 'reminders_status', 'reminders_set_enabled', 'reminders_test']) {
+    assert.ok(desktop.includes(`'${command}'`), `desktop.ts must call ${command}`);
+  }
+  const dialog = readFileSync(new URL('../src/components/SettingsDialog.tsx', import.meta.url), 'utf8');
+  for (const text of ['기한 알림', '기한 하루 전과 3시간 전에 알림 받기', '앱이 꺼져 있어도 마지막으로 불러온 기한으로 알려 줘요. 기한이 바뀌었으면 앱을 한 번 열어 새로 불러와 주세요.', '마지막으로 불러온 시각', '알림 테스트']) {
+    assert.ok(dialog.includes(text), `settings dialog missing: ${text}`);
+  }
+  const lib = readFileSync(new URL('../src-tauri/src/lib.rs', import.meta.url), 'utf8');
+  for (const command of ['deadline_cache_write', 'reminders_status', 'reminders_set_enabled', 'reminders_test']) {
+    assert.ok(lib.match(new RegExp(`^\\s+${command},$`, 'm')), `${command} must be registered in the invoke handler`);
+  }
+  assert.ok(lib.indexOf('is_check_invocation') < lib.indexOf('tauri::Builder'), '--check-reminders must exit before Tauri starts');
 }

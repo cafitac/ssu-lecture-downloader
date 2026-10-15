@@ -1,5 +1,7 @@
 import { useState } from 'react';
 import type { MediaDependencies } from '../hooks/useMediaDependencies';
+import { useReminders } from '../hooks/useReminders';
+import { formatDeadline } from '../lib/deadline';
 import { isTauriRuntime } from '../lib/desktop';
 import type { WatchDebugEvent } from '../lib/types';
 import { Dialog } from './Dialog';
@@ -42,6 +44,36 @@ function WatchDiagnostics({ events }: { events: WatchDebugEvent[] }) {
         ))}
       </ul>
     </details>
+  );
+}
+
+function RemindersSection() {
+  const reminders = useReminders(true);
+  const { status } = reminders;
+  const savedAt = status?.last_saved_at ? formatDeadline(new Date(status.last_saved_at * 1000)) : '아직 없어요';
+  return (
+    <section className="setting">
+      <h3>기한 알림</h3>
+      <label className="switch">
+        <input
+          type="checkbox"
+          role="switch"
+          checked={status?.enabled ?? false}
+          disabled={status === null || reminders.busy}
+          onChange={(event) => void reminders.setOn(event.currentTarget.checked)}
+        />
+        <span className="switch-track" aria-hidden="true" />
+        기한 하루 전과 3시간 전에 알림 받기
+      </label>
+      <p className="muted small">앱이 꺼져 있어도 마지막으로 불러온 기한으로 알려 줘요. 기한이 바뀌었으면 앱을 한 번 열어 새로 불러와 주세요.</p>
+      {status && !status.supported && <p className="muted small">이 빌드에서는 앱이 켜져 있는 동안에만 알려 줘요.</p>}
+      <p className="muted small">마지막으로 불러온 시각: {status ? savedAt : '확인 중'}</p>
+      <div className="setting-actions">
+        <button type="button" className="btn btn-sm" onClick={() => void reminders.sendTest()}>알림 테스트</button>
+      </div>
+      {reminders.testSent && <p className="muted small" role="status">알림을 보냈어요. 보이지 않으면 시스템 설정의 알림에서 허용해 주세요.</p>}
+      {reminders.error && <p className="notice notice-danger" role="alert">{reminders.error}</p>}
+    </section>
   );
 }
 
@@ -117,6 +149,8 @@ export function SettingsDialog({ downloadDir, busy, media, debugEvents, onPickFo
         </div>
         {signOutError && <p className="notice notice-danger" role="alert">{signOutError}</p>}
       </section>
+
+      {desktop && <RemindersSection />}
 
       {debugEvents.length > 0 && <WatchDiagnostics events={debugEvents} />}
     </Dialog>

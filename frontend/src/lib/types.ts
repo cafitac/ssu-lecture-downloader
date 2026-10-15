@@ -103,6 +103,16 @@ export interface DeadlineEntryDto {
   state: 'open' | 'late' | 'missed' | 'upcoming';
 }
 
+export interface RemindersStatus {
+  enabled: boolean;
+  /** The background LaunchAgent is installed (reminders while the app is closed). */
+  agent_installed: boolean;
+  /** Unix seconds of the last deadline refresh, or `null` when nothing was saved yet. */
+  last_saved_at: number | null;
+  /** Whether this build can install the background agent (packaged release app only). */
+  supported: boolean;
+}
+
 export interface DeadlinesResponse {
   ok: boolean;
   error_code: string | null;

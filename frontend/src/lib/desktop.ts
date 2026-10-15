@@ -1,4 +1,5 @@
-import type { BackendConnection, BackendSupervisionStatus, DownloadJobStatus, DownloadResult, NativeDownloadPlanResult, OfficialViewerSessionBridgeResult } from './types';
+import type { CachedDeadline } from './reminders';
+import type { BackendConnection, BackendSupervisionStatus, DownloadJobStatus, DownloadResult, NativeDownloadPlanResult, OfficialViewerSessionBridgeResult, RemindersStatus } from './types';
 import { open } from '@tauri-apps/plugin-dialog';
 import { invoke } from '@tauri-apps/api/core';
 import { downloadDir } from '@tauri-apps/api/path';
@@ -190,4 +191,29 @@ export function cancelNativeDownloadJob(jobId: string): Promise<DownloadJobStatu
 function stripNativeTransfer(plan: NativeDownloadPlanResult): DownloadResult {
   const { native_download: _nativeDownload, ...result } = plan;
   return result;
+}
+
+// ------------------------------------------------------------------ deadline reminders
+
+/** Hands the fresh deadlines to the app so reminders keep working while it is closed. */
+export async function writeDeadlineCache(items: CachedDeadline[]): Promise<void> {
+  if (!isTauriRuntime()) return;
+  await invoke<void>('deadline_cache_write', { items });
+}
+
+const BROWSER_REMINDERS: RemindersStatus = { enabled: false, agent_installed: false, last_saved_at: null, supported: false };
+
+export async function remindersStatus(): Promise<RemindersStatus> {
+  if (!isTauriRuntime()) return BROWSER_REMINDERS;
+  return invoke<RemindersStatus>('reminders_status');
+}
+
+export async function setRemindersEnabled(enabled: boolean): Promise<RemindersStatus> {
+  if (!isTauriRuntime()) return BROWSER_REMINDERS;
+  return invoke<RemindersStatus>('reminders_set_enabled', { enabled });
+}
+
+export async function sendTestReminder(): Promise<void> {
+  if (!isTauriRuntime()) return;
+  await invoke<void>('reminders_test');
 }
