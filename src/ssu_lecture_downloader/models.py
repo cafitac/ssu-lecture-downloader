@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Any, Protocol
 
 from pydantic import BaseModel, ConfigDict
@@ -189,7 +189,6 @@ class CourseSummary(BaseModel):
 
 DEADLINE_KINDS = frozenset({"video", "assignment", "quiz"})
 # Missed items older than this are no longer worth listing.
-MISSED_WINDOW = timedelta(days=14)
 
 
 class DeadlineItem(BaseModel):
@@ -220,7 +219,7 @@ def build_deadline_items(
     """Deadline rows of one course as (sort time, item): incomplete videos/assignments/quizzes only.
 
     Rows whose window is open, late or not open yet sort by their next deadline; missed
-    rows (closed within the last 14 days) sort by when they closed. Items without any
+    rows (any this term, so they match the sidebar's missed count) sort by when they closed. Items without any
     deadline are left out.
     """
     rows: list[tuple[datetime, DeadlineItem]] = []
@@ -229,7 +228,7 @@ def build_deadline_items(
             continue
         if lecture_opened(item, now) and lecture_missed(item, now):
             closed = _parse_time(lecture_closed_at(item))
-            if closed is None or now - closed > MISSED_WINDOW:
+            if closed is None:
                 continue
             state, sort_time = "missed", closed
         else:
