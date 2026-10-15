@@ -1052,6 +1052,48 @@ def test_api_refresh_flag_is_forwarded_only_when_requested(tmp_path):
     ]
 
 
+def test_api_deadlines_lists_items_and_forwards_term_and_refresh(tmp_path):
+    from ssu_lecture_downloader.models import DeadlineItem
+    from ssu_lecture_downloader.service import DeadlinesResult
+
+    seen = []
+
+    class DeadlineService(FakeService):
+        def list_deadlines(self, username, password, term_ids=None, **kwargs):
+            seen.append((term_ids, kwargs))
+            item = DeadlineItem(course_id=44070, course_name='UX방법론', kind='quiz', title='퀴즈 1', module_item_id=9, due_at='2026-10-19T14:59:00Z', state='open')
+            return DeadlinesResult(ok=True, error_code=None, deadlines=[item])
+
+    store = FakeCredentialStore(CredentialPair(username='student-id', password='secret-password'))
+    client = TestClient(create_app(service_factory=DeadlineService, default_output_dir=tmp_path, credential_store=store))
+
+    plain = client.get('/api/deadlines')
+    refreshed = client.get('/api/deadlines?term_id=46&refresh=true')
+
+    assert plain.status_code == 200
+    payload = plain.json()
+    assert payload['ok'] is True and payload['deadline_count'] == 1 and payload['term_ids'] is None
+    assert payload['deadlines'][0]['kind'] == 'quiz' and payload['deadlines'][0]['state'] == 'open'
+    assert refreshed.json()['term_ids'] == [46]
+    assert seen == [(None, {}), ([46], {'refresh': True})]
+
+
+def test_api_deadlines_requires_credentials_and_reports_service_errors(tmp_path):
+    from ssu_lecture_downloader.service import DeadlinesResult
+
+    class FailingService(FakeService):
+        def list_deadlines(self, username, password, term_ids=None, **kwargs):
+            return DeadlinesResult(ok=False, error_code='session_expired', deadlines=[])
+
+    anonymous = TestClient(create_app(service_factory=FakeService, default_output_dir=tmp_path, credential_store=FakeCredentialStore()))
+    assert anonymous.get('/api/deadlines').status_code == 400
+
+    store = FakeCredentialStore(CredentialPair(username='student-id', password='secret-password'))
+    client = TestClient(create_app(service_factory=FailingService, default_output_dir=tmp_path, credential_store=store))
+    response = client.get('/api/deadlines')
+    assert response.status_code == 401 and response.json() == {'ok': False, 'error_code': 'session_expired'}
+
+
 def test_course_detail_marks_lectures_that_are_already_on_disk(tmp_path):
     store = FakeCredentialStore(CredentialPair(username='student-id', password='secret-password'))
 

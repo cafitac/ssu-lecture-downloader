@@ -1,6 +1,7 @@
+import { isOpened, nextDeadline, taskStatus } from './deadline.ts';
 import type { CourseContentItem, CourseSummary, LectureItem } from './types';
 
-export type LectureTab = 'video' | 'material';
+export type LectureTab = 'video' | 'material' | 'task';
 
 export function legacyLectureToContentItem(lecture: LectureItem): CourseContentItem {
   return {
@@ -94,13 +95,89 @@ export function splitCourseName(name: string): { title: string; code: string | n
   return { title: name.trim(), code: null };
 }
 
+/** Sidebar line: count of unwatched open ones, or why there are none. */
 export function courseWatchSummary(course: CourseSummary): string {
   if (course.lecture_count <= 0) return '영상 없음';
-  if (course.uncompleted_lecture_count <= 0) return '모두 시청함';
-  return `안 본 강의 ${course.uncompleted_lecture_count}개`;
+  if (course.uncompleted_lecture_count > 0) return `안 본 강의 ${course.uncompleted_lecture_count}개`;
+  if (course.lecture_count === (course.upcoming_lecture_count ?? 0)) return '열린 강의 없음';
+  return '모두 시청함';
 }
 
-export function countVideos(items: CourseContentItem[]): { total: number; watched: number } {
+/** Muted sidebar suffix for weeks that are not open yet, shown once everything open is watched. */
+export function courseUpcomingText(course: CourseSummary): string | null {
+  const upcoming = course.upcoming_lecture_count ?? 0;
+  return upcoming > 0 && course.uncompleted_lecture_count <= 0 && course.lecture_count > upcoming ? `· 예정 ${upcoming}` : null;
+}
+
+/** Video counts of a course: all, watched, and not open yet. */
+export function countVideos(items: CourseContentItem[], now: Date = new Date()): { total: number; watched: number; upcoming: number } {
   const videos = items.filter((item) => item.kind === 'video');
-  return { total: videos.length, watched: videos.filter((item) => item.completed === true).length };
+  return {
+    total: videos.length,
+    watched: videos.filter((item) => item.completed === true).length,
+    upcoming: videos.filter((item) => item.completed !== true && !isOpened(item, now)).length,
+  };
+}
+
+/** A video that is open and not watched yet (what "안 본 것만" keeps). */
+export function isUnwatchedNow(item: CourseContentItem, now: Date = new Date()): boolean {
+  return item.completed !== true && isOpened(item, now);
+}
+
+export function isTaskItem(item: CourseContentItem): boolean {
+  return item.kind === 'assignment' || item.kind === 'quiz';
+}
+
+/**
+ * Assignments and quizzes by what to do next: nearest deadline first, then undated ones,
+ * then overdue, then completed (each part keeps the LMS order for equal deadlines).
+ */
+export function sortTasks(items: CourseContentItem[], now: Date = new Date()): CourseContentItem[] {
+  const rank = (item: CourseContentItem): [number, number] => {
+    const status = taskStatus(item, now);
+    if (status === 'done') return [3, 0];
+    if (status === 'overdue') return [2, 0];
+    const next = nextDeadline(item, now);
+    return next ? [0, next.at.getTime()] : [1, 0];
+  };
+  return items
+    .map((item, index) => ({ item, index, key: rank(item) }))
+    .sort((a, b) => a.key[0] - b.key[0] || a.key[1] - b.key[1] || a.index - b.index)
+    .map(({ item }) => item);
+}
+
+const LMS_ORIGIN = 'https://canvas.ssu.ac.kr';
+
+/** Absolute LMS address of an item, or `null` when the LMS gave none we can open. */
+export function lmsItemUrl(url: string | null | undefined): string | null {
+  const value = url?.trim();
+  if (!value) return null;
+  if (value.startsWith('/')) return `${LMS_ORIGIN}${value}`;
+  // Only open Soongsil hosts in the browser; anything else in LMS data is ignored.
+  try {
+    const parsed = new URL(value);
+    const host = parsed.hostname.toLowerCase();
+    const trusted = parsed.protocol === 'https:' && (host === 'ssu.ac.kr' || host.endsWith('.ssu.ac.kr'));
+    return trusted ? parsed.toString() : null;
+  } catch {
+    return null;
+  }
+}
+
+function earliestDeadline(course: CourseSummary, now: Date): number | null {
+  const times = [course.next_deadline_at, course.next_task_deadline_at]
+    .map((value) => (value ? new Date(value).getTime() : Number.NaN))
+    .filter((value) => Number.isFinite(value) && value > now.getTime());
+  return times.length > 0 ? Math.min(...times) : null;
+}
+
+/** Where to start: a course with open unwatched lectures, else the nearest deadline, else any with lectures. */
+export function pickDefaultCourse(courses: CourseSummary[], now: Date = new Date()): CourseSummary | null {
+  const unwatched = courses.find((course) => course.uncompleted_lecture_count > 0);
+  if (unwatched) return unwatched;
+  const dated = courses
+    .map((course) => ({ course, at: earliestDeadline(course, now) }))
+    .filter((entry): entry is { course: CourseSummary; at: number } => entry.at !== null)
+    .sort((a, b) => a.at - b.at)[0];
+  return dated?.course ?? courses.find((course) => course.lecture_count > 0) ?? courses[0] ?? null;
 }

@@ -1,25 +1,19 @@
 import { itemKey, isSelectable, triState } from '../lib/content';
-import { lectureDeadline } from '../lib/deadline';
+import { isOpened, lectureDeadline } from '../lib/deadline';
 import type { LectureTab, WeekGroup } from '../lib/content';
 import { formatBytes, formatDuration } from '../lib/format';
 import type { CourseContentItem } from '../lib/types';
 import { Checkbox } from './Checkbox';
+import { DeadlineCell } from './DeadlineCell';
 import { DownloadIcon, PlayIcon } from './Icons';
 
-function DeadlineCell({ item }: { item: CourseContentItem }) {
-  const info = lectureDeadline(item);
-  return (
-    <span className={`cell-deadline${info ? ` tone-${info.tone}` : ''}`} title={info?.title}>
-      {info && <><span className="deadline-badge">{info.badge}</span>{info.when && <span className="deadline-when">{info.when}</span>}</>}
-    </span>
-  );
-}
-
-function StatusChips({ item, tab, downloaded }: { item: CourseContentItem; tab: LectureTab; downloaded: boolean }) {
+function StatusChips({ item, tab, downloaded, now }: { item: CourseContentItem; tab: LectureTab; downloaded: boolean; now: Date }) {
+  const opened = isOpened(item, now);
   return (
     <span className="cell-status">
       {tab === 'video' && item.completed === true && <span className="chip chip-success">시청함</span>}
-      {tab === 'video' && item.completed === false && <span className="chip chip-warning">안 봄</span>}
+      {tab === 'video' && item.completed === false && opened && <span className="chip chip-warning">안 봄</span>}
+      {tab === 'video' && item.completed === false && !opened && <span className="chip">열리기 전</span>}
       {downloaded && <span className="chip chip-info">받음</span>}
     </span>
   );
@@ -30,6 +24,7 @@ interface RowProps {
   tab: LectureTab;
   checked: boolean;
   downloaded: boolean;
+  now: Date;
   /** Why the play / download button is unavailable right now, or `null` when it works. */
   actionBlockedReason: string | null;
   actionBusy: boolean;
@@ -39,7 +34,7 @@ interface RowProps {
   onAction: (item: CourseContentItem) => void;
 }
 
-function LectureRow({ item, tab, checked, downloaded, actionBlockedReason, actionBusy, weekLabel, onToggle, onAction }: RowProps) {
+function LectureRow({ item, tab, checked, downloaded, now, actionBlockedReason, actionBusy, weekLabel, onToggle, onAction }: RowProps) {
   const key = itemKey(item);
   const selectable = isSelectable(item);
   const canAct = key !== null && (tab === 'material' ? item.downloadable : true);
@@ -59,8 +54,8 @@ function LectureRow({ item, tab, checked, downloaded, actionBlockedReason, actio
       </span>
       {tab === 'video' && <span className="cell-num cell-length">{formatDuration(item.duration)}</span>}
       <span className="cell-num cell-size">{formatBytes(item.size_bytes)}</span>
-      {tab === 'video' && <DeadlineCell item={item} />}
-      <StatusChips item={item} tab={tab} downloaded={downloaded} />
+      {tab === 'video' && <DeadlineCell info={lectureDeadline(item, now)} />}
+      <StatusChips item={item} tab={tab} downloaded={downloaded} now={now} />
       <span className="cell-action">
         {canAct && (
           <button
@@ -88,6 +83,7 @@ interface ListProps {
   selected: ReadonlySet<string>;
   selectableKeys: string[];
   isDownloaded: (key: string) => boolean;
+  now: Date;
   actionBlockedReason: string | null;
   openingKey: string | null;
   onToggle: (key: string, checked: boolean) => void;
@@ -96,7 +92,7 @@ interface ListProps {
 }
 
 export function LectureList({
-  groups, tab, selected, selectableKeys, isDownloaded, actionBlockedReason, openingKey, onToggle, onToggleMany, onAction,
+  groups, tab, selected, selectableKeys, isDownloaded, now, actionBlockedReason, openingKey, onToggle, onToggleMany, onAction,
 }: ListProps) {
   const overall = triState(selectableKeys, selected);
   return (
@@ -146,6 +142,7 @@ export function LectureList({
                   tab={tab}
                   checked={key !== null && selected.has(key)}
                   downloaded={key !== null && isDownloaded(key)}
+                  now={now}
                   actionBlockedReason={actionBlockedReason}
                   actionBusy={key !== null && openingKey === key}
                   weekLabel={single ? group.title : undefined}

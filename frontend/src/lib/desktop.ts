@@ -99,6 +99,18 @@ export async function openDownloadedFolder(path: string): Promise<void> {
   await invoke<void>('open_path_in_finder', { path });
 }
 
+/**
+ * Opens an LMS page (an assignment or quiz) in the system browser, where the user is usually
+ * signed in already. Only for explicit "open in LMS" actions: lecture playback stays in the app.
+ */
+export async function openUrlInBrowser(address: string): Promise<void> {
+  if (!isTauriRuntime()) {
+    window.open(address, '_blank', 'noopener,noreferrer');
+    return;
+  }
+  await invoke<void>('open_url_in_browser', { url: address });
+}
+
 export async function openOfficialViewer(url: string, title: string, sessionBridge?: OfficialViewerSessionBridgeResult): Promise<void> {
   if (!isTauriRuntime()) {
     window.open(url, '_blank', 'noopener,noreferrer');

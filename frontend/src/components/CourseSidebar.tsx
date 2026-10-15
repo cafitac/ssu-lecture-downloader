@@ -1,7 +1,7 @@
 import { useEffect, useRef } from 'react';
 import type { ListState } from '../hooks/useLmsSession';
-import { courseWatchSummary, splitCourseName } from '../lib/content';
-import { courseDeadline } from '../lib/deadline';
+import { courseUpcomingText, courseWatchSummary, splitCourseName } from '../lib/content';
+import { courseMissedCount, courseNextDeadline } from '../lib/deadline';
 import type { CourseSummary } from '../lib/types';
 import { Spinner } from './Screens';
 
@@ -10,11 +10,12 @@ interface Props {
   selectedId: string | null;
   listState: ListState;
   listError: string | null;
+  now: Date;
   onSelect: (course: CourseSummary) => void;
   onRetry: () => void;
 }
 
-export function CourseSidebar({ courses, selectedId, listState, listError, onSelect, onRetry }: Props) {
+export function CourseSidebar({ courses, selectedId, listState, listError, now, onSelect, onRetry }: Props) {
   const selectedRef = useRef<HTMLButtonElement>(null);
   useEffect(() => {
     selectedRef.current?.scrollIntoView({ block: 'nearest' });
@@ -37,8 +38,9 @@ export function CourseSidebar({ courses, selectedId, listState, listError, onSel
         {courses.map((course) => {
           const selected = String(course.id) === selectedId;
           const { title, code } = splitCourseName(course.name);
-          const deadline = courseDeadline(course.next_deadline_at, course.next_deadline_is_late);
-          const missed = course.missed_lecture_count ?? 0;
+          const deadline = courseNextDeadline(course, now);
+          const missed = courseMissedCount(course);
+          const upcoming = courseUpcomingText(course);
           return (
             <li key={course.id}>
               <button
@@ -52,8 +54,9 @@ export function CourseSidebar({ courses, selectedId, listState, listError, onSel
                 <span className="course-name">{title}</span>
                 <span className="course-meta">
                   {courseWatchSummary(course)}
+                  {upcoming && <span className="course-upcoming">{upcoming}</span>}
                   {deadline && <span className={`course-deadline tone-${deadline.tone}`} title={deadline.title}>{deadline.badge}</span>}
-                  {missed > 0 && <span className="course-deadline tone-missed" title="시청 기한이 모두 지난 강의">놓침 {missed}</span>}
+                  {missed > 0 && <span className="course-deadline tone-missed" title="기한이 모두 지난 강의와 과제·퀴즈">놓침 {missed}</span>}
                 </span>
               </button>
             </li>

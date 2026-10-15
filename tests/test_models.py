@@ -22,6 +22,9 @@ def test_course_summary_counts_uncompleted_lectures_from_typed_items():
         "next_deadline_at": None,
         "next_deadline_is_late": False,
         "missed_lecture_count": 0,
+        "upcoming_lecture_count": 0,
+        "next_task_deadline_at": None,
+        "overdue_task_count": 0,
     }
 
 
@@ -53,3 +56,99 @@ def test_course_summary_reports_the_next_open_deadline_and_missed_lectures():
     assert summary.next_deadline_is_late is True
     assert summary.missed_lecture_count == 1
     assert summary.uncompleted_lecture_count == 3
+
+
+
+def _now():
+    from datetime import datetime, timezone
+
+    return datetime(2026, 10, 15, 12, tzinfo=timezone.utc)
+
+
+def _video(title, *, completed=False, unlock=None, due=None, late=None, lock=None):
+    return LectureItem(module_id=1, module_name='m', item_id=title, title=title, completed=completed, unlock_at=unlock, due_at=due, late_at=late, lock_at=lock)
+
+
+def _task(title, kind='assignment', *, completed=False, unlock=None, due=None, lock=None, url=None):
+    from ssu_lecture_downloader.models import CourseContentItem
+
+    return CourseContentItem(
+        module_id=1, module_name='m', item_id=title, module_item_id=title, title=title, kind=kind, completed=completed,
+        unlock_at=unlock, due_at=due, lock_at=lock, url=url,
+    )
+
+
+def test_lectures_that_are_not_open_yet_are_upcoming_not_unwatched():
+    lectures = [
+        _video('opened', unlock='2026-10-12T00:00:00Z', due='2026-10-20T14:59:59Z'),
+        _video('opens later', unlock='2026-10-19T00:00:00Z', due='2026-10-24T14:59:59Z'),
+        _video('opens next week', unlock='2026-10-22T00:00:00Z', due='2026-10-29T14:59:59Z'),
+        _video('no unlock time', due='2026-10-30T14:59:59Z'),
+        _video('opened and watched', completed=True, unlock='2026-10-01T00:00:00Z'),
+    ]
+
+    summary = CourseSummary.from_lectures(id=1, name='c', module_count=1, lectures=lectures, now=_now())
+
+    assert summary.lecture_count == 5
+    assert summary.uncompleted_lecture_count == 2  # 'opened' + 'no unlock time'
+    assert summary.upcoming_lecture_count == 2
+    assert summary.next_deadline_at == '2026-10-20T14:59:59Z'  # not-yet-open deadlines are ignored
+
+
+def test_not_yet_open_lectures_are_never_missed():
+    lectures = [_video('future', unlock='2026-10-20T00:00:00Z', due='2026-10-01T00:00:00Z')]
+
+    summary = CourseSummary.from_lectures(id=1, name='c', module_count=1, lectures=lectures, now=_now())
+
+    assert summary.missed_lecture_count == 0
+    assert summary.next_deadline_at is None
+    assert summary.upcoming_lecture_count == 1
+
+
+def test_course_summary_reports_task_deadlines_and_overdue_tasks():
+    tasks = [
+        _task('done', completed=True, due='2026-10-16T14:59:59Z'),
+        _task('later', due='2026-10-30T14:59:59Z', lock='2026-11-01T14:59:59Z'),
+        _task('soon quiz', 'quiz', due='2026-10-17T14:59:00Z'),
+        _task('late window', due='2026-10-10T14:59:59Z', lock='2026-10-18T14:59:59Z'),
+        _task('overdue', due='2026-10-01T14:59:59Z', lock='2026-10-08T14:59:59Z'),
+        _task('overdue quiz', 'quiz', due='2026-10-05T14:59:00Z'),
+        _task('no deadline'),
+        _task('a board', 'board', due='2026-10-01T00:00:00Z'),
+    ]
+
+    summary = CourseSummary.from_lectures(id=1, name='c', module_count=1, lectures=[], tasks=tasks, now=_now())
+
+    assert summary.next_task_deadline_at == '2026-10-17T14:59:00Z'
+    assert summary.overdue_task_count == 2
+    assert summary.next_deadline_at is None  # lecture fields keep their meaning
+    assert summary.missed_lecture_count == 0
+
+
+def test_deadline_rows_cover_open_late_upcoming_and_recent_missed_items_only():
+    from ssu_lecture_downloader.models import build_deadline_items, sort_deadline_rows
+
+    items = [
+        _task('open', due='2026-10-20T14:59:59Z', lock='2026-10-27T14:59:59Z', url='https://lms/a'),
+        _task('late', due='2026-10-14T14:59:59Z', lock='2026-10-18T14:59:59Z'),
+        _task('upcoming', unlock='2026-10-22T00:00:00Z', due='2026-10-25T14:59:59Z'),
+        _task('missed recently', 'quiz', due='2026-10-10T14:59:00Z'),
+        _task('missed long ago', due='2026-09-01T14:59:59Z'),
+        _task('completed', completed=True, due='2026-10-20T14:59:59Z'),
+        _task('no deadline'),
+        _task('a page', 'page', due='2026-10-20T14:59:59Z'),
+    ]
+    rows = build_deadline_items(course_id=7, course_name='과목', content_items=items, now=_now())
+    result = sort_deadline_rows(rows)
+
+    assert [(item.title, item.state) for item in result] == [
+        ('late', 'late'),
+        ('open', 'open'),
+        ('upcoming', 'upcoming'),
+        ('missed recently', 'missed'),
+    ]
+    first = result[1].model_dump()
+    assert first == {
+        'course_id': 7, 'course_name': '과목', 'kind': 'assignment', 'title': 'open', 'module_item_id': 'open', 'url': 'https://lms/a',
+        'unlock_at': None, 'due_at': '2026-10-20T14:59:59Z', 'late_at': None, 'lock_at': '2026-10-27T14:59:59Z', 'completed': False, 'state': 'open',
+    }

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import dataclasses
 import threading
+from datetime import datetime, timezone
 from collections.abc import Callable, Iterable, Iterator
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
@@ -34,7 +35,13 @@ from ssu_lecture_downloader.media import (
     parse_attendance_item_media,
     parse_commons_download,
 )
-from ssu_lecture_downloader.models import CourseSummary
+from ssu_lecture_downloader.models import (
+    CourseSummary,
+    DeadlineItem,
+    build_deadline_items,
+    is_task,
+    sort_deadline_rows,
+)
 from ssu_lecture_downloader.progress import emit_progress
 from ssu_lecture_downloader.redaction import redact_url
 
@@ -82,6 +89,13 @@ class CourseDiscoveryResult:
     @property
     def course_count(self) -> int:
         return len(self.courses)
+
+
+@dataclass(frozen=True)
+class DeadlinesResult:
+    ok: bool
+    error_code: str | None
+    deadlines: list[DeadlineItem]
 
 
 @dataclass(frozen=True)
@@ -779,7 +793,8 @@ class SsuLectureService:
                 if course_id is None:
                     continue
                 modules = modules_by_id[str(course_id)]
-                summary.append(CourseSummary.from_course_and_modules(course, modules, lister.extract_lecture_items(modules)))
+                tasks = [item for item in lister.extract_course_content_items(modules) if is_task(item)]
+                summary.append(CourseSummary.from_course_and_modules(course, modules, lister.extract_lecture_items(modules), tasks=tasks))
             return summary
 
         def load() -> CourseDiscoveryResult:
@@ -789,6 +804,41 @@ class SsuLectureService:
             return CourseDiscoveryResult(ok=True, error_code=None, login=login_result, courses=summary)
 
         return self._courses_cache.get_or_load(cache_key, load, refresh=refresh, cache_if=lambda result: result.ok)
+
+    def list_deadlines(
+        self,
+        username: str,
+        password: str,
+        term_ids: list[int] | None = None,
+        *,
+        refresh: bool = False,
+        now: datetime | None = None,
+    ) -> DeadlinesResult:
+        """Upcoming and recently missed videos/assignments/quizzes across the courses of a term.
+
+        Built from the cached course list and module lists, so right after the course list
+        was loaded it needs no upstream request. `refresh` reloads both once.
+        """
+        courses_result = self.discover_courses(username, password, term_ids=term_ids, refresh=refresh)
+        if not courses_result.ok:
+            return DeadlinesResult(ok=False, error_code=courses_result.error_code, deadlines=[])
+        now = now or datetime.now(timezone.utc)
+        course_ids = [course.id for course in courses_result.courses]
+
+        def operation() -> list[DeadlineItem]:
+            lister = LearningXLister(self.http)
+            # The course list just (re)loaded these module lists; a cached copy is current enough.
+            modules_by_id = self._fetch_modules(course_ids)
+            rows = []
+            for course in courses_result.courses:
+                content_items = lister.extract_course_content_items(modules_by_id[str(course.id)])
+                rows.extend(build_deadline_items(course_id=course.id, course_name=course.name, content_items=content_items, now=now))
+            return sort_deadline_rows(rows)
+
+        login_result, deadlines = self._authenticated(username, password, operation)
+        if not login_result.ok or deadlines is None:
+            return DeadlinesResult(ok=False, error_code=login_result.error_code, deadlines=[])
+        return DeadlinesResult(ok=True, error_code=None, deadlines=deadlines)
 
     def get_course_detail(
         self,
@@ -808,7 +858,8 @@ class SsuLectureService:
             modules = self._course_modules(course_id, refresh=refresh)
             lectures = lister.extract_lecture_items(modules)
             content_items = lister.extract_course_content_items(modules)
-            course = CourseSummary.from_lectures(id=course_id, name=course_name or "", module_count=len(modules), lectures=lectures)
+            tasks = [item for item in content_items if is_task(item)]
+            course = CourseSummary.from_lectures(id=course_id, name=course_name or "", module_count=len(modules), lectures=lectures, tasks=tasks)
             return CourseDetailResult(ok=True, error_code=None, course=course, lectures=lectures, content_items=content_items)
 
         def load() -> CourseDetailResult:

@@ -304,3 +304,57 @@ def test_every_native_plan_resolves_a_fresh_signed_url(tmp_path: Path):
     # A re-plan after a CDN 403 must not get the cached (possibly expired) URL back.
     assert first.native_download is not None and again.native_download is not None
     assert upstream.count('get_commons_content') == 1
+
+
+def test_deadlines_after_the_course_list_need_no_upstream_request():
+    service, upstream = make_service()
+    service.discover_courses('u', 'p', term_ids=[46])
+    upstream.reset()
+
+    result = service.list_deadlines('u', 'p', term_ids=[46])
+
+    assert result.ok
+    assert upstream.total() == 0
+
+
+def test_deadlines_cover_every_course_of_the_term_sorted_by_deadline():
+    from datetime import datetime, timezone
+
+    def modules_with_deadlines(course_id):
+        due = {101: '2026-10-21T14:59:59Z', 102: '2026-10-19T14:59:59Z', 103: '2026-10-20T14:59:00Z'}[course_id]
+        kind = {101: 'attendance_item', 102: 'assignment', 103: 'quiz'}[course_id]
+        item = {
+            'id': course_id, 'module_item_id': course_id, 'title': f'항목 {course_id}', 'content_type': kind, 'completed': False,
+            'url': f'https://canvas.ssu.ac.kr/x/{course_id}',
+            'content_data': {'due_at': due, 'item_content_data': {'content_type': 'mp4', 'duration': 60} if kind == 'attendance_item' else {}},
+        }
+        return [{'id': course_id, 'name': '1주차', 'module_items': [item]}]
+
+    service, upstream = make_service()
+    original = FakeClient.get
+
+    def get(self, step, url, **kwargs):
+        if step == 'list_course_modules':
+            self._hit(step)
+            return Response(modules_with_deadlines(int(url.split('/courses/')[1].split('/')[0])))
+        return original(self, step, url, **kwargs)
+
+    FakeClient.get = get
+    try:
+        result = service.list_deadlines('u', 'p', term_ids=[46], now=datetime(2026, 10, 15, tzinfo=timezone.utc))
+    finally:
+        FakeClient.get = original
+
+    assert result.ok
+    assert [(item.course_id, item.kind) for item in result.deadlines] == [(102, 'assignment'), (103, 'quiz'), (101, 'video')]
+    assert upstream.count('list_course_modules') == 3  # one fetch per course, shared with the course list
+
+
+def test_deadlines_refresh_reloads_modules_once():
+    service, upstream = make_service()
+    service.discover_courses('u', 'p', term_ids=[46])
+    upstream.reset()
+
+    service.list_deadlines('u', 'p', term_ids=[46], refresh=True)
+
+    assert upstream.count('list_course_modules') == 3

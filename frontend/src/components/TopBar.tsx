@@ -16,12 +16,16 @@ interface Props {
   termId: number | null;
   listState: ListState;
   busy: boolean;
+  /** Items due today or within three days. */
+  dueSoonCount: number;
+  deadlinesOpen: boolean;
+  onToggleDeadlines: () => void;
   onTermChange: (termId: number) => void;
   onRefresh: () => void;
   onOpenSettings: () => void;
 }
 
-export function TopBar({ terms, termId, listState, busy, onTermChange, onRefresh, onOpenSettings }: Props) {
+export function TopBar({ terms, termId, listState, busy, dueSoonCount, deadlinesOpen, onToggleDeadlines, onTermChange, onRefresh, onOpenSettings }: Props) {
   const currentTermId = terms.find((term) => term.is_current)?.term_id ?? null;
   const loading = listState === 'loading';
   return (
@@ -40,6 +44,16 @@ export function TopBar({ terms, termId, listState, busy, onTermChange, onRefresh
         </select>
       )}
       <span className="topbar-spacer" />
+      <button
+        type="button"
+        className={`btn btn-ghost deadlines-toggle${deadlinesOpen ? ' is-active' : ''}`}
+        aria-pressed={deadlinesOpen}
+        aria-label={dueSoonCount > 0 ? `다가오는 기한, 3일 안에 ${dueSoonCount}건` : '다가오는 기한'}
+        title="다가오는 기한 (강의·과제·퀴즈)"
+        onClick={onToggleDeadlines}
+      >
+        기한{dueSoonCount > 0 && <span className="count-badge">{dueSoonCount}</span>}
+      </button>
       <span className="signed-in"><i aria-hidden="true" />로그인됨</span>
       <button
         type="button"

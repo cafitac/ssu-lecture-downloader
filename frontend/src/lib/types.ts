@@ -32,6 +32,12 @@ export interface CourseSummary {
   next_deadline_at?: string | null;
   next_deadline_is_late?: boolean;
   missed_lecture_count?: number;
+  /** Unwatched lectures whose week has not opened yet (`uncompleted_lecture_count` counts open ones only). */
+  upcoming_lecture_count?: number;
+  /** Earliest due/lock still ahead among incomplete assignments and quizzes. */
+  next_task_deadline_at?: string | null;
+  /** Incomplete assignments/quizzes whose due and lock times have all passed. */
+  overdue_task_count?: number;
 }
 
 export interface LectureItem {
@@ -79,6 +85,30 @@ export interface CoursesResponse {
   course_count: number;
   courses: CourseSummary[];
   term_ids: number[] | null;
+}
+
+export interface DeadlineEntryDto {
+  course_id: string | number;
+  course_name: string;
+  kind: 'video' | 'assignment' | 'quiz';
+  title: string;
+  module_item_id: string | number | null;
+  url: string | null;
+  unlock_at: string | null;
+  due_at: string | null;
+  late_at: string | null;
+  lock_at: string | null;
+  completed: boolean;
+  /** Backend's view when it answered; the UI recomputes it from the times. */
+  state: 'open' | 'late' | 'missed' | 'upcoming';
+}
+
+export interface DeadlinesResponse {
+  ok: boolean;
+  error_code: string | null;
+  term_ids: number[] | null;
+  deadline_count: number;
+  deadlines: DeadlineEntryDto[];
 }
 
 export interface CourseDetailResponse {
