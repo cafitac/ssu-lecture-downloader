@@ -3,7 +3,9 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import platform
 import shutil
+import sys
 import threading
 from collections.abc import Callable
 from pathlib import Path
@@ -27,6 +29,8 @@ class STTProviderStatus(BaseModel):
     install_hint: str | None = None
     recommended_model: str | None = None
     quality_note: str | None = None
+    # False when this machine cannot run the provider at all (no install can fix it).
+    platform_supported: bool = True
 
 
 class TranscriptSegment(BaseModel):
@@ -72,6 +76,11 @@ def whisper_cpp_install_hint() -> str:
     return '앱 패키지에 포함된 whisper.cpp CLI를 찾지 못했습니다. 개발 모드에서는 별도 실험 기능으로만 설정하고, 배포 앱에서는 앱을 재설치해 주세요.'
 
 
+def faster_whisper_platform_supported() -> bool:
+    # faster-whisper's CTranslate2 wheels are not published for Intel Macs (see pyproject markers).
+    return not (sys.platform == 'darwin' and platform.machine() == 'x86_64')
+
+
 def _has_faster_whisper() -> bool:
     return importlib.util.find_spec('faster_whisper') is not None
 
@@ -81,11 +90,13 @@ def check_stt_provider(provider: str = 'faster_whisper') -> STTProviderStatus:
         return STTProviderStatus(provider='fake', installed=True, available=True, recommended_model='test-only')
     if provider == 'faster_whisper':
         installed = _has_faster_whisper()
+        supported = installed or faster_whisper_platform_supported()
         return STTProviderStatus(
             provider='faster_whisper',
             installed=installed,
             available=installed,
-            install_hint=None if installed else faster_whisper_install_hint(),
+            install_hint=None if installed else (faster_whisper_install_hint() if supported else '이 Mac(Intel)에서는 자막 생성을 지원하지 않아요. Apple 실리콘 Mac에서 사용할 수 있어요.'),
+            platform_supported=supported,
             recommended_model=DEFAULT_STT_MODEL,
             quality_note='한국어 강의 정확도를 우선해 Whisper large-v3를 기본값으로 사용합니다. 첫 실행 시 모델 다운로드/준비 시간이 길 수 있습니다.',
         )

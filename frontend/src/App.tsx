@@ -44,11 +44,15 @@ function Workspace({ session }: { session: LmsSession }) {
   const onAuthError = useCallback((message: string) => { void expire(message); }, [expire]);
   const onError = useCallback((message: string) => push(message, 'error'), [push]);
 
-  // Keep a valid course selected: the first one after (re)loading the list.
+  // Keep a valid course selected; after (re)loading, start where there is something left to watch.
   useEffect(() => {
     setSelectedCourseId((current) => {
       if (courses.length === 0) return null;
-      return current !== null && courses.some((course) => String(course.id) === current) ? current : String(courses[0].id);
+      if (current !== null && courses.some((course) => String(course.id) === current)) return current;
+      const preferred = courses.find((course) => course.uncompleted_lecture_count > 0)
+        ?? courses.find((course) => course.lecture_count > 0)
+        ?? courses[0];
+      return String(preferred.id);
     });
   }, [courses]);
   const course = useMemo(() => courses.find((candidate) => String(candidate.id) === selectedCourseId) ?? null, [courses, selectedCourseId]);
@@ -227,6 +231,7 @@ function Workspace({ session }: { session: LmsSession }) {
             sizeText={sizeText}
             formats={formats}
             formatsLocked={downloads.active}
+            unsupportedFormats={media.subtitlesUnsupportedReason ? { txt: media.subtitlesUnsupportedReason } : {}}
             onToggleFormat={toggleFormat}
             missingComponents={missing}
             installing={media.isInstalling}

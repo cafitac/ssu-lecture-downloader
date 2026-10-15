@@ -90,7 +90,7 @@ export function DownloadDrawer({ rows, summary, starting, active, cancelRequeste
         {finished && retryable.length > 1 && (
           <button type="button" className="btn" onClick={() => onRetry()}>남은 {retryable.length}개 다시 시도</button>
         )}
-        {finished && canOpenFolder && summary.done > 0 && (
+        {finished && canOpenFolder && summary.done > 0 && rows.length > 1 && (
           <button type="button" className="btn" onClick={() => onOpenFolder()}><FolderIcon />폴더 열기</button>
         )}
       </footer>

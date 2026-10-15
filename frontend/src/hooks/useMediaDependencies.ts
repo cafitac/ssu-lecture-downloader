@@ -70,10 +70,13 @@ export function useMediaDependencies({ onMessage, downloadBusy }: Options) {
   });
 
   const whisperStatus = sttProviders.find((provider) => provider.provider === 'faster_whisper');
+  const subtitlesUnsupportedReason = whisperStatus?.platform_supported === false
+    ? whisperStatus.install_hint ?? '이 기기에서는 자막 생성을 지원하지 않아요.'
+    : null;
   const ffmpegDependency = runtimeDependencies.find((dependency) => dependency.name === 'ffmpeg');
   const missingComponents: MediaComponent[] = [
     ffmpegDependency && !ffmpegDependency.available ? 'ffmpeg' as const : null,
-    whisperStatus && !whisperStatus.available ? 'faster_whisper' as const : null,
+    whisperStatus && !whisperStatus.available && subtitlesUnsupportedReason === null ? 'faster_whisper' as const : null,
   ].filter((component): component is MediaComponent => Boolean(component));
   const isInstalling = installJob?.status === 'queued' || installJob?.status === 'running';
 
@@ -103,6 +106,7 @@ export function useMediaDependencies({ onMessage, downloadBusy }: Options) {
     missingFor,
     ffmpegDependency,
     whisperStatus,
+    subtitlesUnsupportedReason,
     autoInstallAvailable,
     autoInstallUnavailableReason,
   };

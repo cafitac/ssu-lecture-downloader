@@ -17,11 +17,11 @@ interface Props {
   onClose: () => void;
 }
 
-function ComponentRow({ name, ready }: { name: string; ready: boolean | null }) {
+function ComponentRow({ name, ready, unsupported = false }: { name: string; ready: boolean | null; unsupported?: boolean }) {
   return (
     <li className="setting-row">
       <span>{name}</span>
-      {ready === null ? <span className="chip">확인 중</span> : ready ? <span className="chip chip-success">사용 가능</span> : <span className="chip chip-warning">설치 필요</span>}
+      {unsupported ? <span className="chip">지원 안 함</span> : ready === null ? <span className="chip">확인 중</span> : ready ? <span className="chip chip-success">사용 가능</span> : <span className="chip chip-warning">설치 필요</span>}
     </li>
   );
 }
@@ -85,9 +85,9 @@ export function SettingsDialog({ downloadDir, busy, media, debugEvents, onPickFo
         <h3>음성·자막 구성요소</h3>
         <ul className="setting-list">
           <ComponentRow name="음성 변환" ready={known ? media.ffmpegDependency?.available ?? null : null} />
-          <ComponentRow name="자막 생성" ready={known ? media.whisperStatus?.available ?? null : null} />
+          <ComponentRow name="자막 생성" ready={known ? media.whisperStatus?.available ?? null : null} unsupported={media.subtitlesUnsupportedReason !== null} />
         </ul>
-        <p className="muted small">자막은 Whisper large-v3 모델로 만들어요. 처음 만들 때는 모델을 준비하느라 오래 걸릴 수 있어요.</p>
+        <p className="muted small">{media.subtitlesUnsupportedReason ?? '자막은 Whisper large-v3 모델로 만들어요. 처음 만들 때는 모델을 준비하느라 오래 걸릴 수 있어요.'}</p>
         <div className="setting-actions">
           {missing.length > 0 && (
             <button
