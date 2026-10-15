@@ -2,10 +2,13 @@ import type { ListState } from '../hooks/useLmsSession';
 import type { TermSummary } from '../lib/types';
 import { RefreshIcon, SettingsIcon } from './Icons';
 
-function termName(term: TermSummary): string {
+/** LMS term names when the backend has them; otherwise this term vs. earlier ones. */
+function termName(term: TermSummary, currentId: number | null): string {
   const label = term.label?.trim();
-  const base = label && !/^term\s*\d+$/i.test(label) ? label : `학기 ${term.term_id}`;
-  return term.is_current ? `${base} (현재)` : base;
+  if (label && !/^term\s*\d+$/i.test(label)) return term.is_current ? `${label} (이번 학기)` : label;
+  if (term.is_current) return '이번 학기';
+  if (currentId !== null && term.term_id < currentId) return `지난 학기 (${term.term_id})`;
+  return `학기 ${term.term_id}`;
 }
 
 interface Props {
@@ -19,6 +22,7 @@ interface Props {
 }
 
 export function TopBar({ terms, termId, listState, busy, onTermChange, onRefresh, onOpenSettings }: Props) {
+  const currentTermId = terms.find((term) => term.is_current)?.term_id ?? null;
   const loading = listState === 'loading';
   return (
     <header className="topbar">
@@ -32,7 +36,7 @@ export function TopBar({ terms, termId, listState, busy, onTermChange, onRefresh
           onChange={(event) => onTermChange(Number(event.target.value))}
         >
           {termId === null && <option value="" disabled>학기 선택</option>}
-          {terms.map((term) => <option key={term.term_id} value={term.term_id}>{termName(term)}</option>)}
+          {terms.map((term) => <option key={term.term_id} value={term.term_id}>{termName(term, currentTermId)}</option>)}
         </select>
       )}
       <span className="topbar-spacer" />

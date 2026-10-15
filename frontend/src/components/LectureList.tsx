@@ -23,11 +23,13 @@ interface RowProps {
   /** Why the play / download button is unavailable right now, or `null` when it works. */
   actionBlockedReason: string | null;
   actionBusy: boolean;
+  /** Week shown inline when the week has only this row (no separate header). */
+  weekLabel?: string;
   onToggle: (key: string, checked: boolean) => void;
   onAction: (item: CourseContentItem) => void;
 }
 
-function LectureRow({ item, tab, checked, downloaded, actionBlockedReason, actionBusy, onToggle, onAction }: RowProps) {
+function LectureRow({ item, tab, checked, downloaded, actionBlockedReason, actionBusy, weekLabel, onToggle, onAction }: RowProps) {
   const key = itemKey(item);
   const selectable = isSelectable(item);
   const canAct = key !== null && (tab === 'material' ? item.downloadable : true);
@@ -41,7 +43,10 @@ function LectureRow({ item, tab, checked, downloaded, actionBlockedReason, actio
           onChange={(value) => key !== null && onToggle(key, value)}
         />
       </span>
-      <span className="cell-title" title={selectable ? item.title : `${item.title} (받을 수 없는 항목)`}>{item.title}</span>
+      <span className="cell-title" title={selectable ? item.title : `${item.title} (받을 수 없는 항목)`}>
+        {weekLabel && <span className="week-tag">{weekLabel}</span>}
+        {item.title}
+      </span>
       {tab === 'video' && <span className="cell-num cell-length">{formatDuration(item.duration)}</span>}
       <span className="cell-num cell-size">{formatBytes(item.size_bytes)}</span>
       <StatusChips item={item} tab={tab} downloaded={downloaded} />
@@ -104,9 +109,10 @@ export function LectureList({
       {groups.map((group) => {
         const keys = group.items.filter(isSelectable).map((item) => itemKey(item) as string);
         const state = triState(keys, selected);
+        const single = group.items.length === 1;
         return (
           <section key={group.key} className="week" aria-label={group.title}>
-            <label className="week-head">
+            {!single && <label className="week-head">
               <span className="cell-check">
                 <Checkbox
                   checked={state === 'all'}
@@ -118,7 +124,7 @@ export function LectureList({
               </span>
               <span className="week-title" title={group.title}>{group.title}</span>
               <span className="week-count">{group.items.length}</span>
-            </label>
+            </label>}
             {group.items.map((item, index) => {
               const key = itemKey(item);
               return (
@@ -130,6 +136,7 @@ export function LectureList({
                   downloaded={key !== null && isDownloaded(key)}
                   actionBlockedReason={actionBlockedReason}
                   actionBusy={key !== null && openingKey === key}
+                  weekLabel={single ? group.title : undefined}
                   onToggle={onToggle}
                   onAction={onAction}
                 />
