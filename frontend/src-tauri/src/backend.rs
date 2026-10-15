@@ -557,6 +557,10 @@ fn open_backend_log(path: &Path) -> std::io::Result<(Stdio, Stdio)> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
+    // Keep the previous run's log so a crash before a restart stays diagnosable.
+    if path.exists() {
+        let _ = fs::rename(path, path.with_extension("previous.log"));
+    }
     let file = File::create(path)?;
     let stderr = file.try_clone()?;
     Ok((Stdio::from(file), Stdio::from(stderr)))
