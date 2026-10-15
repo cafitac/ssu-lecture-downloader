@@ -311,3 +311,19 @@ export interface BackendConnection {
   /** Per-launch token for a Tauri-managed backend; null for external/Vite backends. */
   token: string | null;
 }
+
+export type WatchDebugEvent = {
+  stage: string;
+  mode?: string;
+  frame?: string;
+  host?: string;
+  ready_state?: string;
+  videos?: string;
+  video_state?: string;
+  buttons?: string;
+  selector?: string;
+  error_name?: string;
+  error_message?: string;
+};
+
+export type WatchQueueState = { active: boolean; index: number; total: number };

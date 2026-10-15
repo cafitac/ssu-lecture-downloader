@@ -1,6 +1,6 @@
-# SSU Lecture Downloader UI Prototype
+# SSU Lecture Downloader UI
 
-Lightweight React/Vite prototype for the local SSU lecture downloader API.
+React/Vite UI (plain CSS, no UI framework) for the local SSU lecture downloader API.
 
 ## Scope
 
@@ -18,19 +18,25 @@ Implemented:
 - selected-content batch planning via `POST /api/download/batch/plan`,
 - selected-content cancellable batch download jobs via `POST /api/download/batch/jobs`, `GET /api/download/jobs/{job_id}`, and `POST /api/download/jobs/{job_id}/cancel`,
 - uncompleted-lecture batch planning via `POST /api/download/batch/plan`,
-- API server supervision status in the credential panel,
+- API server starting/failed screen with retry and log path (`useBackendStatus`),
 - Rust-native final download jobs in Tauri runtime via Python `/api/download/native-plan` plus Rust streaming into `.part` files, Range-safe resume (a complete `.part` answered with 416 is finalized, a stale one restarts from byte 0, and an HTTP error never deletes the `.part`), connect/read-idle timeouts so cancel stays responsive, size verification before the final rename, stable `HTTP <status>` error codes, progress, cancellation, and final rename,
-- one app-owned official Commons viewer window from each video row's `시청` button; Tauri manual opens bridge the Python-authenticated LMS cookies into WebKit before navigating to the validated Commons viewer URL,
-- experimental `표시된 영상 순차 시청` mode in the Tauri desktop app: opens the official viewer for the currently filtered video list, injects a narrow helper that tries visible `video.play()`, listens for the real video `ended` event, closes that viewer, and advances to the next item,
-- week/type/downloadability/completion filters over video, PDF/material, assignment, quiz, board, page, section, and unknown LMS rows,
-- Korean-first copy that keeps older terms as an explicit future selection path.
+- one app-owned official Commons viewer window from each video row's play button; Tauri manual opens bridge the Python-authenticated LMS cookies into WebKit before navigating to the validated Commons viewer URL,
+- experimental `순서대로 시청` mode in the Tauri desktop app: opens the official viewer for the videos currently listed (respecting `안 본 것만`), injects a narrow helper that tries visible `video.play()`, listens for the real video `ended` event, closes that viewer, and advances to the next item,
+- full-window layout (no page scroll; only the lecture list scrolls): top bar (term select, refresh, settings), course sidebar, lecture table grouped by week with `영상`/`자료` tabs and an `안 본 것만` switch, sticky bottom action bar (selection count and total size, 영상/음성/자막 toggles, save folder, one `다운로드` button) and a right-side progress drawer with per-item status, cancel and retry,
+- settings dialog: save folder (native picker), 음성·자막 구성요소 status/install, logout,
+- plain-Korean errors: `src/lib/errors.ts` maps backend/native error codes to user text; raw codes are never rendered,
+- design tokens and dark mode in `src/styles/tokens.css` (`prefers-color-scheme`).
+
+Layout of `src/`: `App.tsx` (composition), `components/` (presentational), `hooks/` (session, course content, downloads, viewer, dependencies, polling), `lib/` (API client, desktop bridge, pure helpers such as `jobItems.ts` that turns job progress events into per-item rows), `styles/`.
+
+The `받음` chip only reflects files downloaded during the current app session; the backend has no API that lists existing local files.
 
 This UI is now the React/Vite surface used by the Tauri desktop shell. Tauri remains a thin local shell: Python keeps the LMS/auth/discovery service boundary, while the shell owns native folder picking, backend supervision, downloads, and the official viewer window. The official viewer still leaves attendance/progress reporting to the 숭실/Commons player.
 
 Important watch-mode split:
 
-- Row-level `시청` is the default manual official viewer. In Tauri it must stay minimal: bridge the Python-authenticated LMS cookies into WebKit, then navigate to the validated Canvas module-item launch URL. Do not add autoplay scripts, debug custom-scheme navigation, `on_navigation` interception, or WebKit autoplay policy overrides to this path; that combination previously produced a blank white official-player window in WKWebView even though browser/Vite testing looked fine.
-- `표시된 영상 순차 시청` is the experimental assisted path. It may inject the narrow helper that tries visible `video.play()`, listens for the real video `ended` event, closes that viewer, and advances to the next item.
+- The row play button is the default manual official viewer. In Tauri it must stay minimal: bridge the Python-authenticated LMS cookies into WebKit, then navigate to the validated Canvas module-item launch URL. Do not add autoplay scripts, debug custom-scheme navigation, `on_navigation` interception, or WebKit autoplay policy overrides to this path; that combination previously produced a blank white official-player window in WKWebView even though browser/Vite testing looked fine.
+- `순서대로 시청` is the experimental assisted path. It may inject the narrow helper that tries visible `video.play()`, listens for the real video `ended` event, closes that viewer, and advances to the next item.
 
 Browser/Vite QA can validate React/API/session-planning behavior, but it cannot prove Tauri WKWebView cookie injection, iframe initialization, or autoplay behavior. Sequential watch mode does not call LearningX/Commons progress endpoints; it only attempts visible playback in the official player and advances when the embedded video emits `ended`. If autoplay is blocked by WebKit/browser policy, player markup changes, nested frames, or Commons-side restrictions, the mode falls back to manual user playback and will not advance until an `ended` signal is observed.
 
@@ -105,7 +111,7 @@ The official-viewer regression stays runnable on its own:
 cargo test manual_official_viewer_stays_minimal_without_assist_or_debug_hooks
 ```
 
-For runtime QA, restart the Tauri app before retesting Rust/WebView changes. First confirm row-level `시청` opens the official player without a white screen. Test autoplay only through `표시된 영상 순차 시청`, then read the in-app `공식 플레이어 재생 진단 로그` if playback does not start.
+For runtime QA, restart the Tauri app before retesting Rust/WebView changes. First confirm the row play button opens the official player without a white screen. Test autoplay only through `순서대로 시청`, then read the `시청 창 재생 기록` section in the settings dialog (shown only when events exist) if playback does not start.
 
 Backend/API gates are run from the repository root:
 
