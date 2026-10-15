@@ -58,6 +58,8 @@ export interface CourseContentItem {
   size_bytes: number | null;
   file_name: string | null;
   url: string | null;
+  /** Already-saved file in the download folder (backend lookup), or null. */
+  downloaded_path?: string | null;
   published: boolean | null;
   unlock_at: string | null;
   due_at: string | null;

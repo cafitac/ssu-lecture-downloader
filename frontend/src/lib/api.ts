@@ -94,20 +94,23 @@ export function deleteCredentials(): Promise<CredentialStatus> {
   return requestJson<CredentialStatus>('/api/credentials', { method: 'DELETE' });
 }
 
-export function fetchTerms(): Promise<TermsResponse> {
-  return requestJson<TermsResponse>('/api/terms');
+export function fetchTerms(refresh = false): Promise<TermsResponse> {
+  return requestJson<TermsResponse>(refresh ? '/api/terms?refresh=true' : '/api/terms');
 }
 
-export function fetchCourses(termId?: number | null): Promise<CoursesResponse> {
+export function fetchCourses(termId?: number | null, refresh = false): Promise<CoursesResponse> {
   const params = new URLSearchParams();
   if (termId !== undefined && termId !== null) params.set('term_id', String(termId));
+  if (refresh) params.set('refresh', 'true');
   const suffix = params.toString() ? `?${params.toString()}` : '';
   return requestJson<CoursesResponse>(`/api/courses${suffix}`);
 }
 
-export function fetchCourseDetail(courseId: string | number, courseName: string): Promise<CourseDetailResponse> {
+export function fetchCourseDetail(courseId: string | number, courseName: string, options: { refresh?: boolean; outputDir?: string } = {}): Promise<CourseDetailResponse> {
   const params = new URLSearchParams();
   if (courseName) params.set('course_name', courseName);
+  if (options.outputDir) params.set('output_dir', options.outputDir);
+  if (options.refresh) params.set('refresh', 'true');
   return requestJson<CourseDetailResponse>(`/api/courses/${courseId}?${params.toString()}`);
 }
 
