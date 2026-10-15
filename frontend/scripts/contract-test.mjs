@@ -8,30 +8,40 @@ function readTree(dir, extensions) {
     .filter((file) => extensions.some((extension) => file.endsWith(extension)))
     .sort();
 }
-
 const requiredFiles = [
   'src/main.tsx',
+  'src/App.tsx',
+  'src/styles.css',
+  'src/styles/tokens.css',
   'src/lib/api.ts',
   'src/lib/desktop.ts',
   'src/lib/types.ts',
   'src/lib/polling.ts',
   'src/lib/progress.ts',
+  'src/lib/jobItems.ts',
+  'src/lib/errors.ts',
+  'src/lib/content.ts',
   'src/lib/http.ts',
   'src/lib/postprocess.ts',
   'src/hooks/usePolledJob.ts',
   'src/hooks/useBackendStatus.ts',
   'src/hooks/useTauriEvent.ts',
-  'src/components/LoginPanel.tsx',
-  'src/components/CourseList.tsx',
-  'src/components/DownloadPanel.tsx',
-  'src/components/WatchQueue.tsx',
-  'src/components/BackendStatus.tsx',
+  'src/hooks/useLmsSession.ts',
+  'src/hooks/useDownloads.ts',
+  'src/hooks/useOfficialViewer.ts',
+  'src/components/TopBar.tsx',
+  'src/components/CourseSidebar.tsx',
+  'src/components/LecturePane.tsx',
+  'src/components/LectureList.tsx',
+  'src/components/ActionBar.tsx',
+  'src/components/DownloadDrawer.tsx',
+  'src/components/SettingsDialog.tsx',
+  'src/components/Screens.tsx',
   'src-tauri/src/lib.rs',
   'src-tauri/src/backend.rs',
   'src-tauri/src/native_download.rs',
   'src-tauri/src/viewer.rs',
   'src-tauri/src/assets/watch_assist.js',
-  'src/styles.css',
   'vite.config.ts',
   'src-tauri/tauri.conf.json',
   'src-tauri/Cargo.toml',
@@ -52,83 +62,105 @@ for (const endpoint of ['/api/credentials/status', '/api/credentials', '/api/cou
   }
 }
 
-// The UI is split across main.tsx, components/, hooks/ and the pure UI helpers in lib/;
+// The UI is split across App.tsx, components/, hooks/ and the pure helpers in lib/;
 // the copy/behavior checks below look at all of them together.
 const uiSourceFiles = [
   'src/main.tsx',
+  'src/App.tsx',
   ...readTree('src/components', ['.tsx']),
   ...readTree('src/hooks', ['.ts']),
   'src/lib/progress.ts',
+  'src/lib/jobItems.ts',
+  'src/lib/errors.ts',
   'src/lib/polling.ts',
   'src/lib/format.ts',
   'src/lib/content.ts',
 ];
 const main = uiSourceFiles.map((file) => readFileSync(file, 'utf8')).join('\n');
-const mainEntry = readFileSync('src/main.tsx', 'utf8');
-for (const text of ['디스크에 저장하지 않고 앱이 켜져 있는 동안 메모리에만 보관합니다', '로그아웃', '다운로드 폴더', '현재 학기', '과거 학기는 명시 선택', '학기 선택', '선택한 학기 불러오기', '강의 선택', '전체 선택', '다운로드 시작', '취소하기', '다운로드 진행률', '저장 위치', '다운로드 폴더 열기', '다운로드할 강의', '하나만 선택하면 단일 다운로드', '2개 이상이면 최대 4개씩 동시 다운로드합니다', '자동 준비', '영상·음성·자막 저장 준비 완료', '구성요소 확인 필요', '필요한 항목만 앱에서 자동으로 준비할 수 있어요']) {
-  if (!main.includes(text)) {
-    throw new Error(`UI missing required Korean copy: ${text}`);
-  }
+const componentsSource = readTree('src/components', ['.tsx']).map((file) => readFileSync(file, 'utf8')).join('\n');
+const css = readTree('src/styles', ['.css']).map((file) => readFileSync(file, 'utf8')).join('\n') + readFileSync('src/styles.css', 'utf8');
+if (readFileSync('src/main.tsx', 'utf8').split('\n').length > 20) {
+  throw new Error('main.tsx must stay a thin entry point');
 }
 
-if (main.includes('credential-panel') || main.includes('앱 실행 중 로그인 세션')) {
-  throw new Error('Logged-in UI must not reserve a full credential/session panel; expose logout in the header instead');
+// New UI copy.
+for (const text of [
+  '강의 다운로더', '(현재)', '과목 {courses.length}개', '안 본 강의', '모두 시청함', '영상 없음', '안 본 것만', '순서대로 시청',
+  '시청함', '안 봄', '받음', '전체 선택', '받을 항목을 선택하세요', '개 선택', '다운로드', '모두 취소', '다시 시도', '폴더 열기',
+  '대기', '받는 중', '음성 추출 중', '자막 만드는 중', '완료', '실패',
+  '저장 폴더', '변경', '음성·자막 구성요소', '설치', '앱을 끄면 로그인 정보가 지워져요', '로그아웃',
+  '디스크에 저장하지 않고 앱이 켜져 있는 동안 메모리에만 보관합니다', '로그인',
+]) {
+  if (!main.includes(text)) throw new Error(`UI missing required Korean copy: ${text}`);
 }
 
-if (!main.includes('handleSelectAllLectures') || !main.includes('const selectableLectureIds') || !main.includes('const allLecturesSelected') || !main.includes('lecture-toolbar')) {
-  throw new Error('UI must provide an all-lectures select/clear control for downloadable lecture rows');
+// Developer jargon and removed concepts must stay out of the UI.
+for (const forbidden of [
+  '명시 선택 UX', 'SOONGSIL LMS', 'Soongsil LMS local', 'modules ', 'lectures ', 'readystream', 'Tauri 앱은', '앱 연결됨', '앱 연결 확인 중',
+  '현재 학기 새로고침', '선택한 학기 불러오기', '표시된 영상 순차 시청', '영상만', '미완료', '강의 선택', '완료 정보 없음',
+  '다운로드 진단 로그', '응답 진단', 'credential-panel', 'postprocess-card', '후처리', 'Finder에서 선택', '자동 기본값',
+  'Python API', 'dry_run', 'byte progress',
+]) {
+  if (main.includes(forbidden)) throw new Error(`UI must not expose old/developer text: ${forbidden}`);
+}
+if (/\{[^{}]*\b(error_code|errorCode|failure|reasonCode)\b[^{}]*\}/.test(componentsSource)) {
+  throw new Error('Components must never render raw error codes');
 }
 
-if (!main.includes('completionFilter') || !main.includes('aria-label="완료 상태 필터"') || !main.includes('전체 완료 상태') || !main.includes("completionFilter === 'unknown'")) {
-  throw new Error('Course detail UI must provide completion-state filtering for all/completed/uncompleted/unknown rows');
+// Layout: one scroll area (the lecture list), tokens, dark mode, flat style.
+if (!/body\s*\{[^}]*overflow:\s*hidden/.test(css)) throw new Error('The page itself must not scroll');
+if (!/\.lecture-scroll\s*\{[^}]*overflow-y:\s*auto/.test(css)) throw new Error('The lecture list must be the scrolling region');
+for (const token of ['--accent', '--success-bg', '--warning-bg', '--danger-bg', '--sp-1', '--sp-8', '--radius-sm', '--radius-md', '--fs-12', '--fs-20', '--fw-semibold']) {
+  if (!css.includes(`${token}:`)) throw new Error(`Design token missing: ${token}`);
 }
-if (main.includes("if (contentKindFilter === 'downloadable') return item.downloadable;")) {
-  throw new Error('Downloadable content filtering must not return before completion filters are applied');
+if (!css.includes('prefers-color-scheme: dark')) throw new Error('Dark mode must be supported');
+if (/linear-gradient|radial-gradient/.test(css)) throw new Error('Flat visual system: no gradients');
+if (!css.includes('--row-h: 36px') || !/\.lecture-row\s*\{[^}]*min-height:\s*var\(--row-h\)/.test(css)) throw new Error('Lecture rows must be at least 32px tall');
+if (!main.includes('<label className={`lecture-row')) throw new Error('The whole lecture row must be a click target for its checkbox');
+if (!main.includes('indeterminate')) throw new Error('Select-all must be tri-state');
+if ((readFileSync('src/components/ActionBar.tsx', 'utf8').match(/btn-primary/g) ?? []).length !== 1) {
+  throw new Error('The action bar must contain exactly one accent-filled button (다운로드)');
 }
-if (!main.includes("contentKindFilter === 'downloadable' && !item.downloadable") || !main.includes("contentKindFilter !== 'downloadable' && item.kind !== contentKindFilter")) {
-  throw new Error('Course detail filters must compose downloadable/type and completion predicates instead of short-circuiting them');
+for (const file of readTree('src/components', ['.tsx']).filter((name) => !name.endsWith('ActionBar.tsx') && !name.endsWith('Screens.tsx'))) {
+  if (readFileSync(file, 'utf8').includes('btn-primary')) throw new Error(`${file}: no other accent-filled button may compete with the download button`);
 }
 
-if (!main.includes('usePolledJob(downloadJob') || !main.includes('fetch: fetchDownloadJob')) {
-  throw new Error('UI must auto-poll active download jobs');
+// Session / data flow.
+if (!main.includes("type SessionPhase = 'checking' | 'signed-out' | 'signed-in'") || !main.includes('로그인 상태를 확인하는 중이에요')) {
+  throw new Error('The workspace must stay hidden until stored credentials were verified by a real LMS request');
 }
+if (!main.includes('await fetchTerms()') || !main.includes('await loadCourses(currentTermId)')) {
+  throw new Error('Initial load must use the current term id from /api/terms');
+}
+if (main.includes('loadCourses(null)')) throw new Error('Initial load must not call loadCourses(null)');
+if (!main.includes('isAuthenticationError') || !main.includes('expire(')) throw new Error('Authentication failures must return to the login screen');
+if (!main.includes('usePolledJob(job') || !main.includes('fetch: fetchDownloadJob')) throw new Error('UI must auto-poll the active download job');
 const pollingSource = readFileSync('src/lib/polling.ts', 'utf8');
 if (/\bsetInterval\b/.test(main) || /\bsetInterval\b/.test(pollingSource) || !pollingSource.includes('setTimeout')) {
   throw new Error('Polling must be a setTimeout chain (no setInterval) so requests never overlap or arrive out of order');
 }
-for (const asyncPoller of ['fetchAudioExtractionJob', 'fetchSttJob', 'fetchMediaDependencyInstallJob']) {
-  if (!main.includes(`fetch: ${asyncPoller}`)) {
-    throw new Error(`${asyncPoller} must be polled through usePolledJob`);
-  }
-}
-if (main.includes('postprocess-card') || main.includes('후처리') || main.includes('음성 추출 · STT 실행')) {
-  throw new Error('Default UI must not expose a separate manual postprocess panel; MP3/TXT should be created from the main file selection flow');
-}
+if (!main.includes('fetch: fetchMediaDependencyInstallJob')) throw new Error('The dependency install job must be polled through usePolledJob');
 if (!api.includes('withArtifactJobId') || !api.includes('return withArtifactJobId(job);') || !api.includes('/api/download/artifacts/jobs/${jobId.slice')) {
   throw new Error('Artifact download jobs must keep their artifact-prefixed job id across polling/cancel so MP3/TXT progress does not disappear');
 }
 if (api.includes('failed_fallback_backend_job') || api.includes('startBackendBatchDownloadJob') || api.includes('startBackendDownloadJob')) {
   throw new Error('Tauri native download start must not hide failures behind backend fallback jobs');
 }
-if (!api.includes('native_plan_failed:${code}') || !api.includes('native_batch_plan_failed:${code}') || !api.includes('선택한 ${index + 1}번째 영상의 다운로드 주소를 준비하지 못했습니다')) {
+if (!api.includes('native_plan_failed:${code}') || !api.includes('native_batch_plan_failed:${code}')) {
   throw new Error('Tauri native plan failures must raise explicit item-level errors instead of ambiguous fallback behavior');
 }
-if (main.includes('value={credentialPassword}') || main.includes('{credentialPassword}</')) {
-  throw new Error('UI must not render saved credential password values');
+if (main.includes('planDownload(') || main.includes('planBatchDownload(')) throw new Error('Download start must not make duplicate LMS preflight calls for conflict checking');
+if (!main.includes("'skip'")) throw new Error('Download conflict policy must be explicit: reuse existing files (skip)');
+if (!api.includes('overwrite_artifacts: false')) throw new Error('Main MP3/TXT artifact flow should reuse existing derived audio/transcript outputs by default');
+if (!main.includes('startArtifactDownloadJob') || !main.includes("outputs[0] === 'mp4'")) throw new Error('MP4-only downloads use the plain job; MP3/TXT use the artifact job');
+if (!main.includes('planOfficialViewerSessionBridge') || !main.includes('openOfficialViewer') || !main.includes('official-watch-ended') || !main.includes('openAssistedOfficialViewer')) {
+  throw new Error('Row play and sequential watch must keep using the official viewer bridge and the real ended event');
 }
-
-if (!main.includes('const currentTermId = await loadTerms()') || !main.includes('void loadCourses(currentTermId)')) {
-  throw new Error('UI initial load must use current term id from /api/terms instead of scanning /api/courses without term_id');
-}
-if (main.includes('void loadCourses(null);')) {
-  throw new Error('UI initial load must not call loadCourses(null), because that triggers duplicate current-term scanning');
-}
-if (!main.includes('isSessionVerified') || !main.includes('const shouldShowLogin = !hasStoredCredential || !isSessionVerified') || !main.includes('저장된 로그인 정보로 LMS 세션을 확인하는 중입니다')) {
-  throw new Error('UI must not show the logged-in course screen until stored credentials have been verified by a real LMS list load');
-}
-if (main.includes("async function loadCourses(termId: number | null = selectedTermId) {\n    if (state === 'loading') return;")) {
-  throw new Error('Course loading must not return early just because login/startup already set loading state');
-}
+if (!main.includes('componentsFor') || !main.includes("formats.includes('txt')")) throw new Error('Missing-dependency gating must be per selected output format');
+if (!main.includes('~/Downloads') || main.includes('~/Downloads/ssu-lectures')) throw new Error('Default download destination must be the real ~/Downloads');
+if (!main.includes('defaultDownloadDirectory()') || !main.includes('pickDownloadDirectory()')) throw new Error('UI must initialize a native default folder and offer the native folder picker');
+if (main.includes('macOS Keychain에 저장했습니다') || main.includes('macOS Keychain 상태')) throw new Error('UI must not frame Keychain as the primary user-facing session model');
+if (!main.includes('Whisper large-v3') || !api.includes("stt_model: 'large-v3'") || !api.includes("model = 'large-v3'")) throw new Error('TXT must run the large-v3 STT path by default');
 
 if (!api.includes('output_dir') || !api.includes('outputDir')) {
   throw new Error('API client must pass the selected output_dir from the UI');
@@ -139,13 +171,6 @@ if (!api.includes('sso_redirect_missing') || !api.includes('숭실 SmartID 로�
 if (!api.includes('payload?.message ?? errorMessage(code)')) {
   throw new Error('API client must prefer backend-provided error messages for detailed LMS/native-plan failures');
 }
-if (!api.includes("stt_model: 'large-v3'") || !api.includes("model = 'large-v3'")) {
-  throw new Error('API client must default TXT/STT jobs to Whisper large-v3 for Korean lecture accuracy');
-}
-if (!main.includes('Whisper large-v3') || !main.includes("startSttJob(audioPath, 'faster_whisper', 'large-v3'")) {
-  throw new Error('UI must run the high-accuracy large-v3 STT path by default');
-}
-
 const desktop = readFileSync('src/lib/desktop.ts', 'utf8');
 // The Rust shell is split into modules; marker checks look at all of them (plus the embedded JS asset).
 const tauriRustFiles = readTree('src-tauri/src', ['.rs', '.js']);
@@ -159,15 +184,6 @@ for (const marker of ['isTauriRuntime', 'pickDownloadDirectory', 'openDownloaded
     throw new Error(`Desktop bridge missing native folder marker: ${marker}`);
   }
 }
-if (!main.includes('Finder에서 선택') || !main.includes('handlePickDownloadDir') || !main.includes('defaultDownloadDirectory()')) {
-  throw new Error('UI must initialize a native default download folder and expose Finder folder selection');
-}
-if (!main.includes('자동 기본값') || !main.includes('선택하지 않아도 다운로드할 수 있습니다') || !main.includes('~/Downloads')) {
-  throw new Error('UI must explain automatic Downloads folder behavior');
-}
-if (main.includes('~/Downloads/ssu-lectures') || desktop.includes('ssu-lectures') || desktop.includes('/.hermes/profiles/')) {
-  throw new Error('Default download destination must be the real user ~/Downloads, not a nested app/profile folder');
-}
 if (!tauriLib.includes('real_download_dir') || !tauriLib.includes('getpwuid') || !tauriLib.includes('invoke_handler')) {
   throw new Error('Tauri app must expose a real macOS user Downloads command that is not derived from Hermes HOME');
 }
@@ -175,9 +191,6 @@ for (const marker of ['BackendManager', 'start_in_background', 'backend_health_c
   if (!tauriLib.includes(marker)) {
     throw new Error(`Tauri backend supervision missing marker: ${marker}`);
   }
-}
-if (!main.includes('앱 연결됨') || !main.includes('useBackendStatus')) {
-  throw new Error('UI must expose a non-developer app connection state');
 }
 if (!tauriLib.includes('fn terminate_process_group') || !tauriLib.includes('.process_group(0)') || !tauriLib.includes('libc::killpg') || !tauriLib.includes('mode: String') || !tauriLib.includes('port: u16')) {
   throw new Error('Tauri-managed backend must track supervision mode/dynamic port and clean up only its owned child process group');
@@ -197,9 +210,6 @@ if (!tauriLib.includes('BACKEND_STARTUP_TIMEOUT: Duration = Duration::from_secs(
 if (!desktop.includes("invoke<void>('backend_restart')")) {
   throw new Error('The UI must be able to retry a failed backend start');
 }
-if (!main.includes('다시 시도') || !main.includes('log_path')) {
-  throw new Error('Backend failure UI must offer a retry button and show the backend log path');
-}
 if (!tauriLib.includes('SSU_API_TOKEN') || !tauriLib.includes('X-SSU-Token') || !tauriLib.includes('/dev/urandom')) {
   throw new Error('Tauri must hand a random per-launch token to the managed backend and send it on native backend calls');
 }
@@ -218,53 +228,11 @@ if (!tauriLib.includes('SSU_BACKEND_AUTOSTART') || !tauriLib.includes('Some("0")
 if (!tauriLib.includes('open_path_in_finder') || !tauriLib.includes('std::process::{Child, Command') || !tauriLib.includes('Command::new("open")')) {
   throw new Error('Tauri app must expose a command that opens the downloaded file folder in Finder');
 }
-if (!main.includes('download-progress-card') || !main.includes('progressbar') || !main.includes('downloadPrimaryActionLabel')) {
-  throw new Error('UI must present a user-friendly progress card and one primary start/cancel button');
-}
-if (!main.includes('const shouldShowDownloadProgress') || !main.includes('shouldShowDownloadProgress &&') || !main.includes('Boolean(isStartingDownload || downloadStartError || downloadJob || activeSingleResult || activeBatchResult)') || !main.includes('저장 위치와 파일 정보를 확인하는 중입니다')) {
-  throw new Error('Download progress card must appear immediately during pre-download preparation, before the real job id exists');
-}
-if (!main.includes('appendDownloadDiagnostic') || !main.includes('ssu-download-diagnostics') || !main.includes('다운로드 진단 로그') || !main.includes('downloadStartError') || !main.includes('다운로드 시작 실패')) {
-  throw new Error('Download start failures must persist visible diagnostics instead of making the progress card disappear');
-}
-if (main.includes('planDownload(') || main.includes('planBatchDownload(') || main.includes('conflict_check.partial_failure_fallback') || main.includes('conflict_check.start')) {
-  throw new Error('Primary download start must not make duplicate LMS preflight calls for conflict checking');
-}
-if (!main.includes('conflict_check.skipped_default_skip')) {
-  throw new Error('Primary download conflict policy must be explicit: skip duplicate preflight and reuse existing files by default');
-}
-if (main.includes('다운로드 작업 취소') || main.includes('작업 상태 새로고침') || main.includes('<b>job</b>') || main.includes('<b>status</b>') || main.includes('byte progress') || main.includes('<b>dry_run</b>')) {
-  throw new Error('Default download UI must hide developer-oriented job/status/dry-run fields');
-}
-if (main.includes('download-debug-details') || main.includes('<summary>고급 정보</summary>')) {
-  throw new Error('Single-download completion UI must not show advanced diagnostics; offer opening the downloaded folder instead');
-}
-if (!main.includes('const firstDownloadableVideo') || !main.includes('setSelectedLectureIds([]);') || !main.includes('다운로드할 영상을 직접 선택하세요') || main.includes('[firstDownloadableVideo.module_item_id]') || main.includes('첫 번째 영상 항목을 선택했습니다')) {
-  throw new Error('Course detail load must not auto-check a default video; users should explicitly select the lectures they want to download');
-}
-if (!main.includes("selectedCount === 0 ? '강의를 선택하세요'")) {
-  throw new Error('Primary download button must not show a download-start label when no lecture is selected');
-}
-if (!api.includes('overwrite_artifacts: false')) {
-  throw new Error('Main MP3/TXT artifact flow should reuse existing derived audio/transcript outputs by default');
-}
-if (!main.includes('artifactErrorText') || !main.includes('파일 생성 실패')) {
-  throw new Error('Artifact failures must show the concrete file-generation error in the progress card');
-}
-if (!main.includes('selectedVideoItems') || !main.includes('selectableVideoIds') || !main.includes('effectiveSelectedIds') || !main.includes('영상/음성/자막 파일은 영상 강의에서만 만들 수 있습니다') || !main.includes("format === 'mp4' || format === 'mp3' || format === 'txt'") || !main.includes("lecture.kind !== 'video'") || !main.includes('영상만')) {
-  throw new Error('MP4/MP3/TXT selection must target video lecture rows only, not downloadable PDFs/materials');
-}
-if (!main.includes('const canOpenDownloadedFolder') || !main.includes('handleOpenDownloadedFolder') || !main.includes('openDownloadedFolder(downloadView.downloadOutputPath)')) {
-  throw new Error('Completed download UI must offer opening the downloaded folder');
-}
-if (!main.includes('missingSelectedOutputComponents') || !main.includes('canStartSelectedDownload') || !main.includes('selectedOutputRequiresMediaDependencies') || !main.includes('disabled={isDownloadActive ? Boolean(downloadJob?.cancel_requested) : !canStartSelectedDownload}')) {
-  throw new Error('MP3/TXT downloads must be blocked when required media dependencies are missing, while MP4-only downloads can still start');
-}
 const capabilities = readFileSync('src-tauri/capabilities/default.json', 'utf8');
-if (!main.includes('handleOpenOfficialViewer') || !main.includes('inline-watch-button') || !main.includes('시청 창을 앞으로 가져왔습니다') || !main.includes('재생/진도 처리는 숭실 LMS 공식 플레이어가 그대로 수행합니다') || !desktop.includes('openOfficialViewer') || !desktop.includes('WebviewWindow') || !desktop.includes('OFFICIAL_VIEWER_LABEL') || !desktop.includes('getByLabel(OFFICIAL_VIEWER_LABEL)') || !desktop.includes('setFocus()') || !tauriLib.includes('open_official_viewer_with_session') || tauriLib.includes('official_watch_autoplay_script()') || !capabilities.includes('core:webview:allow-create-webview-window')) {
-  throw new Error('UI must open/focus the official Commons viewer in a single app-owned Tauri WebView window without injecting autoplay/debug scripts into the default watch flow');
+if (!desktop.includes('openOfficialViewer') || !desktop.includes('WebviewWindow') || !desktop.includes('OFFICIAL_VIEWER_LABEL') || !desktop.includes('getByLabel(OFFICIAL_VIEWER_LABEL)') || !desktop.includes('setFocus()') || !tauriLib.includes('open_official_viewer_with_session') || tauriLib.includes('official_watch_autoplay_script()') || !capabilities.includes('core:webview:allow-create-webview-window')) {
+  throw new Error('The official Commons viewer must open/focus in a single app-owned Tauri WebView window without autoplay/debug scripts in the default watch flow');
 }
-if (!main.includes('handleStartSequentialWatch') || !main.includes('표시된 영상 순차 시청') || !main.includes('official-watch-ended') || !desktop.includes('openAssistedOfficialViewer') || !desktop.includes("invoke<void>('open_assisted_official_viewer'") || !tauriLib.includes('open_assisted_official_viewer') || !tauriLib.includes('initialization_script_for_all_frames(official_watch_assist_script())') || !tauriLib.includes('ssu-watch://ended') || !tauriLib.includes("video.addEventListener('ended'") || tauriLib.includes('TargetUrl')) {
+if (!desktop.includes('openAssistedOfficialViewer') || !desktop.includes("invoke<void>('open_assisted_official_viewer'") || !tauriLib.includes('open_assisted_official_viewer') || !tauriLib.includes('initialization_script_for_all_frames(official_watch_assist_script())') || !tauriLib.includes('ssu-watch://ended') || !tauriLib.includes("video.addEventListener('ended'") || tauriLib.includes('TargetUrl')) {
   throw new Error('Sequential watch mode must use an assisted official viewer that only attempts visible playback and advances after the real video ended event');
 }
 // Decision (frontend/README.md "Important watch-mode split" + the Rust regression tests): the official
@@ -281,23 +249,8 @@ if (!tauriLib.includes('fn with_watch_assist') || !tauriLib.includes('fn session
 if (!tauriLib.includes('format!("{VIEWER_LABEL_PREFIX}-{id}")')) {
   throw new Error('Each official viewer open must use a unique window label so close() never races the next build');
 }
-if (main.includes('앱에서 공식 시청 창 열기')) {
-  throw new Error('Default download panel must not duplicate the per-row watch action');
-}
 if (desktop.includes("invoke<void>('open_url_in_browser', { url })") || main.includes('기본 브라우저로 대체됩니다')) {
   throw new Error('Tauri watch flow must not silently fall back to the external browser; keep playback inside the app and report in-app viewer errors');
-}
-if (!main.includes('downloadProgressPercent') || !main.includes('aria-valuenow')) {
-  throw new Error('Download progress must expose a percent value and accessible progressbar state');
-}
-if (!main.includes('setDownloadResult(null);') || !main.includes('downloadJob') || !main.includes('? downloadProgress.percent')) {
-  throw new Error('Starting a new download must clear stale completed result state and prefer the active job percent');
-}
-if (!main.includes('downloadDir') || !main.includes('name="downloadDir"')) {
-  throw new Error('UI must expose a download folder field');
-}
-if (main.includes('macOS Keychain에 저장했습니다') || main.includes('macOS Keychain 상태')) {
-  throw new Error('UI must not frame Keychain as the primary user-facing session model');
 }
 
 const vite = readFileSync('vite.config.ts', 'utf8');
@@ -319,7 +272,6 @@ if (!tauriCargo.includes('tauri-plugin-dialog') || !tauriLib.includes('tauri_plu
 if (!vite.includes("'/api'") || !vite.includes('127.0.0.1:8000') || !api.includes('backendApiConnection') || !api.includes('await apiUrl(url)')) {
   throw new Error('Vite browser dev keeps /api -> 127.0.0.1:8000, while Tauri API calls use the dynamic backend base URL');
 }
-
 
 
 // ---------------------------------------------------------------------------
@@ -453,23 +405,102 @@ const progress = await import('../src/lib/progress.ts');
   assert.equal(outcome.status, 'failed', 'an unexpected post-process crash ends as failed instead of hanging');
 }
 
-// Derived progress: spot checks that must survive refactors.
+// Friendly errors: known codes become plain Korean, raw codes never leak.
 {
-  const rows = progress.fileProgressRows([
-    { stage: 'download_started', module_item_id: 1, title: 'A', bytes_written: 0, total_bytes: 100 },
+  const { friendlyError, describeErrorCode, knownErrorText, GENERIC_ERROR } = await import('../src/lib/errors.ts');
+  for (const code of ['network_error', 'network_timeout', 'session_expired', 'media_path_not_allowed', 'internal_error', 'HTTP 404', 'HTTP 500', 'native_plan_failed:network_error', 'lms_request_failed:step:502', 'download dir create failed: x']) {
+    const text = describeErrorCode(code);
+    assert.ok(/[가-힣]/.test(text), `${code} must map to Korean text`);
+    assert.ok(!text.includes('_'), `${code} must not leak a raw code`);
+  }
+  assert.notEqual(describeErrorCode('network_error'), describeErrorCode('network_timeout'));
+  assert.equal(knownErrorText('totally_unknown_code'), null);
+  const originalWarn = console.warn;
+  console.warn = () => {};
+  assert.equal(describeErrorCode('totally_unknown_code'), GENERIC_ERROR);
+  assert.equal(friendlyError({ code: 'weird_code_xyz', message: 'weird_code_xyz' }), GENERIC_ERROR);
+  assert.ok(friendlyError(new TypeError('Failed to fetch')).includes('인터넷'));
+  assert.equal(friendlyError('Finder를 열 수 없습니다: x'), 'Finder를 열 수 없습니다: x');
+  assert.equal(friendlyError(new Error('boom')), GENERIC_ERROR);
+  console.warn = originalWarn;
+}
+
+// Per-item rows for the progress drawer.
+{
+  const { buildJobRows, summarizeRows, isRetryable } = await import('../src/lib/jobItems.ts');
+  const item = (id) => ({ id: String(id), rawId: id, title: `T${id}`, sizeBytes: 100 });
+  const job = (status, events, extra = {}) => ({ job_id: 'native-1', status, cancel_requested: false, progress: events, result: null, error_code: null, ...extra });
+  const mp4Plan = { courseId: 1, courseName: 'c', kind: 'video', outputs: ['mp4'], items: [item(1), item(2), item(3)] };
+
+  assert.deepEqual(buildJobRows(mp4Plan, null).map((row) => row.phase), ['waiting', 'waiting', 'waiting']);
+
+  // Bytes/percent while downloading; a native MP4 is not done until the playable check finished.
+  let rows = buildJobRows(mp4Plan, job('running', [
     { stage: 'download_progress', module_item_id: 1, bytes_written: 50, total_bytes: 100 },
-    { stage: 'audio_progress', module_item_id: 2, title: 'B', progress_percent: 41.6 },
-    { stage: 'video_playable_check_failed', module_item_id: 3 },
+    { stage: 'download_done', module_item_id: 2 },
+    { stage: 'video_playable_check_started', module_item_id: 2 },
+    { stage: 'download_done', module_item_id: 3 },
+    { stage: 'video_playable_check_done', module_item_id: 3 },
+  ]));
+  assert.deepEqual(rows.map((row) => row.phase), ['downloading', 'verifying', 'done']);
+  assert.equal(rows[0].percent, 50);
+  assert.equal(rows[0].label, '받는 중');
+  assert.equal(rows[1].label, '영상 확인 중');
+
+  // A non-native MP4 job is done at download_done; a material is done at download_done even natively.
+  assert.equal(buildJobRows({ ...mp4Plan, items: [item(1)] }, job('running', [{ stage: 'download_done' }], { job_id: 'abc' }))[0].phase, 'done');
+  assert.equal(buildJobRows({ ...mp4Plan, kind: 'material', items: [item(9)] }, job('running', [{ stage: 'download_done' }]))[0].phase, 'done');
+
+  // Artifact pipeline: audio, then transcript.
+  const txtPlan = { ...mp4Plan, outputs: ['mp3', 'txt'], items: [item(1), item(2)] };
+  rows = buildJobRows(txtPlan, job('running', [
+    { stage: 'audio_progress', module_item_id: 1, progress_percent: 41.6 },
+    { stage: 'audio_done', module_item_id: 2 },
+    { stage: 'transcript_progress', module_item_id: 2, progress_percent: 30 },
+  ], { job_id: 'artifact-1' }));
+  assert.deepEqual(rows.map((row) => [row.phase, row.percent]), [['extracting', 42], ['transcribing', 30]]);
+  assert.equal(rows[0].label, '음성 추출 중');
+  assert.equal(rows[1].label, '자막 만드는 중');
+  assert.equal(buildJobRows(txtPlan, job('running', [{ stage: 'transcript_done', module_item_id: 1 }], { job_id: 'artifact-1' }))[0].phase, 'done');
+
+  // Failures show a friendly reason, never the code; unstarted items of a failed job are retryable.
+  const failed = buildJobRows(mp4Plan, job('failed', [
+    { stage: 'download_done', module_item_id: 1 }, { stage: 'video_playable_check_done', module_item_id: 1 },
+    { stage: 'download_progress', module_item_id: 2, bytes_written: 1, total_bytes: 10 },
+  ], { error_code: 'network_error' }));
+  assert.deepEqual(failed.map((row) => row.phase), ['done', 'failed', 'skipped']);
+  assert.ok(failed[1].reason.includes('인터넷'));
+  assert.ok(!failed[1].reason.includes('network_error'));
+  assert.deepEqual(failed.filter(isRetryable).map((row) => row.id), ['2', '3']);
+  const summary = summarizeRows(failed);
+  assert.equal(summary.done, 1);
+  assert.equal(summary.unfinished, 2);
+
+  // Per-item result failures, cancellation, success.
+  const batchFailed = buildJobRows(mp4Plan, job('failed', [], { result: { items: [{ module_item_id: 1, ok: true }, { module_item_id: 2, ok: false, error_code: 'HTTP 410' }, { module_item_id: 3, ok: true }] } }));
+  assert.deepEqual(batchFailed.map((row) => row.phase), ['done', 'failed', 'done']);
+  assert.ok(batchFailed[1].reason.includes('만료'));
+  assert.deepEqual(buildJobRows(mp4Plan, job('cancelled', [{ stage: 'download_progress', module_item_id: 1, bytes_written: 1, total_bytes: 10 }])).map((row) => row.phase), ['cancelled', 'cancelled', 'cancelled']);
+  assert.deepEqual(buildJobRows(mp4Plan, job('succeeded', [])).map((row) => row.phase), ['done', 'done', 'done']);
+}
+
+// Pure content helpers.
+{
+  const content = await import('../src/lib/content.ts');
+  assert.deepEqual(content.splitCourseName('컴퓨터네트워크(2026123401)'), { title: '컴퓨터네트워크', code: '2026123401' });
+  assert.deepEqual(content.splitCourseName('운영체제 (A반)'), { title: '운영체제 (A반)', code: null });
+  assert.equal(content.triState(['a', 'b'], new Set(['a'])), 'some');
+  assert.equal(content.triState(['a', 'b'], new Set(['a', 'b'])), 'all');
+  assert.equal(content.triState([], new Set()), 'none');
+  const groups = content.groupByWeek([
+    { module_id: 1, week_position: 1, module_name: '1주차', module_item_id: 1 },
+    { module_id: 2, week_position: 2, module_name: '', module_item_id: 2 },
+    { module_id: 1, week_position: 1, module_name: '1주차', module_item_id: 3 },
   ]);
-  assert.deepEqual(rows.map((row) => [row.title, row.status, row.percent]), [['A', '다운로드 중', 50], ['B', 'MP3 변환 중', 42], ['파일 3', '실패', 0]]);
-  assert.equal(progress.downloadStageLabel('running', [{ stage: 'download_progress' }]), '동시 다운로드 중');
-  assert.equal(progress.latestUserStage([{ stage: 'video_playable_check_started' }]), '재생 가능한 MP4인지 확인하는 중입니다.');
-  const view = progress.deriveDownloadView({
-    downloadJob: { job_id: 'native-1', status: 'running', cancel_requested: false, progress: [{ stage: 'video_playable_check_started' }], result: null, error_code: null },
-    batchResult: null, downloadResult: null, isStartingDownload: false, downloadStartError: null, downloadDir: '/dl',
-  });
-  assert.notEqual(view.downloadStatusLabel, '완료', 'running post-processing must not render as 완료');
-  assert.equal(view.downloadOutputPath, '/dl');
+  assert.deepEqual(groups.map((group) => [group.title, group.items.length]), [['1주차', 2], ['2주차', 1]]);
+  const { formatBytes } = await import('../src/lib/format.ts');
+  assert.equal(formatBytes(7.04 * 1024 ** 3), '7.0GB');
+  assert.equal(formatBytes(340 * 1024 ** 2), '340MB');
 }
 
 console.log('frontend contract ok');

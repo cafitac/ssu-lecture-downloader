@@ -1,0 +1,39 @@
+/* Dense lecture table. Column widths are shared by head, week header and rows. */
+.lecture-table {
+  --cols: 36px minmax(0, 1fr) 56px 64px 104px 32px;
+  --row-h: 36px;
+}
+.lecture-table.is-material { --cols: 36px minmax(0, 1fr) 64px 72px 32px; }
+.lecture-head, .week-head, .lecture-row {
+  display: grid; grid-template-columns: var(--cols); align-items: center; column-gap: var(--sp-1);
+  padding: 0 var(--sp-3) 0 var(--sp-5);
+}
+.lecture-head {
+  position: sticky; top: 0; z-index: 2; height: 32px;
+  border-bottom: 1px solid var(--border); background: var(--bg);
+  color: var(--text-muted); font-size: var(--fs-12); font-weight: var(--fw-semibold);
+}
+.week-head {
+  position: sticky; top: 32px; z-index: 1; height: 32px;
+  border-bottom: 1px solid var(--border); background: var(--bg-subtle);
+  font-weight: var(--fw-semibold); cursor: pointer;
+}
+.week-head > .week-title { grid-column: 2 / -2; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.week-head > .week-count { text-align: right; color: var(--text-muted); font-weight: var(--fw-regular); font-size: var(--fs-12); }
+.lecture-row { min-height: var(--row-h); border-bottom: 1px solid var(--border); cursor: pointer; }
+.lecture-row:hover { background: var(--bg-hover); }
+.lecture-row.is-checked { background: var(--bg-selected); }
+.lecture-row.is-disabled { cursor: default; }
+.lecture-row.is-disabled .cell-title { color: var(--text-muted); }
+.lecture-row:has(:focus-visible) { outline: 2px solid var(--accent); outline-offset: -2px; }
+.cell-check { display: flex; align-items: center; justify-content: center; align-self: stretch; }
+.cell-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-right: var(--sp-2); }
+.cell-num { text-align: right; color: var(--text-muted); font-size: var(--fs-12); font-variant-numeric: tabular-nums; }
+.cell-status { display: flex; align-items: center; gap: var(--sp-1); padding-left: var(--sp-2); }
+.cell-action { display: flex; justify-content: center; }
+
+@container (max-width: 520px) {
+  .lecture-table { --cols: 36px minmax(0, 1fr) 52px 96px 32px; }
+  .lecture-table.is-material { --cols: 36px minmax(0, 1fr) 96px 32px; }
+  .cell-size { display: none; }
+}

@@ -1,0 +1,81 @@
+/* Design tokens: neutral grays, one blue accent, success/warning/danger tints. */
+:root {
+  color-scheme: light dark;
+
+  --bg: #ffffff;
+  --bg-subtle: #f6f7f9;
+  --bg-hover: #eff1f4;
+  --bg-selected: #eaf1ff;
+  --border: #e3e6eb;
+  --border-strong: #cdd2da;
+  --text: #1c2027;
+  --text-muted: #5b6472;
+  --text-faint: #8a919d;
+
+  --accent: #2563eb;
+  --accent-hover: #1d4fc7;
+  --accent-fg: #ffffff;
+  --accent-tint: #eaf1ff;
+  --accent-text: #1d4ed8;
+
+  --success-fg: #12703a;
+  --success-bg: #e3f4ea;
+  --warning-fg: #86520a;
+  --warning-bg: #fff2d3;
+  --danger-fg: #b42318;
+  --danger-bg: #fde8e6;
+  --info-fg: #1d4ed8;
+  --info-bg: #e6eeff;
+
+  /* 4px spacing scale */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 20px;
+  --sp-6: 24px;
+  --sp-8: 32px;
+
+  --radius-sm: 6px;
+  --radius-md: 10px;
+
+  --fs-12: 12px;
+  --fs-13: 13px;
+  --fs-14: 14px;
+  --fs-16: 16px;
+  --fs-20: 20px;
+  --fw-regular: 400;
+  --fw-semibold: 600;
+
+  --font: system-ui, -apple-system, "Apple SD Gothic Neo", "Noto Sans KR", "Segoe UI", sans-serif;
+  --mono: ui-monospace, "SF Mono", Menlo, monospace;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #15171c;
+    --bg-subtle: #1b1e25;
+    --bg-hover: #232731;
+    --bg-selected: #1b2742;
+    --border: #2a2f3a;
+    --border-strong: #3b4252;
+    --text: #e8eaee;
+    --text-muted: #9ba4b3;
+    --text-faint: #6c7484;
+
+    --accent: #6ea4ff;
+    --accent-hover: #8bb7ff;
+    --accent-fg: #0a1222;
+    --accent-tint: #1e2c4a;
+    --accent-text: #9cc0ff;
+
+    --success-fg: #5fd18b;
+    --success-bg: #14301f;
+    --warning-fg: #f0b44c;
+    --warning-bg: #3a2c10;
+    --danger-fg: #ff8f85;
+    --danger-bg: #3b1916;
+    --info-fg: #9cc0ff;
+    --info-bg: #1c2a47;
+  }
+}

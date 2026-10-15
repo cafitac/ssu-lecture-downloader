@@ -1,0 +1,92 @@
+* { box-sizing: border-box; }
+html, body, #root { height: 100%; }
+body {
+  margin: 0;
+  overflow: hidden;
+  background: var(--bg);
+  color: var(--text);
+  font: var(--fw-regular) var(--fs-13)/1.45 var(--font);
+  -webkit-font-smoothing: antialiased;
+}
+h1, h2, h3, p, ul { margin: 0; padding: 0; }
+ul { list-style: none; }
+button, input, select { font: inherit; color: inherit; }
+code, .path { font-family: var(--mono); font-size: var(--fs-12); }
+.path { word-break: break-all; user-select: text; }
+.muted { color: var(--text-muted); }
+.small { font-size: var(--fs-12); }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+/* Buttons */
+.btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: var(--sp-1);
+  height: 32px; padding: 0 var(--sp-3);
+  border: 1px solid var(--border-strong); border-radius: var(--radius-sm);
+  background: var(--bg); color: var(--text);
+  font-weight: var(--fw-semibold); font-size: var(--fs-13); white-space: nowrap; cursor: pointer;
+}
+.btn:hover:not(:disabled) { background: var(--bg-hover); }
+.btn:disabled { color: var(--text-faint); cursor: not-allowed; }
+.btn-sm { height: 28px; padding: 0 var(--sp-2); font-size: var(--fs-12); }
+.btn-lg { height: 36px; padding: 0 var(--sp-5); font-size: var(--fs-14); }
+.btn-icon { width: 32px; padding: 0; }
+.btn-icon.btn-sm { width: 28px; }
+.btn-ghost { border-color: transparent; background: transparent; }
+.btn-primary { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
+.btn-primary:hover:not(:disabled) { background: var(--accent-hover); }
+.btn-primary:disabled { background: var(--bg-hover); border-color: var(--border); color: var(--text-faint); }
+
+/* Form controls */
+.select, .field input[type="text"], .field input:not([type]), .field input[type="password"] {
+  height: 32px; padding: 0 var(--sp-2);
+  border: 1px solid var(--border-strong); border-radius: var(--radius-sm); background: var(--bg);
+}
+.select:disabled, .field input:disabled { color: var(--text-faint); }
+.field { display: grid; gap: var(--sp-1); }
+.field > span { font-size: var(--fs-12); color: var(--text-muted); font-weight: var(--fw-semibold); }
+.field input { height: 36px; }
+.checkbox { width: 16px; height: 16px; margin: 0; accent-color: var(--accent); cursor: pointer; }
+.checkbox:disabled { cursor: not-allowed; }
+
+/* Chips and notices */
+.chip {
+  display: inline-flex; align-items: center; height: 20px; padding: 0 var(--sp-2);
+  border-radius: 10px; background: var(--bg-hover); color: var(--text-muted);
+  font-size: var(--fs-12); font-weight: var(--fw-semibold); white-space: nowrap;
+}
+.chip-success { background: var(--success-bg); color: var(--success-fg); }
+.chip-warning { background: var(--warning-bg); color: var(--warning-fg); }
+.chip-info { background: var(--info-bg); color: var(--info-fg); }
+.notice {
+  display: flex; align-items: center; gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3); border-radius: var(--radius-sm);
+  font-size: var(--fs-12);
+}
+.notice > span, .notice > p { flex: 1; min-width: 0; }
+.notice svg { flex: none; }
+.notice-danger { background: var(--danger-bg); color: var(--danger-fg); }
+.notice-warning { background: var(--warning-bg); color: var(--warning-fg); }
+.visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+
+/* Spinner and progress */
+.spinner, .spin svg {
+  animation: spin 0.9s linear infinite;
+}
+.spinner {
+  display: inline-block; width: 14px; height: 14px; flex: none;
+  border: 2px solid var(--border-strong); border-top-color: var(--accent); border-radius: 50%;
+}
+.btn-primary .spinner { border-color: color-mix(in srgb, var(--accent-fg) 35%, transparent); border-top-color: var(--accent-fg); }
+.btn-primary:disabled .spinner { border-color: var(--border-strong); border-top-color: var(--accent); }
+.spin { display: inline-flex; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.progress { height: 6px; border-radius: 3px; background: var(--bg-hover); overflow: hidden; }
+.progress-sm { height: 4px; }
+.progress-fill { height: 100%; background: var(--accent); transition: width 0.3s ease; }
+.progress.is-indeterminate .progress-fill { animation: pulse 1.4s ease-in-out infinite; opacity: 0.5; }
+@keyframes pulse { 50% { opacity: 0.2; } }
+
+@media (prefers-reduced-motion: reduce) {
+  .spinner, .spin svg, .progress.is-indeterminate .progress-fill { animation: none; }
+  .progress-fill { transition: none; }
+}
