@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from ssu_lecture_downloader.stt import (
     DEFAULT_STT_BEAM_SIZE,
     DEFAULT_STT_INITIAL_PROMPT,
@@ -106,3 +108,97 @@ def test_transcribe_audio_returns_install_help_for_missing_whisper(tmp_path: Pat
     assert result.error_code == 'stt_provider_not_installed'
     assert result.install_hint is not None
     assert '앱 패키지' in result.install_hint
+
+
+class FakeWhisperSegment:
+    def __init__(self, start, end, text):
+        self.start = start
+        self.end = end
+        self.text = text
+
+
+def install_fake_faster_whisper(monkeypatch, segments, constructed):
+    import sys
+    import types
+
+    from ssu_lecture_downloader import stt
+
+    class FakeWhisperModel:
+        def __init__(self, size, device='auto', compute_type='auto'):
+            constructed.append((size, device, compute_type))
+
+        def transcribe(self, path, **kwargs):
+            return iter(segments), types.SimpleNamespace(duration=10.0)
+
+    module = types.ModuleType('faster_whisper')
+    module.WhisperModel = FakeWhisperModel
+    monkeypatch.setitem(sys.modules, 'faster_whisper', module)
+    monkeypatch.setattr(stt, '_has_faster_whisper', lambda: True)
+    stt.clear_whisper_model_cache()
+
+
+def test_faster_whisper_model_is_loaded_once_per_size_device_and_compute_type(tmp_path: Path, monkeypatch):
+    from ssu_lecture_downloader import stt
+
+    constructed = []
+    install_fake_faster_whisper(monkeypatch, [FakeWhisperSegment(0, 2, '안녕')], constructed)
+    audio = tmp_path / 'a.wav'
+    audio.write_bytes(b'audio')
+    other = tmp_path / 'b.wav'
+    other.write_bytes(b'audio')
+
+    try:
+        assert transcribe_audio(TranscriptionRequest(audio_path=audio, overwrite=True)).ok is True
+        assert transcribe_audio(TranscriptionRequest(audio_path=other, overwrite=True)).ok is True
+        assert constructed == [('large-v3', 'auto', 'auto')]
+        assert transcribe_audio(TranscriptionRequest(audio_path=audio, model='small', overwrite=True)).ok is True
+        assert constructed == [('large-v3', 'auto', 'auto'), ('small', 'auto', 'auto')]
+    finally:
+        stt.clear_whisper_model_cache()
+
+
+def test_faster_whisper_segment_loop_stops_when_cancel_is_requested(tmp_path: Path, monkeypatch):
+    from ssu_lecture_downloader import stt
+
+    constructed = []
+    install_fake_faster_whisper(monkeypatch, [FakeWhisperSegment(0, 1, 'one'), FakeWhisperSegment(1, 2, 'two'), FakeWhisperSegment(2, 3, 'three')], constructed)
+    audio = tmp_path / 'a.wav'
+    audio.write_bytes(b'audio')
+    checks = {'count': 0}
+
+    def should_cancel():
+        checks['count'] += 1
+        return checks['count'] > 2
+
+    try:
+        result = transcribe_audio(TranscriptionRequest(audio_path=audio, overwrite=True), should_cancel=should_cancel)
+    finally:
+        stt.clear_whisper_model_cache()
+
+    assert result.ok is False
+    assert result.error_code == 'cancelled'
+    assert not any(tmp_path.glob('*.transcript.*'))
+
+
+def test_write_transcript_files_leaves_no_partial_files_when_a_write_fails(tmp_path: Path, monkeypatch):
+    from ssu_lecture_downloader import stt
+
+    audio = tmp_path / 'lecture.wav'
+    audio.write_bytes(b'audio')
+    real_replace = stt.os.replace
+    calls = {'count': 0}
+
+    def flaky_replace(src, dst):
+        calls['count'] += 1
+        if calls['count'] == 2:
+            raise OSError('disk full')
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(stt.os, 'replace', flaky_replace)
+
+    with pytest.raises(OSError):
+        write_transcript_files(audio_path=audio, segments=[TranscriptSegment(start=0, end=1, text='hi')], output_dir=None, provider='fake', model='m', language='ko', overwrite=False)
+
+    # The .txt file is committed last, so an interrupted write never looks complete.
+    assert not (tmp_path / 'lecture.transcript.txt').exists()
+    assert not list(tmp_path.glob('*.part'))

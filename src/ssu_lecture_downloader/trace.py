@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -40,12 +41,16 @@ class TraceEntry:
 class NetworkTrace:
     def __init__(self) -> None:
         self._entries: list[TraceEntry] = []
+        self._lock = threading.Lock()
 
     def add(self, entry: TraceEntry) -> None:
-        self._entries.append(entry)
+        with self._lock:
+            self._entries.append(entry)
 
     def to_dict(self) -> dict[str, Any]:
-        return {"entries": [entry.to_dict() for entry in self._entries]}
+        with self._lock:
+            entries = list(self._entries)
+        return {"entries": [entry.to_dict() for entry in entries]}
 
     def to_json(self) -> str:
         return json.dumps(self.to_dict(), ensure_ascii=False, indent=2, sort_keys=True)

@@ -1,10 +1,16 @@
 #!/usr/bin/env python3
 """Build the packaged Python/FastAPI backend sidecar for the Tauri app.
 
-This creates a standalone `ssu-api` executable under
-`frontend/src-tauri/resources/backend-sidecar/`. Tauri includes that directory as a
-bundle resource and prefers the executable at runtime; development still falls
-back to `uv run uvicorn ...` when the sidecar has not been built.
+This creates a standalone `ssu-api` onedir bundle under
+`frontend/src-tauri/resources/backend-sidecar/`:
+
+    backend-sidecar/ssu-api/ssu-api        <- the executable Tauri launches
+    backend-sidecar/ssu-api/_internal/...  <- its libraries, extracted once at build time
+
+Tauri includes that directory as a bundle resource and prefers the executable at
+runtime; development still falls back to `uv run uvicorn ...` when the sidecar has
+not been built. A onedir bundle starts without the unpack-to-temp step a onefile
+executable pays on every launch.
 """
 
 from __future__ import annotations
@@ -21,7 +27,9 @@ ENTRYPOINT = ROOT / "scripts" / "ssu_api_sidecar.py"
 BUILD_ROOT = ROOT / ".local" / "pyinstaller" / "ssu-api"
 DIST_ROOT = ROOT / ".local" / "pyinstaller" / "dist"
 RESOURCE_DIR = ROOT / "frontend" / "src-tauri" / "resources" / "backend-sidecar"
-OUTPUT = RESOURCE_DIR / "ssu-api"
+OUTPUT_DIR = RESOURCE_DIR / "ssu-api"
+OUTPUT = OUTPUT_DIR / "ssu-api"
+CONTENTS_DIRECTORY = "_internal"
 
 HIDDEN_IMPORTS = [
     # PyInstaller can miss dynamically imported runtime providers.
@@ -61,7 +69,9 @@ def main() -> int:
         "pyinstaller",
         "--clean",
         "--noconfirm",
-        "--onefile",
+        "--onedir",
+        "--contents-directory",
+        CONTENTS_DIRECTORY,
         "--name",
         "ssu-api",
         "--distpath",
@@ -77,14 +87,19 @@ def main() -> int:
 
     run(command)
 
-    built = DIST_ROOT / "ssu-api"
-    if not built.exists():
-        print(f"PyInstaller completed but output was missing: {built}", file=sys.stderr)
+    built_dir = DIST_ROOT / "ssu-api"
+    built_executable = built_dir / "ssu-api"
+    if not built_executable.is_file():
+        print(f"PyInstaller completed but output was missing: {built_executable}", file=sys.stderr)
         return 1
 
-    if OUTPUT.exists():
-        OUTPUT.unlink()
-    shutil.copy2(built, OUTPUT)
+    # Drop whatever an earlier build left at the output path, including the legacy
+    # single-file executable, so a stale binary can never shadow the new layout.
+    if OUTPUT_DIR.is_symlink() or OUTPUT_DIR.is_file():
+        OUTPUT_DIR.unlink()
+    elif OUTPUT_DIR.exists():
+        shutil.rmtree(OUTPUT_DIR)
+    shutil.copytree(built_dir, OUTPUT_DIR, symlinks=True)
     mode = OUTPUT.stat().st_mode
     OUTPUT.chmod(mode | 0o755)
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
@@ -9,6 +10,10 @@ from typing import Any, Protocol
 
 class DownloadCancelled(Exception):
     """Raised when a caller requests cancellation during byte transfer."""
+
+
+class IncompleteDownload(OSError):
+    """Raised when the transferred byte count disagrees with the announced length."""
 
 
 class DownloadHttpClient(Protocol):
@@ -35,6 +40,13 @@ _VIDEO_EXTENSION_ALIASES = {
     'mp4': 'mp4',
 }
 MEDIA_DOWNLOAD_TIMEOUT_SECONDS = 3 * 60 * 60
+# Pause before retrying when the request itself failed (connect error, timeout, 5xx)
+# so a flapping network is not hammered N times in a row. Retries after a stream
+# was interrupted mid-transfer resume immediately.
+RETRY_BACKOFF_BASE_SECONDS = 0.5
+RETRY_BACKOFF_MAX_SECONDS = 8.0
+# 4xx answers are final except for these transient ones.
+RETRYABLE_CLIENT_ERROR_STATUSES = frozenset({408, 425, 429})
 
 
 def normalize_media_extension(extension: str | None) -> str:
@@ -90,9 +102,14 @@ def _response_chunks(response: Any, chunk_size: int) -> Iterable[bytes]:
         yield content[offset:offset + chunk_size]
 
 
-def _content_length(response: Any) -> int | None:
+def _header(response: Any, name: str) -> str | None:
     headers = getattr(response, 'headers', {}) or {}
-    value = headers.get('content-length') or headers.get('Content-Length')
+    value = headers.get(name) or headers.get(name.title())
+    return None if value is None else str(value)
+
+
+def _content_length(response: Any) -> int | None:
+    value = _header(response, 'content-length')
     if value is None:
         return None
     try:
@@ -101,9 +118,56 @@ def _content_length(response: Any) -> int | None:
         return None
 
 
+def _content_range_total(response: Any) -> int | None:
+    """Total size from `Content-Range: bytes */N` or `bytes a-b/N`."""
+    value = _header(response, 'content-range')
+    if not value or '/' not in value:
+        return None
+    total = value.rsplit('/', 1)[-1].strip()
+    return int(total) if total.isdigit() else None
+
+
+def _is_identity_encoded(response: Any) -> bool:
+    encoding = (_header(response, 'content-encoding') or 'identity').strip().lower()
+    return encoding in {'', 'identity'}
+
+
 def _emit(on_progress: Callable[[dict[str, Any]], None] | None, event: dict[str, Any]) -> None:
     if on_progress:
         on_progress(event)
+
+
+def _close_response(response: Any) -> None:
+    close = getattr(response, 'close', None)
+    if callable(close):
+        try:
+            close()
+        except Exception:
+            pass
+
+
+def _status_of(exc: BaseException) -> int | None:
+    status = getattr(getattr(exc, 'response', None), 'status_code', None)
+    return status if isinstance(status, int) else None
+
+
+def _is_retryable(exc: BaseException) -> bool:
+    status = _status_of(exc)
+    if status is not None and 400 <= status < 500:
+        return status in RETRYABLE_CLIENT_ERROR_STATUSES
+    return True
+
+
+def _backoff(attempt: int, should_cancel: Callable[[], bool] | None) -> None:
+    delay = min(RETRY_BACKOFF_MAX_SECONDS, RETRY_BACKOFF_BASE_SECONDS * (2 ** (attempt - 1)))
+    deadline = time.monotonic() + delay
+    while True:
+        if should_cancel and should_cancel():
+            raise DownloadCancelled('download cancelled')
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return
+        time.sleep(min(0.2, remaining))
 
 
 def download_to_plan(
@@ -118,50 +182,76 @@ def download_to_plan(
     max_attempts: int = 1,
     resume: bool = True,
     should_cancel: Callable[[], bool] | None = None,
+    expected_total_bytes: int | None = None,
 ) -> Path:
     plan.course_dir.mkdir(parents=True, exist_ok=True)
     part_path = plan.file_path.with_suffix(plan.file_path.suffix + '.part')
     attempts = max(1, max_attempts)
     last_error: BaseException | None = None
 
-    for attempt in range(1, attempts + 1):
-        resume_from = part_path.stat().st_size if resume and part_path.exists() else 0
+    def open_stream(resume_from: int) -> Any:
         headers: dict[str, str] = {}
         if referer:
             headers['Referer'] = referer
         if resume_from:
             headers['Range'] = f'bytes={resume_from}-'
-        kwargs: dict[str, Any] = {"allow_redirects": True, "timeout": timeout, "stream": True}
+        kwargs: dict[str, Any] = {'allow_redirects': True, 'timeout': timeout, 'stream': True}
         if headers:
             kwargs['headers'] = headers
+        return http.get('download_media', download_url, **kwargs)
 
-        response = http.get("download_media", download_url, **kwargs)
-        response.raise_for_status()
-        if resume_from and getattr(response, 'status_code', None) != 206:
-            resume_from = 0
-        response_total = _content_length(response)
-        total_bytes = resume_from + response_total if response_total is not None else None
-        bytes_written = resume_from
-        _emit(
-            on_progress,
-            {
-                'stage': 'download_started',
-                'attempt': attempt,
-                'resume_from': resume_from,
-                'bytes_written': bytes_written,
-                'total_bytes': total_bytes,
-                'output_path': str(plan.file_path),
-            },
-        )
+    def finalize() -> Path:
+        part_path.replace(plan.file_path)
+        size = plan.file_path.stat().st_size
+        _emit(on_progress, {'stage': 'download_done', 'attempt': attempt, 'bytes_written': size, 'total_bytes': size if total_bytes is None else total_bytes, 'output_path': str(plan.file_path)})
+        return plan.file_path
 
-        mode = 'ab' if resume_from else 'wb'
+    for attempt in range(1, attempts + 1):
+        resume_from = part_path.stat().st_size if resume and part_path.exists() else 0
+        total_bytes: int | None = None
+        streamed_any = False
+        response: Any = None
         try:
+            response = open_stream(resume_from)
+            if resume_from and getattr(response, 'status_code', None) == 416:
+                # The server cannot satisfy our Range: either the partial file is already
+                # the whole file, or it is stale/corrupt. Never loop on the same Range.
+                announced_total = _content_range_total(response) or expected_total_bytes
+                _close_response(response)
+                response = None
+                if announced_total is not None and resume_from == announced_total:
+                    total_bytes = announced_total
+                    return finalize()
+                part_path.unlink(missing_ok=True)
+                resume_from = 0
+                response = open_stream(0)
+            response.raise_for_status()
+            if resume_from and getattr(response, 'status_code', None) != 206:
+                resume_from = 0
+            response_total = _content_length(response)
+            total_bytes = resume_from + response_total if response_total is not None else None
+            bytes_written = resume_from
+            verify_length = total_bytes is not None and _is_identity_encoded(response)
+            _emit(
+                on_progress,
+                {
+                    'stage': 'download_started',
+                    'attempt': attempt,
+                    'resume_from': resume_from,
+                    'bytes_written': bytes_written,
+                    'total_bytes': total_bytes,
+                    'output_path': str(plan.file_path),
+                },
+            )
+
+            mode = 'ab' if resume_from else 'wb'
             with part_path.open(mode) as handle:
                 for chunk in _response_chunks(response, chunk_size):
                     if should_cancel and should_cancel():
                         raise DownloadCancelled('download cancelled')
                     if not chunk:
                         continue
+                    streamed_any = True
                     handle.write(chunk)
                     bytes_written += len(chunk)
                     _emit(
@@ -174,18 +264,12 @@ def download_to_plan(
                             'output_path': str(plan.file_path),
                         },
                     )
-            part_path.replace(plan.file_path)
-            _emit(
-                on_progress,
-                {
-                    'stage': 'download_done',
-                    'attempt': attempt,
-                    'bytes_written': plan.file_path.stat().st_size,
-                    'total_bytes': plan.file_path.stat().st_size if total_bytes is None else total_bytes,
-                    'output_path': str(plan.file_path),
-                },
-            )
-            return plan.file_path
+            if verify_length and bytes_written != total_bytes:
+                if total_bytes is not None and bytes_written > total_bytes:
+                    # More data than announced means the partial file is not trustworthy.
+                    part_path.unlink(missing_ok=True)
+                raise IncompleteDownload(f'expected {total_bytes} bytes but received {bytes_written}')
+            return finalize()
         except BaseException as exc:
             last_error = exc
             partial_size = part_path.stat().st_size if part_path.exists() else 0
@@ -201,7 +285,9 @@ def download_to_plan(
                     },
                 )
                 raise
-            if attempt < attempts:
+            if not isinstance(exc, Exception):
+                raise
+            if attempt < attempts and _is_retryable(exc):
                 _emit(
                     on_progress,
                     {
@@ -214,6 +300,8 @@ def download_to_plan(
                         'output_path': str(plan.file_path),
                     },
                 )
+                if not streamed_any:
+                    _backoff(attempt, should_cancel)
                 continue
             _emit(
                 on_progress,
@@ -227,6 +315,8 @@ def download_to_plan(
                 },
             )
             raise
+        finally:
+            _close_response(response)
 
     assert last_error is not None
     raise last_error

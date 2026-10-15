@@ -4,8 +4,6 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from bs4 import BeautifulSoup
-
 from ssu_lecture_downloader.errors import LoginFlowError
 from ssu_lecture_downloader.postprocess_media import AudioExtractionRequest, AudioExtractionResult, extract_audio, ffmpeg_install_hint, plan_audio_output_path
 
@@ -37,6 +35,8 @@ class CommonsDownload:
 
 
 def extract_lti_launch_form(html: str) -> LtiLaunchForm:
+    from bs4 import BeautifulSoup  # imported lazily to keep API start-up light
+
     soup = BeautifulSoup(html, "html.parser")
     form = soup.find("form", id="tool_form") or soup.find("form", attrs={"data-message-type": "tool_launch"})
     if not form:
