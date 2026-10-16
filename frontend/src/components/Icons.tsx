@@ -52,3 +52,9 @@ export const ListIcon = () => (
 export const ExternalIcon = () => (
   <Svg><path d="M9 2.5h4.5V7" /><path d="M13.5 2.5L7.5 8.5" /><path d="M11.5 9.5v3a1 1 0 0 1-1 1h-7a1 1 0 0 1-1-1v-7a1 1 0 0 1 1-1h3" /></Svg>
 );
+export const WindowIcon = () => (
+  <Svg><rect x="2" y="3" width="12" height="10" rx="1.5" /><path d="M2 6.5h12" /></Svg>
+);
+export const ChevronIcon = ({ open }: { open: boolean }) => (
+  <Svg><path d={open ? 'M4 6l4 4 4-4' : 'M6 4l4 4-4 4'} /></Svg>
+);

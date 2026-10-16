@@ -1,4 +1,6 @@
-.app { display: grid; grid-template-rows: 48px minmax(0, 1fr); height: 100%; }
+.app { display: flex; flex-direction: column; height: 100%; }
+.app > .topbar { flex: none; height: 48px; }
+.app > .workspace { flex: 1 1 auto; }
 
 /* Top bar */
 .topbar {
@@ -11,6 +13,21 @@
 .signed-in i { width: 6px; height: 6px; border-radius: 50%; background: var(--success-fg); }
 
 .workspace { display: grid; grid-template-columns: 200px minmax(0, 1fr); min-height: 0; }
+
+/* Status of the running "순서대로 시청" queue (above the workspace, any view). */
+.watch-strip {
+  flex: none; display: grid; gap: 2px; padding: var(--sp-2) var(--sp-4);
+  border-bottom: 1px solid var(--border); background: var(--accent-tint);
+}
+.watch-strip-main { display: flex; align-items: center; gap: var(--sp-3); min-width: 0; }
+.watch-strip-summary {
+  display: flex; align-items: center; gap: var(--sp-2); flex: 1; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--accent-text); font-weight: var(--fw-semibold); font-variant-numeric: tabular-nums;
+}
+.watch-strip-actions { display: flex; gap: var(--sp-1); flex: none; }
+.watch-strip-note { margin: 0; color: var(--text-muted); font-size: var(--fs-12); }
+.watch-strip-note.has-detail { color: var(--warning-fg); }
 
 /* Sidebar */
 .sidebar { display: flex; flex-direction: column; min-height: 0; overflow-y: auto; padding: var(--sp-3) var(--sp-2); border-right: 1px solid var(--border); background: var(--bg-subtle); }

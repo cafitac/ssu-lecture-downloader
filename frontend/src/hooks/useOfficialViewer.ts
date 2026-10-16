@@ -1,32 +1,44 @@
 import { useEffect, useRef, useState } from 'react';
 import { isAuthenticationError, planOfficialViewer, planOfficialViewerSessionBridge } from '../lib/api';
-import { isTauriRuntime, openAssistedOfficialViewer, openOfficialViewer } from '../lib/desktop';
+import {
+  isTauriRuntime,
+  openOfficialViewer,
+  watchQueueNext,
+  watchQueueShowWindow,
+  watchQueueStart,
+  watchQueueStatus,
+  watchQueueStop,
+} from '../lib/desktop';
 import { friendlyError } from '../lib/errors';
-import type { CourseContentItem, CourseSummary, WatchDebugEvent, WatchQueueState } from '../lib/types';
+import type { CourseContentItem, CourseSummary, WatchDebugEvent, WatchQueueNotice, WatchQueueState } from '../lib/types';
+import { IDLE_WATCH_QUEUE, toQueueInputs } from '../lib/watch';
 import { useTauriEvent } from './useTauriEvent';
 
 interface Options {
   notify: (message: string, kind?: 'info' | 'success' | 'error') => void;
   onAuthError: (message: string) => void;
+  /** A lecture of the queue played to its real end (mark it watched right away). */
+  onItemWatched: (moduleItemId: string) => void;
+  /** The queue ended or was stopped; the course it ran for (reload its videos later). */
+  onQueueSettled: (course: CourseSummary) => void;
 }
 
 /**
- * Opens the official Commons player (one app-owned window) for a lecture, and runs the
- * experimental "watch in order" mode that advances when the player reports the real
- * video `ended` event.
+ * Opens the official Commons player (one app-owned window) for a lecture, and drives the
+ * "순서대로 시청" queue. The queue itself — state, the small always-visible playback window,
+ * the menu bar item — lives in the desktop shell, which advances only when the player reports
+ * the real video `ended` event; this hook starts/stops it and mirrors its state for the UI.
  */
-export function useOfficialViewer({ notify, onAuthError }: Options) {
+export function useOfficialViewer({ notify, onAuthError, onItemWatched, onQueueSettled }: Options) {
   const [openingKey, setOpeningKey] = useState<string | null>(null);
-  const [queue, setQueue] = useState<WatchQueueState>({ active: false, index: 0, total: 0 });
+  const [queue, setQueue] = useState<WatchQueueState>(IDLE_WATCH_QUEUE);
   const [debugEvents, setDebugEvents] = useState<WatchDebugEvent[]>([]);
-  const queueRef = useRef<CourseContentItem[]>([]);
-  const indexRef = useRef(0);
-  const activeRef = useRef(false);
   const openingRef = useRef(false);
   const courseRef = useRef<CourseSummary | null>(null);
-  const optionsRef = useRef({ notify, onAuthError });
+  const wasActiveRef = useRef(false);
+  const optionsRef = useRef({ notify, onAuthError, onItemWatched, onQueueSettled });
   useEffect(() => {
-    optionsRef.current = { notify, onAuthError };
+    optionsRef.current = { notify, onAuthError, onItemWatched, onQueueSettled };
   });
 
   function fail(error: unknown, fallback: string) {
@@ -34,10 +46,30 @@ export function useOfficialViewer({ notify, onAuthError }: Options) {
     else optionsRef.current.notify(friendlyError(error, fallback), 'error');
   }
 
-  function stopQueue() {
-    activeRef.current = false;
-    setQueue((current) => ({ ...current, active: false }));
+  function applyQueue(next: WatchQueueState) {
+    setQueue(next);
+    if (wasActiveRef.current && !next.active && courseRef.current) optionsRef.current.onQueueSettled(courseRef.current);
+    wasActiveRef.current = next.active;
   }
+
+  // The window may have been reloaded while a queue runs: pick its state up again.
+  useEffect(() => {
+    if (!isTauriRuntime()) return;
+    let cancelled = false;
+    watchQueueStatus()
+      .then((state) => {
+        if (!cancelled && state.active) {
+          wasActiveRef.current = true;
+          setQueue(state);
+        }
+      })
+      .catch(() => {
+        // Older shell without the queue commands; nothing to mirror.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   async function open(course: CourseSummary, lecture: CourseContentItem, key: string) {
     if (lecture.module_item_id === null || lecture.module_item_id === undefined || openingRef.current) return;
@@ -62,62 +94,70 @@ export function useOfficialViewer({ notify, onAuthError }: Options) {
     }
   }
 
-  async function openQueueItem(index: number) {
-    const course = courseRef.current;
-    const lecture = queueRef.current[index];
-    if (!course || !lecture || lecture.module_item_id === null || lecture.module_item_id === undefined) return;
-    indexRef.current = index;
-    openingRef.current = true;
-    setDebugEvents([]);
-    setQueue({ active: true, index, total: queueRef.current.length });
-    try {
-      const plan = await planOfficialViewerSessionBridge(course.id, lecture.module_item_id, course.name);
-      if (!plan.viewer_url) throw new Error('시청 주소를 찾지 못했어요.');
-      await openAssistedOfficialViewer(plan.viewer_url, plan.title ?? lecture.title ?? '숭실 LMS 공식 시청 창', plan);
-    } catch (error) {
-      stopQueue();
-      fail(error, '시청 창을 열지 못했어요.');
-    } finally {
-      openingRef.current = false;
-    }
-  }
-
+  /** Starts the queue with `lectures` in the given order (already filtered and sorted). */
   async function startQueue(course: CourseSummary, lectures: CourseContentItem[]) {
-    if (queue.active || openingRef.current) return;
-    const playable = lectures.filter((lecture) => lecture.kind === 'video' && lecture.module_item_id !== null && lecture.module_item_id !== undefined);
-    if (playable.length === 0) {
+    if (queue.active) return;
+    if (!isTauriRuntime()) {
+      optionsRef.current.notify('순서대로 시청은 데스크톱 앱에서만 쓸 수 있어요.', 'info');
+      return;
+    }
+    const inputs = toQueueInputs(lectures);
+    if (inputs.length === 0) {
       optionsRef.current.notify('순서대로 시청할 영상이 없어요.', 'info');
       return;
     }
-    queueRef.current = playable;
     courseRef.current = course;
-    activeRef.current = true;
-    await openQueueItem(0);
-  }
-
-  function stop() {
-    stopQueue();
-    optionsRef.current.notify('순서대로 시청을 멈췄어요. 열려 있는 시청 창은 직접 닫아 주세요.', 'info');
-  }
-
-  // The player reports the real video `ended` event; advance to the next lecture.
-  useTauriEvent<{ stage: string }>('official-watch-ended', () => {
-    if (!activeRef.current || openingRef.current) return;
-    const next = indexRef.current + 1;
-    if (next >= queueRef.current.length) {
-      activeRef.current = false;
-      setQueue((current) => ({ ...current, active: false, index: current.total }));
-      optionsRef.current.notify('순서대로 시청을 마쳤어요.', 'success');
-      return;
+    setDebugEvents([]);
+    try {
+      applyQueue(await watchQueueStart({ course_id: String(course.id), course_name: course.name, items: inputs }));
+    } catch (error) {
+      fail(error, '순서대로 시청을 시작하지 못했어요.');
     }
-    void openQueueItem(next);
+  }
+
+  async function stop() {
+    try {
+      applyQueue(await watchQueueStop());
+      optionsRef.current.notify('순서대로 시청을 멈췄어요.', 'info');
+    } catch (error) {
+      fail(error, '순서대로 시청을 멈추지 못했어요.');
+    }
+  }
+
+  async function next() {
+    try {
+      applyQueue(await watchQueueNext());
+    } catch (error) {
+      fail(error, '다음 강의로 넘어가지 못했어요.');
+    }
+  }
+
+  async function showWindow() {
+    try {
+      await watchQueueShowWindow();
+    } catch (error) {
+      fail(error, '재생 창을 보여주지 못했어요.');
+    }
+  }
+
+  // Every state change of the shell's queue (a report every few seconds while playing).
+  useTauriEvent<WatchQueueState>('watch-queue-changed', applyQueue);
+
+  // The player reported the real video `ended` event: that lecture counts as watched.
+  useTauriEvent<{ stage: string; module_item_id?: string | null }>('official-watch-ended', (payload) => {
+    if (payload.module_item_id) optionsRef.current.onItemWatched(payload.module_item_id);
+  });
+
+  useTauriEvent<WatchQueueNotice>('watch-queue-notice', (payload) => {
+    if (payload.auth_expired) optionsRef.current.onAuthError(payload.text);
+    else optionsRef.current.notify(payload.text, payload.kind);
   });
 
   useTauriEvent<WatchDebugEvent>('official-watch-debug', (payload) => {
     setDebugEvents((current) => [payload, ...current].slice(0, 40));
   });
 
-  return { openingKey, queue, debugEvents, open, startQueue, stop };
+  return { openingKey, queue, debugEvents, open, startQueue, stop, next, showWindow };
 }
 
 export type OfficialViewer = ReturnType<typeof useOfficialViewer>;

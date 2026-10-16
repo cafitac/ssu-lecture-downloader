@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from typing import Any
 
+from ssu_lecture_downloader.canvas_files import wiki_page_ref
 from ssu_lecture_downloader.models import CourseContentItem, LectureItem
 
 COURSES_API_URL = "https://canvas.ssu.ac.kr/learningx/api/v1/learn_activities/courses"
@@ -146,6 +147,14 @@ class LearningXLister:
                         inner_content_type=inner_content_type,
                         kind=kind,
                         content_id=str(item_content_data.get("content_id")) if item_content_data.get("content_id") else None,
+                        resource_id=str(item.get("content_id")) if item.get("content_id") not in (None, "") else None,
+                        page_ref=wiki_page_ref(
+                            url=item.get("url") or content_data.get("url"),
+                            page_url=item.get("page_url") or content_data.get("page_url"),
+                            resource_id=item.get("content_id"),
+                        )
+                        if kind == "page"
+                        else None,
                         completed=item.get("completed") if "completed" in item else None,
                         attendance_status=item.get("attendance_status"),
                         duration=item_content_data.get("duration"),

@@ -11,20 +11,27 @@ from hashlib import sha256
 from pathlib import Path
 from time import monotonic
 from typing import Any, TypeVar
-from urllib.parse import urljoin
+from urllib.parse import quote, urljoin
 
 from ssu_lecture_downloader.cache import TtlCache
+from ssu_lecture_downloader.canvas_files import (
+    CANVAS_ORIGIN,
+    MAX_PAGE_FILES,
+    extract_file_links,
+    parse_canvas_json,
+)
 from ssu_lecture_downloader.download import (
     DownloadCancelled,
     DownloadPlan,
     download_to_plan,
     plan_download_path,
 )
-from ssu_lecture_downloader.errors import is_session_lost, is_signed_url_failure
+from ssu_lecture_downloader.errors import is_session_lost, is_signed_url_failure, response_status
 from ssu_lecture_downloader.http_client import HttpClient
 from ssu_lecture_downloader.lms import (
     DEFAULT_TERM_ID_CANDIDATES,
     LearningXLister,
+    _optional_int,
     latest_current_courses,
     learningx_api_headers,
 )
@@ -200,6 +207,47 @@ class OfficialViewerSessionBridgeResult:
     launch_url: str | None
     cookies: list[OfficialViewerBridgeCookie]
     diagnostics: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class LmsSessionCookiesResult:
+    """The LMS cookies for an in-app page window (values are for the local desktop shell only)."""
+
+    ok: bool
+    error_code: str | None
+    cookies: list[OfficialViewerBridgeCookie]
+    diagnostics: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class PageFile:
+    file_id: str
+    display_name: str
+    size: int | None
+    # Signed Canvas download address (from /api/v1/files/:id); None when Canvas refuses the file.
+    download_url: str | None
+    content_type: str | None = None
+
+
+@dataclass(frozen=True)
+class PageFilesResult:
+    ok: bool
+    error_code: str | None
+    title: str | None
+    files: list[PageFile]
+
+
+@dataclass(frozen=True)
+class CanvasFileDownloadResult:
+    ok: bool
+    error_code: str | None
+    file_id: str
+    display_name: str | None
+    output_path: str | None
+    file_size: int | None
+    skipped: bool = False
+    written: bool = False
+    conflict_strategy: str = 'skip'
 
 
 @dataclass(frozen=True)
@@ -1058,6 +1106,148 @@ class SsuLectureService:
             },
         )
 
+    # ---------------------------------------------------- LMS pages, Canvas files
+
+    def lms_session_cookies(self, username: str, password: str) -> LmsSessionCookiesResult:
+        """The session cookies an in-app LMS page window needs (wiki pages, boards, assignments)."""
+        login_result, cookies = self._authenticated(username, password, lambda: _bridge_cookies(self.http.cookies))
+        if not login_result.ok or cookies is None:
+            return LmsSessionCookiesResult(ok=False, error_code=login_result.error_code, cookies=[], diagnostics={"cookie_count": 0})
+        return LmsSessionCookiesResult(
+            ok=True,
+            error_code=None,
+            cookies=cookies,
+            diagnostics={"cookie_count": len(cookies), "cookie_names": [cookie.name for cookie in cookies]},
+        )
+
+    def _canvas_json(self, step: str, path: str) -> Any:
+        """GET a Canvas API path on the shared session (caller holds the lock)."""
+        response = self.http.get(
+            step,
+            f"{CANVAS_ORIGIN}{path}",
+            headers={"Accept": "application/json+canvas-string-ids, application/json", "Referer": f"{CANVAS_ORIGIN}/"},
+        )
+        response.raise_for_status()
+        return parse_canvas_json(response)
+
+    def list_page_files(self, username: str, password: str, *, course_id: int | str, page_ref: str) -> PageFilesResult:
+        """Files linked from a wiki page, each with its name, size and signed download address."""
+
+        def operation() -> PageFilesResult:
+            page = self._canvas_json("get_canvas_page", f"/api/v1/courses/{quote(str(course_id), safe='')}/pages/{quote(page_ref, safe='')}")
+            page = page if isinstance(page, dict) else {}
+            files: list[PageFile] = []
+            for link in extract_file_links(str(page.get("body") or ""), MAX_PAGE_FILES):
+                files.append(self._page_file(link.file_id, link.link_text))
+            title = page.get("title")
+            return PageFilesResult(ok=True, error_code=None, title=title if isinstance(title, str) else None, files=files)
+
+        login_result, result = self._authenticated(username, password, operation)
+        if not login_result.ok or result is None:
+            return PageFilesResult(ok=False, error_code=login_result.error_code, title=None, files=[])
+        return result
+
+    def _page_file(self, file_id: str, link_text: str, *, strict: bool = False) -> PageFile:
+        try:
+            info = self._canvas_json("get_canvas_file", f"/api/v1/files/{quote(file_id, safe='')}")
+        except Exception as exc:
+            # A forbidden, removed or locked file is not a lost session: it is still listed (by
+            # its link text) but cannot be downloaded.
+            if response_status(exc) not in (403, 404, 410) and (strict or is_session_lost(exc)):
+                raise
+            return PageFile(file_id=file_id, display_name=link_text or f"file-{file_id}", size=None, download_url=None)
+        info = info if isinstance(info, dict) else {}
+        name = info.get("display_name") or info.get("filename") or link_text or f"file-{file_id}"
+        url = info.get("url")
+        return PageFile(
+            file_id=file_id,
+            display_name=str(name),
+            size=_optional_int(info.get("size")),
+            download_url=url if isinstance(url, str) and url.startswith("https://") else None,
+            content_type=info.get("content-type") if isinstance(info.get("content-type"), str) else None,
+        )
+
+    def download_canvas_file(
+        self,
+        username: str,
+        password: str,
+        *,
+        file_id: str,
+        course_name: str,
+        output_dir: Path,
+        conflict_strategy: str = 'skip',
+        on_progress: Callable[[dict[str, Any]], None] | None = None,
+        should_cancel: Callable[[], bool] | None = None,
+    ) -> CanvasFileDownloadResult:
+        """Save one Canvas file into the course folder (same `.part` -> rename handling as lectures)."""
+
+        def failure(code: str | None) -> CanvasFileDownloadResult:
+            return CanvasFileDownloadResult(
+                ok=False, error_code=code, file_id=file_id, display_name=None, output_path=None, file_size=None, conflict_strategy=conflict_strategy
+            )
+
+        login_result, file = self._authenticated(username, password, lambda: self._page_file(file_id, "", strict=True))
+        if not login_result.ok or file is None:
+            return failure(login_result.error_code)
+        if file.download_url is None:
+            return failure("canvas_file_unavailable")
+
+        stem, extension = _split_file_name(file.display_name)
+        plan = plan_download_path(
+            output_dir=output_dir,
+            course_name=course_name,
+            lecture_title=stem,
+            content_id=f"canvas-{file_id}",
+            extension=extension or "bin",
+            conflict_strategy=conflict_strategy,
+        )
+        if plan.file_exists and conflict_strategy == 'skip':
+            emit_progress(on_progress, {'stage': 'download_skipped', 'output_path': str(plan.file_path)})
+            return CanvasFileDownloadResult(
+                ok=True,
+                error_code=None,
+                file_id=file_id,
+                display_name=file.display_name,
+                output_path=str(plan.file_path),
+                file_size=plan.file_path.stat().st_size,
+                skipped=True,
+                conflict_strategy=conflict_strategy,
+            )
+
+        def transfer(current: PageFile) -> None:
+            with self._download_http_client() as http:
+                download_to_plan(
+                    http=http,
+                    download_url=str(current.download_url),
+                    plan=plan,
+                    referer=f"{CANVAS_ORIGIN}/",
+                    max_attempts=3,
+                    on_progress=on_progress,
+                    should_cancel=should_cancel,
+                    expected_total_bytes=current.size,
+                )
+
+        try:
+            transfer(file)
+        except Exception as exc:
+            if not is_signed_url_failure(exc):
+                raise
+            # The signed address expired: ask Canvas for a fresh one once and resume.
+            login_result, fresh = self._authenticated(username, password, lambda: self._page_file(file_id, "", strict=True))
+            if not login_result.ok or fresh is None or fresh.download_url is None:
+                raise
+            transfer(fresh)
+        return CanvasFileDownloadResult(
+            ok=True,
+            error_code=None,
+            file_id=file_id,
+            display_name=file.display_name,
+            output_path=str(plan.file_path),
+            file_size=plan.file_path.stat().st_size,
+            written=True,
+            conflict_strategy=conflict_strategy,
+        )
+
     # -------------------------------------------------------------------- batch
 
     def batch_download_lectures(
@@ -1464,6 +1654,15 @@ class SsuLectureService:
     def _resolve_media_authenticated(self, *, course_id: int | str, module_item_id: int | str, refresh: bool = False) -> _ResolvedMediaInternal:
         with self._lock:
             return self._resolve_media_cached(self.http, course_id=course_id, module_item_id=module_item_id, refresh=refresh)
+
+
+def _split_file_name(name: str) -> tuple[str, str]:
+    """`week 1.PDF` -> (`week 1`, `pdf`); a name without a usable extension -> (name, '')."""
+    base = name.rsplit("/", 1)[-1].strip() or "file"
+    stem, dot, extension = base.rpartition(".")
+    if not dot or not stem or not extension.isalnum() or len(extension) > 8:
+        return base, ""
+    return stem, extension.lower()
 
 
 def _select_batch_lectures(content_items: list, *, module_item_ids: list[int | str] | None, include_completed: bool) -> list:

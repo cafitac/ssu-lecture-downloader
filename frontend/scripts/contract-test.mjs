@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync, existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
+import vm from 'node:vm';
 
 function readTree(dir, extensions) {
   return readdirSync(dir, { withFileTypes: true })
@@ -29,6 +30,13 @@ const requiredFiles = [
   'src/hooks/useLmsSession.ts',
   'src/hooks/useDownloads.ts',
   'src/hooks/useOfficialViewer.ts',
+  'src/hooks/useLmsPages.ts',
+  'src/hooks/usePageAttachments.ts',
+  'src/lib/watch.ts',
+  'src/components/WatchStrip.tsx',
+  'src/components/PageAttachments.tsx',
+  'src-tauri/src/watch_queue.rs',
+  'src-tauri/src/watch_runtime.rs',
   'src/components/TopBar.tsx',
   'src/components/CourseSidebar.tsx',
   'src/components/LecturePane.tsx',
@@ -64,7 +72,7 @@ for (const file of requiredFiles) {
 }
 
 const api = readFileSync('src/lib/api.ts', 'utf8');
-for (const endpoint of ['/api/credentials/status', '/api/credentials', '/api/courses', '/api/courses/', '/api/deadlines', '/api/watch/viewer-plan', '/api/download/jobs', '/api/download/batch/jobs', '/api/download/plan', '/api/download', '/api/download/batch/plan', '/api/download/batch', '/api/media/audio/jobs', '/api/stt/providers/status', '/api/media/dependencies/status', '/api/media/dependencies/install/jobs', '/api/stt/jobs']) {
+for (const endpoint of ['/api/credentials/status', '/api/credentials', '/api/courses', '/api/courses/', '/api/deadlines', '/api/watch/viewer-plan', '/api/lms/session-bridge', '/pages/', '/api/download/canvas-file', '/api/download/jobs', '/api/download/batch/jobs', '/api/download/plan', '/api/download', '/api/download/batch/plan', '/api/download/batch', '/api/media/audio/jobs', '/api/stt/providers/status', '/api/media/dependencies/status', '/api/media/dependencies/install/jobs', '/api/stt/jobs']) {
   if (!api.includes(endpoint)) {
     throw new Error(`API client missing endpoint ${endpoint}`);
   }
@@ -83,6 +91,7 @@ const uiSourceFiles = [
   'src/lib/polling.ts',
   'src/lib/format.ts',
   'src/lib/content.ts',
+  'src/lib/watch.ts',
 ];
 const main = uiSourceFiles.map((file) => readFileSync(file, 'utf8')).join('\n');
 const componentsSource = readTree('src/components', ['.tsx']).map((file) => readFileSync(file, 'utf8')).join('\n');
@@ -161,8 +170,8 @@ if (main.includes('planDownload(') || main.includes('planBatchDownload(')) throw
 if (!main.includes("'skip'")) throw new Error('Download conflict policy must be explicit: reuse existing files (skip)');
 if (!api.includes('overwrite_artifacts: false')) throw new Error('Main MP3/TXT artifact flow should reuse existing derived audio/transcript outputs by default');
 if (!main.includes('startArtifactDownloadJob') || !main.includes("outputs[0] === 'mp4'")) throw new Error('MP4-only downloads use the plain job; MP3/TXT use the artifact job');
-if (!main.includes('planOfficialViewerSessionBridge') || !main.includes('openOfficialViewer') || !main.includes('official-watch-ended') || !main.includes('openAssistedOfficialViewer')) {
-  throw new Error('Row play and sequential watch must keep using the official viewer bridge and the real ended event');
+if (!main.includes('planOfficialViewerSessionBridge') || !main.includes('openOfficialViewer') || !main.includes('official-watch-ended') || !main.includes('watchQueueStart') || !main.includes('watch-queue-changed')) {
+  throw new Error('Row play keeps using the official viewer bridge; sequential watch runs in the desktop shell queue and advances on the real ended event');
 }
 if (!main.includes('componentsFor') || !main.includes("formats.includes('txt')")) throw new Error('Missing-dependency gating must be per selected output format');
 if (!main.includes('~/Downloads') || main.includes('~/Downloads/ssu-lectures')) throw new Error('Default download destination must be the real ~/Downloads');
@@ -240,8 +249,10 @@ const capabilities = readFileSync('src-tauri/capabilities/default.json', 'utf8')
 if (!desktop.includes('openOfficialViewer') || !desktop.includes('WebviewWindow') || !desktop.includes('OFFICIAL_VIEWER_LABEL') || !desktop.includes('getByLabel(OFFICIAL_VIEWER_LABEL)') || !desktop.includes('setFocus()') || !tauriLib.includes('open_official_viewer_with_session') || tauriLib.includes('official_watch_autoplay_script()') || !capabilities.includes('core:webview:allow-create-webview-window')) {
   throw new Error('The official Commons viewer must open/focus in a single app-owned Tauri WebView window without autoplay/debug scripts in the default watch flow');
 }
-if (!desktop.includes('openAssistedOfficialViewer') || !desktop.includes("invoke<void>('open_assisted_official_viewer'") || !tauriLib.includes('open_assisted_official_viewer') || !tauriLib.includes('initialization_script_for_all_frames(official_watch_assist_script())') || !tauriLib.includes('ssu-watch://ended') || !tauriLib.includes("video.addEventListener('ended'") || tauriLib.includes('TargetUrl')) {
-  throw new Error('Sequential watch mode must use an assisted official viewer that only attempts visible playback and advances after the real video ended event');
+// Sequential watch (intentional change): one small always-on-top playback window owned by the
+// desktop shell, a queue held in Rust, advancing only on the real video ended event.
+if (!desktop.includes("invoke<WatchQueueState>('watch_queue_start'") || !desktop.includes("'watch_queue_stop'") || !desktop.includes("'watch_queue_next'") || !desktop.includes("'watch_queue_status'") || desktop.includes('open_assisted_official_viewer') || !tauriLib.includes('initialization_script_for_all_frames(official_watch_assist_script())') || !tauriLib.includes('ssu-watch://ended') || !tauriLib.includes("video.addEventListener('ended'") || tauriLib.includes('TargetUrl')) {
+  throw new Error('Sequential watch mode must run through the shell queue with an assisted viewer that advances only after the real video ended event');
 }
 // Decision (frontend/README.md "Important watch-mode split" + the Rust regression tests): the official
 // viewer never overrides WKWebView autoplay policy. A custom WKWebViewConfiguration previously produced a
@@ -732,4 +743,308 @@ console.log('frontend contract ok');
     assert.ok(lib.match(new RegExp(`^\\s+${command},$`, 'm')), `${command} must be registered in the invoke handler`);
   }
   assert.ok(lib.indexOf('is_check_invocation') < lib.indexOf('tauri::Builder'), '--check-reminders must exit before Tauri starts');
+}
+
+// ---------------------------------------------------------------------------
+// Sequential watch: queue order, status strip, tray/commands wiring.
+// ---------------------------------------------------------------------------
+
+// Queue: open, unwatched videos; nearest attendance deadline first (late windows by their end),
+// then week order; undated after dated; fully closed last; unopened, watched, duplicate and non-video rows out.
+{
+  process.env.TZ = 'Asia/Seoul';
+  const { buildWatchQueue } = await import('../src/lib/content.ts');
+  const now = new Date('2026-10-15T03:00:00Z'); // 10/15(목) 12:00 KST
+  const open = '2026-10-01T00:00:00Z';
+  const video = (id, week, fields) => ({ kind: 'video', module_item_id: id, title: `v${id}`, week_position: week, lesson_position: null, completed: false, unlock_at: open, due_at: null, late_at: null, lock_at: null, ...fields });
+  const items = [
+    video('a', 1, { due_at: '2026-10-19T14:59:59Z' }),
+    video('c', 3, { due_at: '2026-10-16T14:59:59Z' }),
+    video('b', 2, { due_at: '2026-10-16T14:59:59Z' }),
+    video('d', 4, { completed: true, due_at: '2026-10-16T14:59:59Z' }),
+    video('e', 5, { unlock_at: '2026-10-26T15:00:00Z', due_at: '2026-11-02T14:59:59Z' }),
+    video('f', 6),
+    video('g', 7, { due_at: '2026-10-10T14:59:59Z', late_at: '2026-10-15T14:59:59Z' }),
+    video('h', 8, { due_at: '2026-10-01T14:59:59Z', late_at: '2026-10-05T14:59:59Z' }),
+    video('a', 1, { due_at: '2026-10-19T14:59:59Z' }),
+    { ...video('j', 9, { due_at: '2026-10-16T00:00:00Z' }), kind: 'material' },
+    video('k', 2, { completed: null }),
+    video(null, 2, { due_at: '2026-10-16T00:00:00Z' }),
+  ];
+  assert.deepEqual(buildWatchQueue(items, now).map((item) => item.module_item_id), ['g', 'b', 'c', 'a', 'k', 'f', 'h']);
+  assert.deepEqual(buildWatchQueue([], now), []);
+  assert.deepEqual(buildWatchQueue([video('x', 1, { completed: true })], now), []);
+  // Same deadline, so week order decides (then lesson order, then the LMS order).
+  const sameDay = buildWatchQueue([video('w2', 2, { due_at: '2026-10-20T14:59:59Z' }), video('l2', 1, { lesson_position: 2, due_at: '2026-10-20T14:59:59Z' }), video('l1', 1, { lesson_position: 1, due_at: '2026-10-20T14:59:59Z' })], now);
+  assert.deepEqual(sameDay.map((item) => item.module_item_id), ['l1', 'l2', 'w2']);
+}
+
+// Status strip copy and queue inputs.
+{
+  const { watchStripText, formatClock, WATCH_STRIP_NOTE, IDLE_WATCH_QUEUE, toQueueInputs, watchFinishedText } = await import('../src/lib/watch.ts');
+  const running = { ...IDLE_WATCH_QUEUE, active: true, phase: 'playing', index: 2, total: 7, current_title: '3주차 강의', position_secs: 69, duration_secs: 450 };
+  assert.deepEqual(watchStripText(running), { summary: '자동 재생 중 3/7 · 3주차 강의 · 01:09 / 07:30', detail: null });
+  assert.match(watchStripText({ ...running, rendering: false }).detail, /가려져/);
+  assert.match(watchStripText({ ...running, paused: true }).detail, /일시정지/);
+  assert.equal(watchStripText({ ...running, phase: 'opening', position_secs: null, duration_secs: null }).summary, '자동 재생 중 3/7 · 3주차 강의');
+  assert.match(watchStripText({ ...running, phase: 'stalled' }).detail, /다시 불러오고/);
+  assert.equal(watchStripText(IDLE_WATCH_QUEUE), null);
+  assert.equal(watchStripText({ ...running, active: false, phase: 'finished' }), null);
+  assert.equal(WATCH_STRIP_NOTE, '재생 창이 가려지거나 최소화되면 재생이 멈춰요. 화면 구석에 보이게 두세요.');
+  assert.equal(formatClock(69.9), '01:09');
+  assert.equal(formatClock(3725), '1:02:05');
+  assert.equal(formatClock(null), '00:00');
+  assert.equal(watchFinishedText({ ...IDLE_WATCH_QUEUE, done_count: 6, skipped_count: 1 }), '자동 재생을 마쳤어요. 6개 시청 · 1개 건너뜀');
+  assert.deepEqual(toQueueInputs([{ module_item_id: 7, title: 'a', duration: 450.5 }, { module_item_id: null, title: 'x', duration: 1 }, { module_item_id: '8', title: 'b', duration: 0 }]), [
+    { module_item_id: '7', title: 'a', duration: 450.5 },
+    { module_item_id: '8', title: 'b', duration: null },
+  ]);
+
+  const strip = readFileSync(new URL('../src/components/WatchStrip.tsx', import.meta.url), 'utf8');
+  for (const text of ['다음', '중지', 'WATCH_STRIP_NOTE', 'watchStripText']) assert.ok(strip.includes(text), `status strip missing ${text}`);
+  const app = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
+  assert.ok(app.includes('<WatchStrip queue={viewer.queue}') && app.includes('buildWatchQueue(content.items'), 'the strip shows the shell queue, started from the full course item list');
+  assert.ok(app.includes('markWatched') && app.includes('refreshQuietly'), 'a finished lecture is marked watched locally, the LMS asked later');
+  const toolbar = readFileSync(new URL('../src/components/LectureToolbar.tsx', import.meta.url), 'utf8');
+  assert.ok(toolbar.includes('순서대로 시청') && !toolbar.includes('onStopWatch'), 'stopping lives in the status strip');
+}
+
+// The shell side: commands registered, tray enabled, window rules, state held in Rust.
+{
+  const lib = readFileSync(new URL('../src-tauri/src/lib.rs', import.meta.url), 'utf8');
+  for (const command of ['watch_runtime::watch_queue_start', 'watch_runtime::watch_queue_next', 'watch_runtime::watch_queue_stop', 'watch_runtime::watch_queue_status', 'watch_runtime::watch_queue_show_window', 'viewer::open_lms_page_with_session']) {
+    assert.ok(lib.match(new RegExp(`^\\s+${command},?$`, 'm')), `${command} must be registered in the invoke handler`);
+  }
+  assert.ok(lib.includes('watch_runtime::shutdown('), 'the playback window, menu bar item and badge go away when the app quits');
+  assert.ok(readFileSync(new URL('../src-tauri/Cargo.toml', import.meta.url), 'utf8').includes('"tray-icon"'), 'the menu bar item needs the tauri tray-icon feature');
+  const runtime = readFileSync(new URL('../src-tauri/src/watch_runtime.rs', import.meta.url), 'utf8').split('#[cfg(test)]')[0];
+  for (const marker of ['TrayIconBuilder', 'set_badge_count', 'OsascriptNotifier', 'always_on_top(true)', '.focused(false)', 'bottom_right_position', 'window_title(']) {
+    assert.ok(runtime.includes(marker), `watch runtime missing ${marker}`);
+  }
+  const queueRs = readFileSync(new URL('../src-tauri/src/watch_queue.rs', import.meta.url), 'utf8').split('#[cfg(test)]')[0];
+  assert.ok(!queueRs.includes('tauri::'), 'the queue state machine stays free of Tauri types');
+}
+
+// watch_assist.js: resume dialog, muting, progress/stall reports, and nothing that fakes visibility, speed or position.
+const assistSource = readFileSync('src-tauri/src/assets/watch_assist.js', 'utf8');
+{
+  assert.ok(assistSource.includes('이어서 보시겠습니까') && assistSource.includes("RESUME_YES_LABEL = '예'"), 'the resume dialog is answered with 예');
+  assert.ok(assistSource.includes('video.muted = true') && assistSource.includes('ssu-watch://progress') && assistSource.includes('ssu-watch://stalled'));
+  for (const forbidden of ['visibilityState', 'document.hidden', 'visibilitychange', 'playbackRate', 'Object.defineProperty', 'preventDefault', 'stopImmediatePropagation', /currentTime\s*=[^=]/, 'fastSeek']) {
+    const found = typeof forbidden === 'string' ? assistSource.includes(forbidden) : forbidden.test(assistSource);
+    assert.ok(!found, `watch_assist.js must not use ${String(forbidden)}`);
+  }
+  assert.ok(!/\bhidden\b/.test(assistSource), 'watch_assist.js must not read or fake the page-hidden state');
+}
+
+// watch_assist.js behaviour on a fake page with virtual time (no real media is ever played).
+{
+  const DIALOG = '이전에 시청했던 07:29부터 이어서 보시겠습니까?';
+  function makePage({ top = true, playWorks = true } = {}) {
+    let now = 5_000_000;
+    let seq = 0;
+    const timers = [];
+    const frames = [];
+    const env = { rendering: true, navigations: [], posted: [], clicks: [], writes: [], playCalls: 0, playWorks, dialog: false, videos: [] };
+    const rect = () => ({ width: 320, height: 180 });
+    const dialogNode = { get textContent() { return env.dialog ? `${DIALOG} 예 아니오` : ''; }, parentElement: null };
+    const control = (label) => ({ innerText: label, textContent: label, value: '', parentElement: dialogNode, getBoundingClientRect: () => (env.dialog ? rect() : { width: 0, height: 0 }), click() { env.clicks.push(label); if (label === '예') env.dialog = false; } });
+    const yes = control('예');
+    const no = control('아니오');
+    const sandbox = {
+      Date: { now: () => now },
+      performance: { now: () => now },
+      setTimeout(fn, ms = 0) { timers.push({ id: ++seq, at: now + ms, fn }); return seq; },
+      setInterval(fn, ms) { timers.push({ id: ++seq, at: now + ms, fn, every: ms }); return seq; },
+      requestAnimationFrame(cb) { frames.push(cb); },
+      encodeURIComponent, String, Math, JSON, Array, Object, Number, Promise, Error, console,
+      addEventListener() {},
+      document: {
+        readyState: 'complete',
+        get body() { return { get textContent() { return dialogNode.textContent; } }; },
+        querySelectorAll(selector) {
+          if (selector === 'video') return env.videos;
+          if (selector.startsWith('button') && env.plainDialog) return [];
+          return env.dialog ? [yes, no] : [];
+        },
+        querySelector() { return null; },
+      },
+      location: { hostname: 'commons.ssu.ac.kr', set href(value) { env.navigations.push(value); } },
+    };
+    sandbox.window = sandbox;
+    sandbox.top = top ? sandbox : { postMessage(message) { env.posted.push(message); } };
+    vm.createContext(sandbox);
+    env.video = (duration, time = 0) => {
+      const video = {
+        paused: true, ended: false, muted: false, readyState: 4, networkState: 1, currentSrc: 'blob:x', src: '', duration,
+        _time: time, listeners: {},
+        get currentTime() { return this._time; },
+        set currentTime(value) { env.writes.push(['currentTime', value]); },
+        set playbackRate(value) { env.writes.push(['playbackRate', value]); },
+        getBoundingClientRect: rect,
+        addEventListener(type, fn) { (this.listeners[type] ||= []).push(fn); },
+        play() { env.playCalls += 1; if (env.playWorks) this.paused = false; return Promise.resolve(); },
+      };
+      env.videos.push(video);
+      return video;
+    };
+    env.advance = (ms) => {
+      for (let elapsed = 0; elapsed < ms; elapsed += 100) {
+        now += 100;
+        for (const video of env.videos) if (!video.paused && !video.ended && env.rendering) video._time += 0.1;
+        for (const timer of timers.filter((entry) => entry.at <= now).sort((a, b) => a.at - b.at || a.id - b.id)) {
+          if (timer.every) timer.at += timer.every; else timers.splice(timers.indexOf(timer), 1);
+          timer.fn();
+        }
+        if (env.rendering) frames.splice(0).forEach((cb) => cb());
+      }
+    };
+    env.signals = () => {
+      const urls = top
+        ? env.navigations
+        : env.posted.map((message) => `ssu-watch://${message.kind}?${new URLSearchParams(message.payload || {}).toString()}`);
+      return urls.map((url) => new URL(url)).map((url) => ({ kind: url.host, params: Object.fromEntries(url.searchParams) }));
+    };
+    env.fire = (video, type) => (video.listeners[type] || []).forEach((fn) => fn());
+    vm.runInContext(assistSource, sandbox);
+    return env;
+  }
+
+  // Mutes, plays, answers 예 (never 아니오) and reports progress every few seconds.
+  {
+    const page = makePage();
+    const video = page.video(450, 449);
+    page.dialog = true;
+    page.advance(3000);
+    assert.equal(video.muted, true, 'the video is muted');
+    assert.ok(page.playCalls >= 1 && video.paused === false, 'play() is called');
+    assert.deepEqual(page.clicks, ['예'], 'the resume dialog is answered with 예 exactly once and 아니오 is never pressed');
+    page.advance(20000);
+    const progress = page.signals().filter((signal) => signal.kind === 'progress');
+    assert.ok(progress.length >= 3 && progress.length <= 5, `progress about every 5s, got ${progress.length}`);
+    assert.equal(progress[progress.length - 1].params.main, '1');
+    assert.equal(progress[progress.length - 1].params.paused, '0');
+    assert.equal(progress[progress.length - 1].params.rendering, '1');
+    assert.equal(progress[progress.length - 1].params.duration, '450');
+    assert.ok(Number(progress[progress.length - 1].params.time) > 449);
+    assert.deepEqual(page.writes, [], 'no seeking, no speed changes');
+    // Ended: signalled once, only for the main video.
+    page.fire(video, 'ended');
+    page.fire(video, 'ended');
+    page.advance(1000);
+    assert.equal(page.signals().filter((signal) => signal.kind === 'ended').length, 1);
+  }
+
+  // Players that draw 예 / 아니오 as plain elements instead of buttons are answered too.
+  {
+    const page = makePage();
+    page.plainDialog = true;
+    page.video(450, 449);
+    page.dialog = true;
+    page.advance(3000);
+    assert.deepEqual(page.clicks, ['예']);
+  }
+
+  // A short intro clip ending is not the lecture ending.
+  {
+    const page = makePage();
+    const intro = page.video(6);
+    page.advance(2000);
+    page.fire(intro, 'ended');
+    page.advance(1000);
+    assert.equal(page.signals().filter((signal) => signal.kind === 'ended').length, 0);
+    const progress = page.signals().filter((signal) => signal.kind === 'progress');
+    assert.ok(progress.length >= 1 && progress.every((signal) => signal.params.main === '0'));
+  }
+
+  // A player that never moves is reported as stalled after 60s; a covered window never is.
+  {
+    const frozen = makePage({ playWorks: false });
+    frozen.video(450, 100);
+    frozen.advance(50000);
+    assert.equal(frozen.signals().filter((signal) => signal.kind === 'stalled').length, 0, 'not before 60s');
+    frozen.advance(20000);
+    assert.equal(frozen.signals().filter((signal) => signal.kind === 'stalled').length, 1, 'reported once');
+    assert.ok(frozen.playCalls >= 3, 'play is retried with backoff meanwhile');
+    assert.ok(frozen.playCalls <= 12, `backoff, not a tight loop (${frozen.playCalls} calls)`);
+
+    const covered = makePage({ playWorks: false });
+    covered.video(450, 100);
+    covered.rendering = false;
+    covered.advance(300000);
+    assert.equal(covered.signals().filter((signal) => signal.kind === 'stalled').length, 0, 'time without drawing never counts as a stall');
+    covered.rendering = true;
+    covered.advance(30000);
+    assert.equal(covered.signals().filter((signal) => signal.kind === 'stalled').length, 0, 'the 60s start over once the window is drawn again');
+    covered.advance(40000);
+    assert.equal(covered.signals().filter((signal) => signal.kind === 'stalled').length, 1);
+  }
+
+  // A video that plays normally never stalls; the page tells the app whether it is drawn.
+  {
+    const page = makePage();
+    const video = page.video(450);
+    page.advance(90000);
+    assert.equal(page.signals().filter((signal) => signal.kind === 'stalled').length, 0);
+    page.rendering = false;
+    page.advance(12000);
+    page.rendering = true;
+    page.advance(6000);
+    const beats = page.signals().filter((signal) => signal.kind === 'heartbeat');
+    assert.ok(beats.some((signal) => signal.params.rendering === '0'), 'heartbeat reports a window that is not being drawn');
+    assert.ok(beats.some((signal) => signal.params.rendering === '1'));
+    assert.ok(video.paused === false);
+  }
+
+  // Child frames hand their reports to the top frame instead of navigating themselves.
+  {
+    const child = makePage({ top: false });
+    const video = child.video(450);
+    child.advance(6000);
+    child.fire(video, 'ended');
+    assert.deepEqual(child.navigations, []);
+    const kinds = child.posted.map((message) => message.kind);
+    assert.ok(kinds.includes('progress') && kinds.includes('ended'), `child reports go to the top frame (${kinds.join(',')})`);
+    assert.ok(child.posted.every((message) => message.__SSU_WATCH_SIGNAL__ === true));
+  }
+}
+
+// Hidden LMS items in the 자료 tab, opened inside the app.
+{
+  const content = await import('../src/lib/content.ts');
+  const page = { kind: 'page', module_item_id: 9, url: 'https://canvas.ssu.ac.kr/api/v1/courses/7/pages/week-1', inner_content_type: null, downloadable: false, page_ref: 'week-1' };
+  assert.deepEqual(['material', 'page', 'board', 'unknown', 'video', 'assignment', 'section'].map((kind) => content.isLibraryItem({ kind })), [true, true, true, true, false, false, false]);
+  assert.equal(content.libraryKindChip(page), '페이지');
+  assert.equal(content.libraryKindChip({ kind: 'board' }), '게시판');
+  assert.equal(content.libraryKindChip({ kind: 'unknown', inner_content_type: 'zip-archive' }), '기타 · zip-archive');
+  assert.equal(content.libraryKindChip({ kind: 'unknown', inner_content_type: null }), '기타');
+  assert.equal(content.libraryKindChip({ kind: 'material' }), null);
+  // Not selectable for bulk download.
+  assert.equal(content.isSelectable(page), false);
+  assert.equal(content.isSelectable({ ...page, kind: 'material', downloadable: true }), true);
+  // A JSON (API) address is never opened; the module item page is.
+  assert.equal(content.itemPageUrl(page, 7), 'https://canvas.ssu.ac.kr/courses/7/modules/items/9');
+  assert.equal(content.itemPageUrl({ url: null, module_item_id: 9 }, '7'), 'https://canvas.ssu.ac.kr/courses/7/modules/items/9');
+  assert.equal(content.itemPageUrl({ url: 'https://canvas.ssu.ac.kr/courses/7/assignments/3', module_item_id: 9 }, 7), 'https://canvas.ssu.ac.kr/courses/7/assignments/3');
+  assert.equal(content.itemPageUrl({ url: '/courses/7/discussion_topics/4', module_item_id: 9 }, 7), 'https://canvas.ssu.ac.kr/courses/7/discussion_topics/4');
+  assert.equal(content.itemPageUrl({ url: 'https://evil.example/x', module_item_id: 9 }, 7), 'https://canvas.ssu.ac.kr/courses/7/modules/items/9');
+  assert.equal(content.itemPageUrl({ url: null, module_item_id: 'x/../1' }, 7), null);
+  assert.equal(content.itemPageUrl({ url: null, module_item_id: null }, 7), null);
+
+  const read = (path) => readFileSync(new URL(`../${path}`, import.meta.url), 'utf8');
+  const list = read('src/components/LectureList.tsx');
+  assert.ok(list.includes('앱에서 열기') && list.includes('첨부 파일') && list.includes('libraryKindChip'), 'page rows open in the app and expand to their attachments');
+  const tasksUi = read('src/components/TaskList.tsx');
+  assert.ok(tasksUi.includes('앱에서 열기') && tasksUi.includes('브라우저로 열기'), 'assignments and quizzes open in the app, with the browser as the secondary action');
+  const deadlinesUi = read('src/components/DeadlinesPane.tsx');
+  assert.ok(deadlinesUi.includes('브라우저로 열기') && deadlinesUi.includes('앱 안에서 열기'));
+  const pages = read('src/hooks/useLmsPages.ts');
+  assert.ok(pages.includes('fetchLmsSessionBridge') && pages.includes('openLmsPageWindow') && pages.includes('lmsItemUrl'), 'in-app pages go through the session bridge after the same host check');
+  assert.ok(read('src/lib/desktop.ts').includes("invoke<void>('open_lms_page_with_session'"));
+  const apiSource = read('src/lib/api.ts');
+  assert.ok(apiSource.includes('/pages/${encodeURIComponent(pageRef)}/files') && apiSource.includes('/api/download/canvas-file'));
+  const attachmentsUi = read('src/components/PageAttachments.tsx');
+  assert.ok(attachmentsUi.includes('받기') && attachmentsUi.includes('첨부 파일을 찾는 중'));
+  const { knownErrorText } = await import('../src/lib/errors.ts');
+  assert.ok(/[가-힣]/.test(knownErrorText('canvas_file_unavailable')));
 }

@@ -1,4 +1,4 @@
-import { isOpened, nextDeadline, taskStatus } from './deadline.ts';
+import { isMissed, isOpened, nextDeadline, taskStatus } from './deadline.ts';
 import type { CourseContentItem, CourseSummary, LectureItem } from './types';
 
 export type LectureTab = 'video' | 'material' | 'task';
@@ -128,6 +128,52 @@ export function isTaskItem(item: CourseContentItem): boolean {
   return item.kind === 'assignment' || item.kind === 'quiz';
 }
 
+/** Rows of the 자료 tab: downloadable materials plus pages, boards and other LMS items. */
+export function isLibraryItem(item: CourseContentItem): boolean {
+  return item.kind === 'material' || item.kind === 'page' || item.kind === 'board' || item.kind === 'unknown';
+}
+
+/** Chip for the non-downloadable 자료 rows (`페이지`, `게시판`, `기타 · zip`), or `null` for materials. */
+export function libraryKindChip(item: CourseContentItem): string | null {
+  if (item.kind === 'page') return '페이지';
+  if (item.kind === 'board') return '게시판';
+  if (item.kind === 'unknown') {
+    const inner = item.inner_content_type?.trim();
+    return inner ? `기타 · ${inner}` : '기타';
+  }
+  return null;
+}
+
+function numericOrder(value: string | number | null | undefined): number {
+  const number = typeof value === 'number' ? value : Number.parseFloat(String(value ?? ''));
+  return Number.isFinite(number) ? number : Number.MAX_SAFE_INTEGER;
+}
+
+/**
+ * Lectures for "순서대로 시청": videos that are open and not watched yet, the ones whose
+ * attendance closes first at the front (a late window counts by its closing time), then week
+ * order. Videos without a deadline follow, and videos whose every window has closed come
+ * last. Not-yet-open weeks and duplicates are left out.
+ */
+export function buildWatchQueue(items: CourseContentItem[], now: Date = new Date()): CourseContentItem[] {
+  const seen = new Set<string>();
+  const entries: Array<{ item: CourseContentItem; index: number; rank: number; at: number }> = [];
+  items.forEach((item, index) => {
+    const key = itemKey(item);
+    if (item.kind !== 'video' || key === null || item.completed === true || !isOpened(item, now) || seen.has(key)) return;
+    seen.add(key);
+    const next = nextDeadline(item, now);
+    entries.push({ item, index, rank: next ? 0 : isMissed(item, now) ? 2 : 1, at: next ? next.at.getTime() : 0 });
+  });
+  return entries
+    .sort((a, b) => a.rank - b.rank
+      || a.at - b.at
+      || numericOrder(a.item.week_position) - numericOrder(b.item.week_position)
+      || numericOrder(a.item.lesson_position) - numericOrder(b.item.lesson_position)
+      || a.index - b.index)
+    .map(({ item }) => item);
+}
+
 /**
  * Assignments and quizzes by what to do next: nearest deadline first, then undated ones,
  * then overdue, then completed (each part keeps the LMS order for equal deadlines).
@@ -162,6 +208,32 @@ export function lmsItemUrl(url: string | null | undefined): string | null {
   } catch {
     return null;
   }
+}
+
+/** The Canvas page every module item can be reached through (the LMS redirects to the real page). */
+export function moduleItemUrl(courseId: string | number | null | undefined, moduleItemId: string | number | null | undefined): string | null {
+  const course = String(courseId ?? '').trim();
+  const item = String(moduleItemId ?? '').trim();
+  return /^\d+$/.test(course) && /^\d+$/.test(item) ? `${LMS_ORIGIN}/courses/${course}/modules/items/${item}` : null;
+}
+
+function isApiAddress(address: string): boolean {
+  try {
+    const path = new URL(address).pathname;
+    return path.startsWith('/api/') || path.startsWith('/learningx/api/');
+  } catch {
+    return true;
+  }
+}
+
+/**
+ * Address to open an LMS item at: its own web address when the LMS gave one, else the module
+ * item page. API addresses (JSON) are never opened. `null` when neither can be built.
+ */
+export function itemPageUrl(item: Pick<CourseContentItem, 'url' | 'module_item_id'>, courseId: string | number | null | undefined): string | null {
+  const direct = lmsItemUrl(item.url);
+  if (direct && !isApiAddress(direct)) return direct;
+  return moduleItemUrl(courseId, item.module_item_id);
 }
 
 function earliestDeadline(course: CourseSummary, now: Date): number | null {

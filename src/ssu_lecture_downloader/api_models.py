@@ -45,6 +45,14 @@ class ArtifactDownloadRequest(BatchDownloadRequest):
     overwrite_artifacts: bool = False
 
 
+class CanvasFileDownloadRequest(BaseModel):
+    course_id: int | str
+    file_id: int | str
+    course_name: str = "course"
+    output_dir: str | None = None
+    conflict_strategy: str = "skip"
+
+
 class VideoEnsurePlayableRequest(BaseModel):
     input_path: Path
     overwrite: bool = True
@@ -61,6 +69,32 @@ class CredentialRequest(BaseModel):
 
 def bad_request(error_code: str) -> HTTPException:
     return HTTPException(status_code=400, detail={"ok": False, "error_code": error_code})
+
+
+CONFLICT_STRATEGIES = {"rename", "overwrite", "skip"}
+_MAX_PAGE_REF_LENGTH = 200
+
+
+def validate_digits(value: int | str, error_code: str) -> str:
+    """A numeric LMS id as a string, or a 400 with `error_code`."""
+    text = str(value).strip()
+    if not text.isdigit():
+        raise bad_request(error_code)
+    return text
+
+
+def validate_page_ref(value: str) -> str:
+    """A wiki page slug or numeric id: no path separators, control characters or absurd length."""
+    text = value.strip()
+    if not text or len(text) > _MAX_PAGE_REF_LENGTH or any(ch in text for ch in "/\\") or any(ord(ch) < 32 or ord(ch) == 127 for ch in text):
+        raise bad_request("invalid_page_ref")
+    return text
+
+
+def validate_canvas_file_request(request: CanvasFileDownloadRequest) -> tuple[str, str]:
+    if request.conflict_strategy not in CONFLICT_STRATEGIES:
+        raise bad_request("invalid_conflict_strategy")
+    return validate_digits(request.course_id, "invalid_course_id"), validate_digits(request.file_id, "invalid_file_id")
 
 
 def validate_batch_request(request: BatchDownloadRequest) -> None:

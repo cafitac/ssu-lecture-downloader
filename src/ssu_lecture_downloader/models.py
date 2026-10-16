@@ -101,6 +101,10 @@ class CourseContentItem(BaseModel):
     inner_content_type: str | None = None
     kind: str
     content_id: str | None = None
+    # The LMS id of the page/board/assignment behind the module item (top-level `content_id`).
+    resource_id: str | None = None
+    # Wiki pages only: what the Canvas pages API takes to find the page (slug or numeric id).
+    page_ref: str | None = None
     completed: bool | None = None
     attendance_status: str | None = None
     duration: int | float | None = None
