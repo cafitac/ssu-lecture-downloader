@@ -197,10 +197,17 @@ class ArtifactPipeline:
         if "mp4" in outputs:
             error_code = self._ensure_mp4(item, paths, context) if video_exists else "video_not_found"
         audio_path = paths.audio
-        if error_code is None and self.wants_audio:
+        # Audio made only to feed the transcriber is removed again unless MP3 was asked for.
+        wants_mp3 = "mp3" in outputs
+        audio_preexisting = paths.audio.exists()
+        transcript_ready = "txt" in outputs and paths.transcript_exists and not self.request.overwrite_artifacts
+        if error_code is None and self.wants_audio and (wants_mp3 or not transcript_ready):
             error_code, audio_path = self._ensure_audio(paths, context, video_exists)
         if error_code is None and "txt" in outputs:
             error_code = self._ensure_transcript(paths, audio_path, context)
+        if error_code is None and not wants_mp3 and not audio_preexisting and audio_path.exists():
+            audio_path.unlink(missing_ok=True)
+            self.on_progress({"stage": "intermediate_audio_removed", **context, "output_path": str(audio_path)})
         if error_code is not None:
             return error_code
         if "mp4" not in outputs and video_exists and bool(getattr(item, "written", False)):

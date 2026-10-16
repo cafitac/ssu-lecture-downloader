@@ -877,6 +877,10 @@ def test_artifact_download_job_supports_txt_only_selection(tmp_path, monkeypatch
     assert 'transcript_progress' in progress_stages
     assert not (tmp_path / 'UX방법론' / 'lecture.mp4').exists()
     assert not (tmp_path / 'UX방법론' / '26년1학기_UX방법론_1주차 [699c7d422c427].movie').exists()
+    # The MP3 made only for the transcript is removed because MP3 was not requested.
+    assert 'intermediate_audio_removed' in progress_stages
+    assert not (tmp_path / 'UX방법론' / '26년1학기_UX방법론_1주차 [699c7d422c427].mp3').exists()
+    assert (tmp_path / 'UX방법론' / '26년1학기_UX방법론_1주차 [699c7d422c427].transcript.txt').exists()
 
 
 
