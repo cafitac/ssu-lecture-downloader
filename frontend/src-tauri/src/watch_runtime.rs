@@ -783,6 +783,8 @@ fn show_in_window_on_main(
             }
         }
     };
+    // Quiet the current page first so its signals cannot replace this navigation.
+    let _ = window.eval("window.__SSU_WATCH_SILENT__ = true;");
     bridge_session_and_navigate(&window, &plan.cookies, target)
         .map_err(|_| OpenError::Failed("재생 페이지를 불러오지 못했어요.".to_string()))
 }
@@ -973,6 +975,7 @@ fn reload_current(app: &AppHandle) {
     });
     if let (Some(target), Some(window)) = (target, label.and_then(|l| app.get_webview_window(&l))) {
         let _ = app.run_on_main_thread(move || {
+            let _ = window.eval("window.__SSU_WATCH_SILENT__ = true;");
             let _ = window.navigate(target);
         });
     }
