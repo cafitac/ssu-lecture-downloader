@@ -9,11 +9,15 @@ import sys
 import threading
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, ConfigDict
 
 from ssu_lecture_downloader.progress import emit_progress
+from ssu_lecture_downloader.stt_cues import TranscriptSegment, format_srt
+
+if TYPE_CHECKING:
+    from ssu_lecture_downloader.stt_remote import RemoteSTTService
 
 STTProvider = Literal['fake', 'faster_whisper', 'whisper_cpp']
 DEFAULT_STT_LANGUAGE = 'ko'
@@ -31,12 +35,6 @@ class STTProviderStatus(BaseModel):
     quality_note: str | None = None
     # False when this machine cannot run the provider at all (no install can fix it).
     platform_supported: bool = True
-
-
-class TranscriptSegment(BaseModel):
-    start: float
-    end: float
-    text: str
 
 
 class TranscriptionRequest(BaseModel):
@@ -62,10 +60,13 @@ class TranscriptionResult(BaseModel):
     text_path: Path | None = None
     md_path: Path | None = None
     json_path: Path | None = None
+    srt_path: Path | None = None
     segments: list[TranscriptSegment] = []
     error_code: str | None = None
     message: str | None = None
     install_hint: str | None = None
+    # Non-fatal quality notes (for example a long silent stretch in the subtitles).
+    warnings: list[str] = []
 
 
 def faster_whisper_install_hint() -> str:
@@ -125,6 +126,12 @@ def transcript_output_paths(audio_path: Path, output_dir: Path | None) -> tuple[
     )
 
 
+def transcript_srt_path(audio_path: Path, output_dir: Path | None) -> Path:
+    """`<name>.srt` next to the video/audio, which is where players pick subtitles up automatically."""
+    base_dir = output_dir.expanduser() if output_dir else audio_path.expanduser().parent
+    return base_dir / f'{audio_path.stem}.srt'
+
+
 def write_transcript_files(
     *,
     audio_path: Path,
@@ -137,9 +144,10 @@ def write_transcript_files(
 ) -> TranscriptionResult:
     audio_path = audio_path.expanduser()
     text_path, md_path, json_path = transcript_output_paths(audio_path, output_dir)
+    srt_path = transcript_srt_path(audio_path, output_dir)
     existing = [path for path in (text_path, md_path, json_path) if path.exists()]
     if existing and not overwrite:
-        return TranscriptionResult(ok=False, audio_path=audio_path, text_path=text_path, md_path=md_path, json_path=json_path, segments=segments, error_code='transcript_exists', message='이미 생성된 STT 파일이 있습니다.')
+        return TranscriptionResult(ok=False, audio_path=audio_path, text_path=text_path, md_path=md_path, json_path=json_path, srt_path=srt_path, segments=segments, error_code='transcript_exists', message='이미 생성된 STT 파일이 있습니다.')
     text_path.parent.mkdir(parents=True, exist_ok=True)
     text = '\n'.join(f'[{_format_timestamp(segment.start)}] {segment.text.strip()}' for segment in segments if segment.text.strip()).strip() + '\n'
     md = '\n'.join([
@@ -163,10 +171,11 @@ def write_transcript_files(
     }
     # Each file is written to a temp sibling and swapped in with os.replace. The
     # user-facing .txt goes last, so its presence means the whole set is complete.
+    _write_text_atomically(srt_path, format_srt(segments))
     _write_text_atomically(md_path, md)
     _write_text_atomically(json_path, json.dumps(payload, ensure_ascii=False, indent=2))
     _write_text_atomically(text_path, text)
-    return TranscriptionResult(ok=True, audio_path=audio_path, text_path=text_path, md_path=md_path, json_path=json_path, segments=segments)
+    return TranscriptionResult(ok=True, audio_path=audio_path, text_path=text_path, md_path=md_path, json_path=json_path, srt_path=srt_path, segments=segments)
 
 
 def _write_text_atomically(path: Path, content: str) -> None:
@@ -266,12 +275,18 @@ def transcribe_audio(
     request: TranscriptionRequest,
     on_progress: Callable[[dict[str, Any]], None] | None = None,
     should_cancel: Callable[[], bool] | None = None,
+    remote: RemoteSTTService | None = None,
 ) -> TranscriptionResult:
     audio_path = request.audio_path.expanduser()
     if not audio_path.exists():
         return TranscriptionResult(ok=False, audio_path=audio_path, error_code='audio_not_found', message='음성 파일을 찾을 수 없습니다.')
     if not audio_path.is_file():
         return TranscriptionResult(ok=False, audio_path=audio_path, error_code='audio_not_file', message='입력 경로가 파일이 아닙니다.')
+    if remote is not None and request.provider != 'fake' and remote.is_enabled():
+        # A configured remote server wins over the local engine (which may not even run on this Mac).
+        from ssu_lecture_downloader.stt_remote import transcribe_with_remote
+
+        return transcribe_with_remote(request.model_copy(update={'audio_path': audio_path}), remote, on_progress=on_progress, should_cancel=should_cancel)
     status = check_stt_provider(request.provider)
     if not status.available:
         return TranscriptionResult(ok=False, audio_path=audio_path, error_code='stt_provider_not_installed', message='STT 엔진이 설치되어 있지 않습니다.', install_hint=status.install_hint)

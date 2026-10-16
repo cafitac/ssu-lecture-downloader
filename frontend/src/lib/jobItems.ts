@@ -52,6 +52,8 @@ export interface JobRow {
   /** Raw failure code behind `reason`, for retry decisions (never shown). */
   reasonCode?: string;
   outputPath?: string;
+  /** Extra text for the current step, such as which loop repair of a remote transcription is running. */
+  note?: string;
 }
 
 const PHASE_LABEL: Record<RowPhase, string> = {
@@ -67,8 +69,20 @@ const PHASE_LABEL: Record<RowPhase, string> = {
   skipped: '시작하지 못했어요',
 };
 
+const REMOTE_TRANSCRIBING_LABEL = '자막 만드는 중 (원격)';
+
 const ACTIVE_PHASES = new Set<RowPhase>(['preparing', 'downloading', 'verifying', 'extracting', 'transcribing']);
-const TRANSCRIBE_STAGES = new Set(['transcribing', 'transcript_model_loading', 'transcript_started', 'transcript_progress']);
+const TRANSCRIBE_STAGES = new Set(['transcribing', 'transcript_model_loading', 'transcript_connecting', 'transcript_started', 'transcript_progress', 'transcript_repair']);
+
+/** Text for steps that only a remote transcription has: connecting and re-reading looped sections. */
+function transcribeNote(event: ProgressEvent): string | undefined {
+  if (event.stage === 'transcript_connecting') return '서버에 연결하는 중';
+  if (event.stage === 'transcript_repair') {
+    const where = event.repair_total ? ` ${event.repair_index ?? 1}/${event.repair_total}` : '';
+    return `반복 구간 다시 인식 중${where}`;
+  }
+  return undefined;
+}
 
 function clampPercent(value: number): number {
   return Math.min(100, Math.max(0, Math.round(value)));
@@ -81,6 +95,9 @@ interface Accumulated {
   total?: number;
   failure: string | null;
   outputPath?: string;
+  /** Subtitles are made by the remote server (changes the label). */
+  remote?: boolean;
+  note?: string;
   seen: Set<string>;
 }
 
@@ -139,9 +156,11 @@ function applyEvent(state: Accumulated, event: ProgressEvent, wantsTranscript: b
   }
   if (TRANSCRIBE_STAGES.has(stage)) {
     state.phase = 'transcribing';
+    if (event.remote) state.remote = true;
     if (typeof event.progress_percent === 'number') state.percent = clampPercent(event.progress_percent);
     else if (stage === 'transcript_model_loading') state.percent = 5;
     else if (stage === 'transcribing' || stage === 'transcript_started') state.percent = 10;
+    state.note = transcribeNote(event);
     return;
   }
   if (stage === 'transcript_done' || stage === 'transcript_skipped') {
@@ -220,12 +239,13 @@ export function buildJobRows(plan: JobPlan, job: DownloadJobStatus | null): JobR
       rawId: item.rawId,
       title: item.title,
       phase,
-      label: PHASE_LABEL[phase],
+      label: phase === 'transcribing' && state.remote ? REMOTE_TRANSCRIBING_LABEL : PHASE_LABEL[phase],
       percent: phase === 'done' ? 100 : phase === 'failed' ? null : state.percent,
       written: state.written,
       total: state.total ?? (item.sizeBytes ?? undefined),
       outputPath: outputPath ?? undefined,
     };
+    if (phase === 'transcribing' && state.note) row.note = state.note;
     if (phase === 'failed') {
       row.reason = describeErrorCode(reasonCode);
       if (reasonCode) row.reasonCode = reasonCode;

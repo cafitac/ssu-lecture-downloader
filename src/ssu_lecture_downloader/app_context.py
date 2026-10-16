@@ -17,6 +17,7 @@ from ssu_lecture_downloader.api_errors import (
 from ssu_lecture_downloader.credentials import CredentialStore
 from ssu_lecture_downloader.jobs import Job, JobOutcome, JobRegistry, JobRunner
 from ssu_lecture_downloader.security import MediaPathPolicy
+from ssu_lecture_downloader.stt_remote import RemoteSTTService
 
 APP_DOWNLOAD_FOLDER_NAME = "SSU Lecture Downloader"
 
@@ -44,6 +45,7 @@ class AppContext:
     stt_jobs: JobRegistry = field(default_factory=JobRegistry)
     dependency_jobs: JobRegistry = field(default_factory=JobRegistry)
     artifact_jobs: JobRegistry = field(default_factory=JobRegistry)
+    remote_stt: RemoteSTTService = field(default_factory=RemoteSTTService)
 
     def require_credentials(self) -> tuple[str, str]:
         pair = self.credentials.get()

@@ -25,6 +25,9 @@
 .setting:last-child { border-bottom: 0; }
 .setting h3 { font-size: var(--fs-14); font-weight: var(--fw-semibold); }
 .setting-actions { display: flex; flex-wrap: wrap; gap: var(--sp-2); }
+.subsetting { display: grid; gap: var(--sp-2); margin-top: var(--sp-3); padding-top: var(--sp-3); border-top: 1px solid var(--border); }
+.subsetting h4 { display: flex; align-items: center; gap: var(--sp-2); font-size: var(--fs-13); font-weight: var(--fw-semibold); }
+.form-grid { display: grid; gap: var(--sp-2); }
 .setting-list { display: grid; gap: var(--sp-1); }
 .setting-row { display: flex; align-items: center; justify-content: space-between; min-height: 28px; }
 .diagnostics { padding: var(--sp-3) 0 var(--sp-4); color: var(--text-muted); font-size: var(--fs-12); }

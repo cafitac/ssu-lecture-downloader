@@ -2,8 +2,10 @@ import { useCallback, useEffect, useState } from 'react';
 import { fetchMediaDependencyInstallJob, fetchMediaDependencyStatus, fetchSttProviderStatus, startMediaDependencyInstallJob } from '../lib/api';
 import { describeErrorCode, friendlyError } from '../lib/errors';
 import { TERMINAL_DOWNLOAD_STATUSES } from '../lib/progress';
+import { subtitleSupport } from '../lib/remoteStt';
 import type { DownloadOutputFormat, MediaDependencyInstallResult, PostprocessJobStatus, RuntimeDependencyStatus, STTProviderStatus } from '../lib/types';
 import { usePolledJob } from './usePolledJob';
+import { useRemoteStt } from './useRemoteStt';
 
 export type MediaComponent = 'ffmpeg' | 'faster_whisper';
 
@@ -69,14 +71,14 @@ export function useMediaDependencies({ onMessage, downloadBusy }: Options) {
     onError: (error) => onMessage(friendlyError(error, '설치 진행 상황을 확인하지 못했어요.'), 'error'),
   });
 
+  const remote = useRemoteStt();
   const whisperStatus = sttProviders.find((provider) => provider.provider === 'faster_whisper');
-  const subtitlesUnsupportedReason = whisperStatus?.platform_supported === false
-    ? whisperStatus.install_hint ?? '이 기기에서는 자막 생성을 지원하지 않아요.'
-    : null;
+  // A configured remote server replaces the local engine: subtitles are selectable and nothing local is missing.
+  const { unsupportedReason: subtitlesUnsupportedReason, localMissing, viaRemote: subtitlesViaRemote } = subtitleSupport(whisperStatus, remote.enabled);
   const ffmpegDependency = runtimeDependencies.find((dependency) => dependency.name === 'ffmpeg');
   const missingComponents: MediaComponent[] = [
     ffmpegDependency && !ffmpegDependency.available ? 'ffmpeg' as const : null,
-    whisperStatus && !whisperStatus.available && subtitlesUnsupportedReason === null ? 'faster_whisper' as const : null,
+    localMissing ? 'faster_whisper' as const : null,
   ].filter((component): component is MediaComponent => Boolean(component));
   const isInstalling = installJob?.status === 'queued' || installJob?.status === 'running';
 
@@ -107,6 +109,8 @@ export function useMediaDependencies({ onMessage, downloadBusy }: Options) {
     ffmpegDependency,
     whisperStatus,
     subtitlesUnsupportedReason,
+    subtitlesViaRemote,
+    remote,
     autoInstallAvailable,
     autoInstallUnavailableReason,
   };
