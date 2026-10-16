@@ -1,6 +1,12 @@
 (() => {
   if (window.__SSU_WATCH_ASSIST_INSTALLED__) return;
   window.__SSU_WATCH_ASSIST_INSTALLED__ = true;
+  // The window first opens on a bare bootstrap page while the app injects cookies and
+  // navigates to the lecture. Signalling from there would replace that pending navigation.
+  try {
+    if (window.top === window && window.location.hostname === 'commons.ssu.ac.kr'
+      && (window.location.pathname === '/' || window.location.pathname === '')) return;
+  } catch (_) {}
 
   // Sequential-watch helper for the small playback window. It only does what a person
   // would do in front of the player: mute it, press play, answer the "resume?" dialog with
@@ -54,10 +60,18 @@
 
   const outbox = [];
   let pumping = false;
+  // Once the app starts loading the next page (or the page unloads) this page goes quiet,
+  // so a late signal cannot cancel that navigation.
+  const silenced = () => window.__SSU_WATCH_SILENT__ === true;
+  try {
+    window.addEventListener('beforeunload', () => { window.__SSU_WATCH_SILENT__ = true; });
+    window.addEventListener('pagehide', () => { window.__SSU_WATCH_SILENT__ = true; });
+  } catch (_) {}
   const pump = () => {
     if (pumping) return;
     pumping = true;
     const step = () => {
+      if (silenced()) { outbox.length = 0; pumping = false; return; }
       const next = outbox.shift();
       if (!next) { pumping = false; return; }
       try { window.location.href = `${URLS[next.kind]}?${encodeQuery(next.payload)}`; } catch (_) {}
