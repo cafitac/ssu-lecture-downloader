@@ -25,6 +25,8 @@ interface Props {
   selectableKeys: string[];
   /** Videos "순서대로 시청" would play now. */
   watchCount: number;
+  /** True when the count is the checked videos rather than the automatic queue. */
+  watchSelected: boolean;
   attachments: PageAttachmentsController;
   queue: WatchQueueState;
   openingKey: string | null;
@@ -69,6 +71,7 @@ export function LecturePane(props: Props) {
         unwatchedOnly={unwatchedOnly}
         queue={props.queue}
         watchCount={props.watchCount}
+        watchSelected={props.watchSelected}
         watchDisabled={contentState !== 'ready' || props.watchCount === 0}
         onTabChange={props.onTabChange}
         onUnwatchedOnlyChange={props.onUnwatchedOnlyChange}

@@ -98,7 +98,7 @@ function Workspace({ session }: { session: LmsSession }) {
 
   const videos = useMemo(() => content.items.filter((item) => item.kind === 'video'), [content.items]);
   const materials = useMemo(() => content.items.filter(isLibraryItem), [content.items]);
-  const watchCount = useMemo(() => buildWatchQueue(content.items, now).length, [content.items, now]);
+  const autoQueue = useMemo(() => buildWatchQueue(content.items, now), [content.items, now]);
   const tasks = useMemo(() => sortTasks(content.items.filter(isTaskItem), now), [content.items, now]);
   const visibleItems = useMemo(() => {
     if (tab === 'task') return [];
@@ -111,6 +111,10 @@ function Workspace({ session }: { session: LmsSession }) {
     () => visibleItems.filter((item) => isSelectable(item) && selected.has(itemKey(item) as string)),
     [selected, visibleItems],
   );
+  // Checked videos (watched ones included) play in list order; otherwise open unwatched ones by deadline.
+  const selectedVideos = tab === 'video' ? selectedItems.filter((item) => item.kind === 'video') : [];
+  const watchItems = selectedVideos.length > 0 ? selectedVideos : autoQueue;
+  const watchCount = watchItems.length;
 
   // Files already in the download folder, as reported by the backend.
   const savedKeys = useMemo(
@@ -277,6 +281,7 @@ function Workspace({ session }: { session: LmsSession }) {
               selected={selected}
               selectableKeys={selectableKeys}
               watchCount={watchCount}
+              watchSelected={selectedVideos.length > 0}
               attachments={attachments}
               queue={viewer.queue}
               openingKey={viewer.openingKey}
@@ -290,7 +295,7 @@ function Workspace({ session }: { session: LmsSession }) {
               onOpenItem={openItemInApp}
               onOpenTask={openItemInApp}
               onOpenTaskInBrowser={openTaskInBrowser}
-              onStartWatch={() => { if (course) void viewer.startQueue(course, buildWatchQueue(content.items, new Date())); }}
+              onStartWatch={() => { if (course) void viewer.startQueue(course, selectedVideos.length > 0 ? selectedVideos : buildWatchQueue(content.items, new Date())); }}
               onReload={content.reload}
             />
             )}
