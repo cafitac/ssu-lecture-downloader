@@ -50,6 +50,7 @@ const MAX_QUEUE_ITEMS: usize = 200;
 const TICK_INTERVAL: Duration = Duration::from_secs(2);
 const PLAN_TIMEOUT: Duration = Duration::from_secs(120);
 const PAGE_SWAP_GRACE: Duration = Duration::from_millis(1500);
+const MAIN_THREAD_TIMEOUT: Duration = Duration::from_secs(20);
 /// After a click on the finished menu bar text it disappears a little later (not while the
 /// menu it just opened is still on screen).
 const FINISHED_ACK_DELAY: Duration = Duration::from_secs(8);
@@ -575,6 +576,7 @@ fn finish_queue(app: &AppHandle) {
     );
 }
 
+#[derive(Clone)]
 struct OpenJob {
     course_id: String,
     course_name: String,
@@ -707,6 +709,38 @@ fn accept_signals_soon(app: &AppHandle, epoch: u64) {
 
 /// Load the lecture into the queue's window, creating the window on first use.
 fn show_in_window(
+    app: &AppHandle,
+    epoch: u64,
+    index: usize,
+    job: &OpenJob,
+    plan: &OfficialViewerSessionBridgeRequest,
+    target: tauri::Url,
+) -> Result<(), OpenError> {
+    // WebKit's cookie store and window creation must run on the main thread, like the
+    // manual viewer's command does; from this worker thread `set_cookie` never returns.
+    let main_app = app.clone();
+    let job = job.clone();
+    let plan = plan.clone();
+    on_main_thread(app, move || {
+        show_in_window_on_main(&main_app, epoch, index, &job, &plan, target)
+    })
+    .unwrap_or_else(|| Err(OpenError::Failed("재생 창이 응답하지 않아요.".to_string())))
+}
+
+/// Run `work` on the main thread and wait for its result (`None` if it never reports back).
+fn on_main_thread<T: Send + 'static>(
+    app: &AppHandle,
+    work: impl FnOnce() -> T + Send + 'static,
+) -> Option<T> {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    app.run_on_main_thread(move || {
+        let _ = sender.send(work());
+    })
+    .ok()?;
+    receiver.recv_timeout(MAIN_THREAD_TIMEOUT).ok()
+}
+
+fn show_in_window_on_main(
     app: &AppHandle,
     epoch: u64,
     index: usize,
@@ -938,7 +972,9 @@ fn reload_current(app: &AppHandle) {
         (state.target.clone(), state.window_label.clone())
     });
     if let (Some(target), Some(window)) = (target, label.and_then(|l| app.get_webview_window(&l))) {
-        let _ = window.navigate(target);
+        let _ = app.run_on_main_thread(move || {
+            let _ = window.navigate(target);
+        });
     }
 }
 
