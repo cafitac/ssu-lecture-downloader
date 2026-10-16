@@ -28,6 +28,12 @@ The bridge endpoint returns cookie names/domains/count and redacted HTTP trace d
 - Tauri command: `open_official_viewer_with_session`
 - Validation: fallback viewer URLs are restricted to HTTPS `commons.ssu.ac.kr`/subdomains or `ssu-toast.commonscdn.com`; Tauri bridged launch URLs may also use HTTPS `canvas.ssu.ac.kr` module item pages.
 
+## Sequential watch window and LMS page windows
+
+- `순서대로 시청` no longer reuses the manual viewer. The Rust shell (`watch_runtime.rs`) keeps the queue and opens ONE small always-on-top window (about 480x300, bottom-right of the main window's screen work area, no keyboard focus taken) for the whole queue; each next lecture is planned by the shell itself (`POST /api/watch/session-bridge-plan`, same payload the React app uses), its cookies are injected and the window is navigated to the Canvas launch URL. The window closes when the queue ends or stops, or when the app quits; closing it by hand stops the queue.
+- The page helper (`assets/watch_assist.js`) is injected only into that window. It mutes, plays, answers the resume dialog with `예`, and reports `progress` / `heartbeat` / `ended` / `stalled` / `debug` as `ssu-watch://<kind>?...` navigations, which `on_navigation` intercepts. It must never touch page visibility, focus, playback speed or position (tests in `viewer.rs` and `scripts/contract-test.mjs` enforce this); whether the window is drawn is inferred read-only from animation frames.
+- `open_lms_page_with_session` opens wiki pages, boards and assignments/quizzes in a normal window with the LMS session (`POST /api/lms/session-bridge` returns the cookies, no module item needed). Only https URLs on `ssu.ac.kr` / `*.ssu.ac.kr` without credentials or ports are accepted, checked in React and again in Rust. No script is injected.
+
 ## Verification
 
 - `uv run pytest -q`

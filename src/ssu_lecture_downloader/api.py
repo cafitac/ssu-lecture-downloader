@@ -25,6 +25,7 @@ from ssu_lecture_downloader.jobs import JobRunner
 from ssu_lecture_downloader.routers import credentials as credentials_routes
 from ssu_lecture_downloader.routers import download as download_routes
 from ssu_lecture_downloader.routers import health as health_routes
+from ssu_lecture_downloader.routers import lms_pages as lms_pages_routes
 from ssu_lecture_downloader.routers import media as media_routes
 from ssu_lecture_downloader.routers import watch as watch_routes
 from ssu_lecture_downloader.security import (
@@ -82,7 +83,7 @@ def create_app(
         media_paths=MediaPathPolicy(output_dir),
         runner=JobRunner(error_code_for=lambda exc: background_job_error_code(exc, service)),
     )
-    for module in (health_routes, credentials_routes, download_routes, media_routes, watch_routes):
+    for module in (health_routes, credentials_routes, download_routes, media_routes, watch_routes, lms_pages_routes):
         # The routes are already built; attach them as-is instead of having FastAPI rebuild each one.
         app.router.routes.extend(module.build_router(ctx).routes)
     return app

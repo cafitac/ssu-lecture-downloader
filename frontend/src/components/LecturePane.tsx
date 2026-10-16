@@ -1,4 +1,5 @@
 import type { ContentState } from '../hooks/useCourseContent';
+import type { PageAttachmentsController } from '../hooks/usePageAttachments';
 import { countVideos, splitCourseName } from '../lib/content';
 import type { LectureTab, WeekGroup } from '../lib/content';
 import type { CourseContentItem, CourseSummary, WatchQueueState } from '../lib/types';
@@ -22,6 +23,9 @@ interface Props {
   now: Date;
   selected: ReadonlySet<string>;
   selectableKeys: string[];
+  /** Videos "순서대로 시청" would play now. */
+  watchCount: number;
+  attachments: PageAttachmentsController;
   queue: WatchQueueState;
   openingKey: string | null;
   actionBlockedReason: string | null;
@@ -31,14 +35,15 @@ interface Props {
   onToggle: (key: string, checked: boolean) => void;
   onToggleMany: (keys: string[], checked: boolean) => void;
   onAction: (item: CourseContentItem) => void;
+  onOpenItem: (item: CourseContentItem) => void;
   onOpenTask: (item: CourseContentItem) => void;
+  onOpenTaskInBrowser: (item: CourseContentItem) => void;
   onStartWatch: () => void;
-  onStopWatch: () => void;
   onReload: () => void;
 }
 
 function emptyText(tab: LectureTab, unwatchedOnly: boolean): string {
-  if (tab === 'material') return '받을 수 있는 자료가 없어요.';
+  if (tab === 'material') return '이 과목에는 자료나 페이지가 없어요.';
   if (tab === 'task') return '이 과목에는 과제나 퀴즈가 없어요.';
   return unwatchedOnly ? '안 본 영상이 없어요. 모두 시청했어요.' : '이 과목에는 영상이 없어요.';
 }
@@ -63,11 +68,11 @@ export function LecturePane(props: Props) {
         taskCount={props.tasks.length}
         unwatchedOnly={unwatchedOnly}
         queue={props.queue}
-        watchDisabled={contentState !== 'ready' || !hasRows || tab !== 'video'}
+        watchCount={props.watchCount}
+        watchDisabled={contentState !== 'ready' || props.watchCount === 0}
         onTabChange={props.onTabChange}
         onUnwatchedOnlyChange={props.onUnwatchedOnlyChange}
         onStartWatch={props.onStartWatch}
-        onStopWatch={props.onStopWatch}
       />
       <div className="lecture-scroll">
         {contentState === 'loading' && <p className="pane-empty" role="status"><Spinner />강의를 불러오는 중…</p>}
@@ -78,11 +83,13 @@ export function LecturePane(props: Props) {
           </div>
         )}
         {contentState === 'ready' && !hasRows && <p className="pane-empty">{emptyText(tab, unwatchedOnly)}</p>}
-        {contentState === 'ready' && hasRows && tab === 'task' && <TaskList tasks={props.tasks} now={props.now} onOpen={props.onOpenTask} />}
+        {contentState === 'ready' && hasRows && tab === 'task' && <TaskList tasks={props.tasks} courseId={course.id} now={props.now} onOpen={props.onOpenTask} onOpenInBrowser={props.onOpenTaskInBrowser} />}
         {contentState === 'ready' && hasRows && tab !== 'task' && (
           <LectureList
             groups={groups}
             tab={tab}
+            courseId={course.id}
+            attachments={props.attachments}
             selected={selected}
             selectableKeys={selectableKeys}
             isDownloaded={props.isDownloaded}
@@ -92,6 +99,7 @@ export function LecturePane(props: Props) {
             onToggle={props.onToggle}
             onToggleMany={props.onToggleMany}
             onAction={props.onAction}
+            onOpenItem={props.onOpenItem}
           />
         )}
       </div>

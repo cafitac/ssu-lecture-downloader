@@ -4,6 +4,7 @@ import { groupDeadlines } from '../lib/deadline';
 import type { DeadlineEntry } from '../lib/deadline';
 import type { DeadlineEntryDto } from '../lib/types';
 import { DeadlineCell } from './DeadlineCell';
+import { ExternalIcon } from './Icons';
 import { Spinner } from './Screens';
 
 const KIND_LABEL: Record<string, string> = { video: '강의', assignment: '과제', quiz: '퀴즈' };
@@ -13,20 +14,29 @@ interface Props {
   state: DeadlinesState;
   error: string | null;
   now: Date;
+  /** A lecture goes to its course; an assignment or quiz opens in an app window. */
   onSelect: (item: DeadlineEntryDto) => void;
+  /** Secondary action of assignment/quiz rows: the system browser. */
+  onOpenInBrowser: (item: DeadlineEntryDto) => void;
   onReload: () => void;
 }
 
-function DeadlineRow({ entry, onSelect }: { entry: DeadlineEntry<DeadlineEntryDto>; onSelect: (item: DeadlineEntryDto) => void }) {
+interface RowProps {
+  entry: DeadlineEntry<DeadlineEntryDto>;
+  onSelect: (item: DeadlineEntryDto) => void;
+  onOpenInBrowser: (item: DeadlineEntryDto) => void;
+}
+
+function DeadlineRow({ entry, onSelect, onOpenInBrowser }: RowProps) {
   const { item, info } = entry;
   const course = splitCourseName(item.course_name).title;
   const isVideo = item.kind === 'video';
   return (
-    <li>
+    <li className="deadline-item">
       <button
         type="button"
         className={`deadline-row${entry.upcoming ? ' is-upcoming' : ''}`}
-        title={isVideo ? '이 과목의 강의 목록으로 이동' : 'LMS에서 열기'}
+        title={isVideo ? '이 과목의 강의 목록으로 이동' : '앱 안에서 열기'}
         onClick={() => onSelect(item)}
       >
         <DeadlineCell info={{ ...info, when: null }} />
@@ -36,12 +46,23 @@ function DeadlineRow({ entry, onSelect }: { entry: DeadlineEntry<DeadlineEntryDt
         <span className="deadline-title" title={item.title}>{item.title}</span>
         {entry.upcoming && <span className="chip">열리기 전</span>}
       </button>
+      {!isVideo && (
+        <button
+          type="button"
+          className="btn btn-icon btn-ghost btn-sm deadline-external"
+          aria-label={`${item.title} 브라우저로 열기`}
+          title="브라우저로 열기"
+          onClick={() => onOpenInBrowser(item)}
+        >
+          <ExternalIcon />
+        </button>
+      )}
     </li>
   );
 }
 
 /** "다가오는 기한": lectures, assignments and quizzes of the term grouped by how soon they close. */
-export function DeadlinesPane({ items, state, error, now, onSelect, onReload }: Props) {
+export function DeadlinesPane({ items, state, error, now, onSelect, onOpenInBrowser, onReload }: Props) {
   const groups = groupDeadlines(items, now);
   return (
     <section className="lecture-pane deadlines-pane" aria-busy={state === 'loading'}>
@@ -64,7 +85,7 @@ export function DeadlinesPane({ items, state, error, now, onSelect, onReload }: 
             <h2 className="deadline-group-title">{group.title}<span className="week-count">{group.entries.length}</span></h2>
             <ul>
               {group.entries.map((entry) => (
-                <DeadlineRow key={`${entry.item.course_id}-${entry.item.kind}-${entry.item.module_item_id ?? entry.item.title}`} entry={entry} onSelect={onSelect} />
+                <DeadlineRow key={`${entry.item.course_id}-${entry.item.kind}-${entry.item.module_item_id ?? entry.item.title}`} entry={entry} onSelect={onSelect} onOpenInBrowser={onOpenInBrowser} />
               ))}
             </ul>
           </section>

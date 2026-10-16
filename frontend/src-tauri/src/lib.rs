@@ -3,6 +3,8 @@ mod launch_agent;
 mod native_download;
 mod reminders;
 mod viewer;
+mod watch_queue;
+mod watch_runtime;
 
 use std::ffi::CStr;
 use std::path::{Path, PathBuf};
@@ -196,6 +198,18 @@ pub fn run() {
         backend::project_root_from_manifest_dir(Path::new(env!("CARGO_MANIFEST_DIR")));
     let built = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .on_window_event(|window, event| {
+            // While the playback window runs, closing the main window only hides it, so the
+            // menu bar item's "앱 열기" can bring it back.
+            if window.label() == "main" {
+                if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                    if watch_runtime::is_queue_active(window.app_handle()) {
+                        api.prevent_close();
+                        let _ = window.hide();
+                    }
+                }
+            }
+        })
         .setup(move |app| {
             // Manage everything first and start the backend off the main thread:
             // a slow or failing backend must never block or abort window creation.
@@ -212,6 +226,10 @@ pub fn run() {
             app.manage(Arc::clone(&manager));
             app.manage(native_download::NativeDownloadJobs::new());
             app.manage(viewer::ViewerState::new());
+            // Sequential watch: queue state, menu bar item and the periodic refresh/watchdog.
+            app.manage(watch_runtime::WatchRuntime::new());
+            watch_runtime::install_tray(app.handle());
+            watch_runtime::spawn_ticker(app.handle().clone());
             manager.start_in_background();
 
             // Reminders: on by default in a packaged app, in-app checks every 10 minutes.
@@ -241,9 +259,13 @@ pub fn run() {
             reminders_test,
             open_path_in_finder,
             open_url_in_browser,
-            viewer::open_assisted_official_viewer,
-            viewer::open_assisted_official_viewer_with_session,
             viewer::open_official_viewer_with_session,
+            viewer::open_lms_page_with_session,
+            watch_runtime::watch_queue_start,
+            watch_runtime::watch_queue_next,
+            watch_runtime::watch_queue_stop,
+            watch_runtime::watch_queue_status,
+            watch_runtime::watch_queue_show_window,
             backend::backend_supervision_status,
             backend::backend_api_base_url,
             backend::backend_api_connection,
@@ -262,6 +284,7 @@ pub fn run() {
                 event,
                 tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit
             ) {
+                watch_runtime::shutdown(app_handle);
                 shutdown_backend(app_handle);
             }
         }),

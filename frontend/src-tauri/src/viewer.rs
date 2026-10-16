@@ -1,27 +1,33 @@
-//! App-owned official Commons viewer windows.
+//! App-owned LMS windows.
 //!
-//! Three entry points share one window builder:
+//! Entry points sharing the session-bridge window builder:
 //! - `open_official_viewer_with_session`: manual row-level `시청`. Must stay
 //!   minimal (session bridge only, no scripts, no navigation hooks); see the
 //!   regression tests at the bottom and `frontend/README.md`.
-//! - `open_assisted_official_viewer_with_session` / `open_assisted_official_viewer`:
-//!   experimental sequential-watch mode with the narrow `video.play()` / `ended` helper.
+//! - `open_lms_page_with_session`: a normal window for an LMS page (wiki page, board,
+//!   assignment, quiz). Session bridge only, no scripts.
+//!
+//! The sequential-watch window (small, always on top, one window for the whole queue) is
+//! owned by `watch_runtime.rs`; it reuses `with_watch_assist` and the bridge helpers below.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
-use tauri::{Emitter, Manager};
+use tauri::Manager;
 
 const VIEWER_LABEL_PREFIX: &str = "official-viewer";
 const VIEWER_DEFAULT_TITLE: &str = "숭실 LMS 공식 시청 창";
-const VIEWER_USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36";
+const PAGE_LABEL_PREFIX: &str = "lms-page";
+const PAGE_DEFAULT_TITLE: &str = "숭실 LMS";
+pub(crate) const VIEWER_USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36";
 
 /// Tracks the currently open viewer. Every open uses a fresh label so building
 /// the new window never races the asynchronous close of the previous one.
 pub(crate) struct ViewerState {
     current: Mutex<Option<String>>,
     next_id: AtomicU64,
+    next_page_id: AtomicU64,
 }
 
 impl ViewerState {
@@ -29,11 +35,17 @@ impl ViewerState {
         Self {
             current: Mutex::new(None),
             next_id: AtomicU64::new(1),
+            next_page_id: AtomicU64::new(1),
         }
     }
 
     fn next_label(&self) -> String {
         viewer_label(self.next_id.fetch_add(1, Ordering::Relaxed))
+    }
+
+    /// LMS page windows are independent of the viewer: any number may be open.
+    fn next_page_label(&self) -> String {
+        page_label(self.next_page_id.fetch_add(1, Ordering::Relaxed))
     }
 
     fn take_current(&self) -> Option<String> {
@@ -51,13 +63,12 @@ fn viewer_label(id: u64) -> String {
     format!("{VIEWER_LABEL_PREFIX}-{id}")
 }
 
-#[derive(Debug, Clone, Serialize)]
-struct WatchAssistEvent {
-    stage: String,
+fn page_label(id: u64) -> String {
+    format!("{PAGE_LABEL_PREFIX}-{id}")
 }
 
 #[derive(Debug, Clone, Serialize)]
-struct WatchDebugEvent {
+pub(crate) struct WatchDebugEvent {
     stage: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     mode: Option<String>,
@@ -81,7 +92,7 @@ struct WatchDebugEvent {
     error_message: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 pub(crate) struct OfficialViewerBridgeCookie {
     name: String,
     value: String,
@@ -92,15 +103,23 @@ pub(crate) struct OfficialViewerBridgeCookie {
     same_site: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 pub(crate) struct OfficialViewerSessionBridgeRequest {
+    pub(crate) title: Option<String>,
+    pub(crate) viewer_url: Option<String>,
+    pub(crate) launch_url: Option<String>,
+    pub(crate) cookies: Vec<OfficialViewerBridgeCookie>,
+}
+
+/// A normal LMS page window: the page address plus the Python-authenticated cookies.
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct LmsPageRequest {
     title: Option<String>,
-    viewer_url: Option<String>,
-    launch_url: Option<String>,
+    url: String,
     cookies: Vec<OfficialViewerBridgeCookie>,
 }
 
-fn official_viewer_bootstrap_url() -> tauri::Url {
+pub(crate) fn official_viewer_bootstrap_url() -> tauri::Url {
     tauri::Url::parse("https://commons.ssu.ac.kr/")
         .expect("static official viewer bootstrap URL must parse")
 }
@@ -121,7 +140,27 @@ fn validate_official_watch_url(url: &str) -> Result<tauri::Url, String> {
     Err("unsupported_watch_url_host".to_string())
 }
 
-fn watch_debug_event_from_url(url: &tauri::Url) -> WatchDebugEvent {
+/// Only https pages on the Soongsil domain (`ssu.ac.kr` and its subdomains) may open in an
+/// LMS page window; credentials in the address and other ports are refused too.
+fn validate_lms_page_url(url: &str) -> Result<tauri::Url, String> {
+    let parsed = tauri::Url::parse(url.trim()).map_err(|_| "invalid_lms_page_url".to_string())?;
+    if parsed.scheme() != "https" {
+        return Err("unsupported_lms_page_scheme".to_string());
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err("unsupported_lms_page_credentials".to_string());
+    }
+    if parsed.port().is_some() {
+        return Err("unsupported_lms_page_port".to_string());
+    }
+    let host = parsed.host_str().unwrap_or_default().to_ascii_lowercase();
+    if host == "ssu.ac.kr" || host.ends_with(".ssu.ac.kr") {
+        return Ok(parsed);
+    }
+    Err("unsupported_lms_page_host".to_string())
+}
+
+pub(crate) fn watch_debug_event_from_url(url: &tauri::Url) -> WatchDebugEvent {
     let mut values: HashMap<String, String> = HashMap::new();
     for (key, value) in url.query_pairs() {
         values.insert(key.into_owned(), value.into_owned());
@@ -142,14 +181,6 @@ fn watch_debug_event_from_url(url: &tauri::Url) -> WatchDebugEvent {
         error_name: values.get("error").cloned(),
         error_message: values.get("message").cloned(),
     }
-}
-
-fn emit_watch_debug_navigation(app: &tauri::AppHandle, nav_url: &tauri::Url) -> bool {
-    if nav_url.scheme() == "ssu-watch" && nav_url.host_str() == Some("debug") {
-        let _ = app.emit("official-watch-debug", watch_debug_event_from_url(nav_url));
-        return true;
-    }
-    false
 }
 
 fn bridge_cookie_to_tauri(
@@ -231,30 +262,17 @@ fn session_viewer_builder<'a>(
     .user_agent(VIEWER_USER_AGENT)
 }
 
-/// Sequential-watch only: install the playback helper and the `ssu-watch://` hooks.
-fn with_watch_assist<'a>(
+/// Sequential-watch only: install the playback helper and route its `ssu-watch://` signals
+/// (debug, progress, heartbeat, ended, stalled) to `on_signal`. Such navigations never load.
+pub(crate) fn with_watch_assist<'a>(
     builder: tauri::WebviewWindowBuilder<'a, tauri::Wry, tauri::AppHandle>,
-    app: &tauri::AppHandle,
-    label: &str,
+    on_signal: impl Fn(&tauri::Url) + Send + 'static,
 ) -> tauri::WebviewWindowBuilder<'a, tauri::Wry, tauri::AppHandle> {
-    let nav_app = app.clone();
-    let nav_label = label.to_string();
     builder
         .initialization_script_for_all_frames(official_watch_assist_script())
         .on_navigation(move |nav_url| {
-            if emit_watch_debug_navigation(&nav_app, nav_url) {
-                return false;
-            }
-            if nav_url.scheme() == "ssu-watch" && nav_url.host_str() == Some("ended") {
-                let _ = nav_app.emit(
-                    "official-watch-ended",
-                    WatchAssistEvent {
-                        stage: "ended".to_string(),
-                    },
-                );
-                if let Some(window) = nav_app.get_webview_window(&nav_label) {
-                    let _ = window.close();
-                }
+            if nav_url.scheme() == "ssu-watch" {
+                on_signal(nav_url);
                 return false;
             }
             true
@@ -262,7 +280,7 @@ fn with_watch_assist<'a>(
 }
 
 /// Inject the Python-authenticated LMS cookies, then go to the validated target.
-fn bridge_session_and_navigate(
+pub(crate) fn bridge_session_and_navigate(
     window: &tauri::WebviewWindow,
     cookies: &[OfficialViewerBridgeCookie],
     target: tauri::Url,
@@ -275,7 +293,7 @@ fn bridge_session_and_navigate(
     window.navigate(target).map_err(|error| error.to_string())
 }
 
-fn session_bridge_target(
+pub(crate) fn session_bridge_target(
     request: &OfficialViewerSessionBridgeRequest,
 ) -> Result<tauri::Url, String> {
     let fallback_viewer_url = request
@@ -284,42 +302,6 @@ fn session_bridge_target(
         .ok_or_else(|| "missing_watch_url".to_string())?;
     let navigation_url = request.launch_url.as_deref().unwrap_or(fallback_viewer_url);
     validate_official_watch_url(navigation_url)
-}
-
-#[tauri::command]
-pub(crate) fn open_assisted_official_viewer(
-    app: tauri::AppHandle,
-    state: tauri::State<'_, ViewerState>,
-    url: String,
-    title: Option<String>,
-) -> Result<(), String> {
-    let parsed = validate_official_watch_url(&url)?;
-    let label = begin_viewer(&app, &state)?;
-    let builder = base_viewer_builder(&app, &label, tauri::WebviewUrl::External(parsed), title);
-    with_watch_assist(builder, &app, &label)
-        .build()
-        .map_err(|error| error.to_string())?;
-    state.set_current(label);
-    Ok(())
-}
-
-#[tauri::command]
-pub(crate) fn open_assisted_official_viewer_with_session(
-    app: tauri::AppHandle,
-    state: tauri::State<'_, ViewerState>,
-    request: OfficialViewerSessionBridgeRequest,
-) -> Result<(), String> {
-    let target = session_bridge_target(&request)?;
-    let label = begin_viewer(&app, &state)?;
-    let window = with_watch_assist(
-        session_viewer_builder(&app, &label, request.title.clone()),
-        &app,
-        &label,
-    )
-    .build()
-    .map_err(|error| error.to_string())?;
-    state.set_current(label);
-    bridge_session_and_navigate(&window, &request.cookies, target)
 }
 
 #[tauri::command]
@@ -337,6 +319,27 @@ pub(crate) fn open_official_viewer_with_session(
     bridge_session_and_navigate(&window, &request.cookies, parsed)
 }
 
+#[tauri::command]
+pub(crate) fn open_lms_page_with_session(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, ViewerState>,
+    request: LmsPageRequest,
+) -> Result<(), String> {
+    let target = validate_lms_page_url(&request.url)?;
+    let label = state.next_page_label();
+    let title = request
+        .title
+        .as_deref()
+        .map(str::trim)
+        .filter(|title| !title.is_empty())
+        .unwrap_or(PAGE_DEFAULT_TITLE)
+        .to_string();
+    let window = session_viewer_builder(&app, &label, Some(title))
+        .build()
+        .map_err(|error| error.to_string())?;
+    bridge_session_and_navigate(&window, &request.cookies, target)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -348,6 +351,8 @@ mod tests {
             ("backend.rs", include_str!("backend.rs")),
             ("native_download.rs", include_str!("native_download.rs")),
             ("viewer.rs", include_str!("viewer.rs")),
+            ("watch_queue.rs", include_str!("watch_queue.rs")),
+            ("watch_runtime.rs", include_str!("watch_runtime.rs")),
         ]
         .into_iter()
         .map(|(name, source)| {
@@ -392,7 +397,48 @@ mod tests {
         assert!(script.contains("isLikelyMainVideo(video)"), "{script}");
         assert!(script.contains("short-video-ended"), "{script}");
         assert!(script.contains("ssu-watch://ended"), "{script}");
-        assert!(!script.contains("progress"), "{script}");
+        // Sequential mode reports how far the video is and when it stalls.
+        assert!(script.contains("ssu-watch://progress"), "{script}");
+        assert!(script.contains("ssu-watch://stalled"), "{script}");
+        assert!(script.contains("STALL_AFTER_MS = 60000"), "{script}");
+    }
+
+    #[test]
+    fn watch_viewer_script_mutes_and_answers_the_resume_dialog_with_yes() {
+        let script = official_watch_assist_script();
+
+        assert!(script.contains("video.muted = true"), "{script}");
+        assert!(script.contains("이어서 보시겠습니까"), "{script}");
+        assert!(script.contains("RESUME_YES_LABEL = '예'"), "{script}");
+        assert!(
+            script.contains("controlLabel(control) !== RESUME_YES_LABEL"),
+            "exact button text match: {script}"
+        );
+        assert!(script.contains("PLAY_RETRY_MAX_MS"), "{script}");
+    }
+
+    #[test]
+    fn watch_viewer_script_never_fakes_visibility_speed_or_position() {
+        let script = official_watch_assist_script();
+
+        for forbidden in [
+            "visibilityState",
+            "document.hidden",
+            "visibilitychange",
+            "playbackRate",
+            "defaultPlaybackRate",
+            "Object.defineProperty",
+            "stopImmediatePropagation",
+            "stopPropagation",
+            "preventDefault",
+            "currentTime =",
+            "currentTime=",
+            "fastSeek",
+            "'blur'",
+            "\"blur\"",
+        ] {
+            assert!(!script.contains(forbidden), "{forbidden}");
+        }
     }
 
     #[test]
@@ -445,6 +491,62 @@ mod tests {
         state.set_current(first.clone());
         assert_eq!(state.take_current(), Some(first));
         assert_eq!(state.take_current(), None, "current is consumed on close");
+    }
+
+    #[test]
+    fn lms_pages_open_only_for_https_ssu_hosts() {
+        for ok in [
+            "https://canvas.ssu.ac.kr/courses/1/pages/week-1",
+            "https://canvas.ssu.ac.kr/courses/1/modules/items/9",
+            "https://lms.ssu.ac.kr/x?y=1#z",
+            "https://ssu.ac.kr/",
+        ] {
+            assert!(validate_lms_page_url(ok).is_ok(), "{ok}");
+        }
+        for rejected in [
+            "http://canvas.ssu.ac.kr/x",
+            "https://example.com/ssu.ac.kr",
+            "https://ssu.ac.kr.evil.com/",
+            "https://evilssu.ac.kr/",
+            "https://canvas.ssu.ac.kr@evil.com/",
+            "https://user:pw@canvas.ssu.ac.kr/",
+            "https://canvas.ssu.ac.kr:8443/",
+            "javascript:alert(1)",
+            "ssu-watch://debug",
+            "/courses/1/pages/x",
+            "",
+        ] {
+            assert!(validate_lms_page_url(rejected).is_err(), "{rejected}");
+        }
+    }
+
+    #[test]
+    fn lms_page_windows_get_their_own_unique_labels() {
+        let state = ViewerState::new();
+        let first = state.next_page_label();
+        let second = state.next_page_label();
+        assert_ne!(first, second);
+        assert_eq!(page_label(3), "lms-page-3");
+        assert_ne!(
+            state.next_label(),
+            first,
+            "viewer and page labels never collide"
+        );
+
+        let source = include_str!("viewer.rs");
+        let start = source
+            .find("pub(crate) fn open_lms_page_with_session(")
+            .expect("page command exists");
+        let tail = &source[start..];
+        let body = &tail[..tail.find("\n}\n").expect("page command boundary")];
+        assert!(body.contains("validate_lms_page_url("), "{body}");
+        assert!(body.contains("bridge_session_and_navigate("), "{body}");
+        assert!(
+            !body.contains("with_watch_assist"),
+            "no watch script: {body}"
+        );
+        assert!(!body.contains("initialization_script"), "{body}");
+        assert!(!body.contains("on_navigation"), "{body}");
     }
 
     #[test]

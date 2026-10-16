@@ -100,6 +100,9 @@ Useful endpoints:
 - `GET /api/courses`
 - `GET /api/courses?term_id=46`
 - `GET /api/courses/{course_id}?course_name=...`
+- `GET /api/courses/{course_id}/pages/{page_url_or_id}/files?course_name=...&output_dir=...` (files linked in a wiki page: `file_id`, `display_name`, `size`, `download_url`, `downloaded_path`)
+- `POST /api/download/canvas-file` (`course_id`, `file_id`, `course_name`, `output_dir`, `conflict_strategy`: saves one Canvas file into the course folder through a `.part` file, an existing file is kept with `skip`)
+- `POST /api/lms/session-bridge` (LMS cookies for an in-app page window; protected like the watch session bridge)
 - `POST /api/download/plan`
 - `POST /api/download`
 - `POST /api/download/jobs`

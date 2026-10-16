@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ActionBar } from './components/ActionBar';
 import { CourseSidebar } from './components/CourseSidebar';
 import { DeadlinesPane } from './components/DeadlinesPane';
@@ -8,27 +8,32 @@ import { BackendScreen, LoginScreen, SplashScreen } from './components/Screens';
 import { SettingsDialog } from './components/SettingsDialog';
 import { Toasts } from './components/Toasts';
 import { TopBar } from './components/TopBar';
+import { WatchStrip } from './components/WatchStrip';
 import { useBackendStatus } from './hooks/useBackendStatus';
 import { useCourseContent } from './hooks/useCourseContent';
 import { useDeadlines } from './hooks/useDeadlines';
 import { useDownloadDir } from './hooks/useDownloadDir';
 import { useDownloads } from './hooks/useDownloads';
+import { useLmsPages } from './hooks/useLmsPages';
 import { useLmsSession } from './hooks/useLmsSession';
 import type { LmsSession } from './hooks/useLmsSession';
 import { useMediaDependencies } from './hooks/useMediaDependencies';
 import { useNow } from './hooks/useNow';
 import { useOfficialViewer } from './hooks/useOfficialViewer';
+import { usePageAttachments } from './hooks/usePageAttachments';
 import { useToasts } from './hooks/useToasts';
-import { groupByWeek, isSelectable, isTaskItem, isUnwatchedNow, itemKey, lmsItemUrl, pickDefaultCourse, sortTasks, sumSizes } from './lib/content';
+import { buildWatchQueue, groupByWeek, isLibraryItem, isSelectable, isTaskItem, isUnwatchedNow, itemKey, itemPageUrl, pickDefaultCourse, sortTasks, sumSizes } from './lib/content';
 import type { LectureTab } from './lib/content';
 import { dueSoonCount } from './lib/deadline';
-import { isTauriRuntime, openDownloadedFolder, openUrlInBrowser } from './lib/desktop';
+import { isTauriRuntime, openDownloadedFolder } from './lib/desktop';
 import { friendlyError } from './lib/errors';
 import { formatBytes, shortFolderName } from './lib/format';
 import type { JobPlan, PlannedItem } from './lib/jobItems';
 import type { CourseContentItem, CourseSummary, DeadlineEntryDto, DownloadOutputFormat } from './lib/types';
 
 const FORMAT_ORDER: DownloadOutputFormat[] = ['mp4', 'mp3', 'txt'];
+/** The LMS needs a moment to count a lecture that just ended before a reload shows it as watched. */
+const QUEUE_REFRESH_DELAY_MS = 20_000;
 
 function toPlannedItem(item: CourseContentItem): PlannedItem {
   return { id: itemKey(item) as string, rawId: item.module_item_id as string | number, title: item.title, sizeBytes: item.size_bytes };
@@ -66,14 +71,34 @@ function Workspace({ session }: { session: LmsSession }) {
   const deadlines = useDeadlines(session.termId, courses, onAuthError);
   const downloads = useDownloads({ downloadDir: dir, onAuthError, onError });
   const media = useMediaDependencies({ onMessage: push, downloadBusy: downloads.active });
-  const viewer = useOfficialViewer({ notify: push, onAuthError });
+  const lmsPages = useLmsPages({ notify: push, onAuthError });
+  const attachments = usePageAttachments(course, dir, { onAuthError, notify: push });
+
+  // A lecture that played to its end counts as watched at once; the LMS is asked a little later.
+  const refreshTimers = useRef(new Set<ReturnType<typeof setTimeout>>());
+  useEffect(() => {
+    const timers = refreshTimers.current;
+    return () => {
+      timers.forEach((timer) => clearTimeout(timer));
+      timers.clear();
+    };
+  }, []);
+  const onQueueSettled = useCallback((finished: CourseSummary) => {
+    const timer = setTimeout(() => {
+      refreshTimers.current.delete(timer);
+      void content.refreshQuietly(finished);
+    }, QUEUE_REFRESH_DELAY_MS);
+    refreshTimers.current.add(timer);
+  }, [content]);
+  const viewer = useOfficialViewer({ notify: push, onAuthError, onItemWatched: content.markWatched, onQueueSettled });
 
   useEffect(() => {
     setSelected(new Set());
   }, [selectedCourseId]);
 
   const videos = useMemo(() => content.items.filter((item) => item.kind === 'video'), [content.items]);
-  const materials = useMemo(() => content.items.filter((item) => item.kind === 'material'), [content.items]);
+  const materials = useMemo(() => content.items.filter(isLibraryItem), [content.items]);
+  const watchCount = useMemo(() => buildWatchQueue(content.items, now).length, [content.items, now]);
   const tasks = useMemo(() => sortTasks(content.items.filter(isTaskItem), now), [content.items, now]);
   const visibleItems = useMemo(() => {
     if (tab === 'task') return [];
@@ -137,17 +162,19 @@ function Workspace({ session }: { session: LmsSession }) {
     else void beginDownload([item]);
   }
 
-  async function openLmsPage(address: string | null) {
-    const url = lmsItemUrl(address);
-    if (!url) {
-      push('LMS 주소를 알 수 없어요.', 'error');
-      return;
-    }
-    try {
-      await openUrlInBrowser(url);
-    } catch (error) {
-      push(friendlyError(error, 'LMS 페이지를 열지 못했어요.'), 'error');
-    }
+  /** Pages, boards and other LMS items open in an app window (with the LMS session). */
+  function openItemInApp(item: CourseContentItem) {
+    if (!course) return;
+    void lmsPages.openInApp(item.title, itemPageUrl(item, course.id));
+  }
+
+  function openTaskInBrowser(item: CourseContentItem) {
+    if (!course) return;
+    void lmsPages.openInBrowser(itemPageUrl(item, course.id));
+  }
+
+  function deadlineAddress(entry: DeadlineEntryDto): string | null {
+    return itemPageUrl({ url: entry.url, module_item_id: entry.module_item_id }, entry.course_id);
   }
 
   function selectDeadline(entry: DeadlineEntryDto) {
@@ -157,7 +184,7 @@ function Workspace({ session }: { session: LmsSession }) {
       setView('course');
       return;
     }
-    void openLmsPage(entry.url);
+    void lmsPages.openInApp(entry.title, deadlineAddress(entry));
   }
 
   async function openFolder(path?: string) {
@@ -211,6 +238,7 @@ function Workspace({ session }: { session: LmsSession }) {
         onRefresh={() => { session.refresh(); content.reload(true); }}
         onOpenSettings={() => setSettingsOpen(true)}
       />
+      <WatchStrip queue={viewer.queue} onNext={() => void viewer.next()} onStop={() => void viewer.stop()} onShowWindow={() => void viewer.showWindow()} />
       <div className="workspace">
         <CourseSidebar
           courses={courses}
@@ -230,6 +258,7 @@ function Workspace({ session }: { session: LmsSession }) {
                 error={deadlines.error}
                 now={now}
                 onSelect={selectDeadline}
+                onOpenInBrowser={(entry) => void lmsPages.openInBrowser(deadlineAddress(entry))}
                 onReload={deadlines.reload}
               />
             ) : (
@@ -247,6 +276,8 @@ function Workspace({ session }: { session: LmsSession }) {
               now={now}
               selected={selected}
               selectableKeys={selectableKeys}
+              watchCount={watchCount}
+              attachments={attachments}
               queue={viewer.queue}
               openingKey={viewer.openingKey}
               actionBlockedReason={actionBlockedReason}
@@ -256,9 +287,10 @@ function Workspace({ session }: { session: LmsSession }) {
               onToggle={(key, checked) => setChecked([key], checked)}
               onToggleMany={setChecked}
               onAction={handleRowAction}
-              onOpenTask={(item) => void openLmsPage(item.url)}
-              onStartWatch={() => { if (course) void viewer.startQueue(course, visibleItems); }}
-              onStopWatch={viewer.stop}
+              onOpenItem={openItemInApp}
+              onOpenTask={openItemInApp}
+              onOpenTaskInBrowser={openTaskInBrowser}
+              onStartWatch={() => { if (course) void viewer.startQueue(course, buildWatchQueue(content.items, new Date())); }}
               onReload={content.reload}
             />
             )}

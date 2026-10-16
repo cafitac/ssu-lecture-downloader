@@ -1,0 +1,1359 @@
+//! Sequential-watch runtime: the small always-visible playback window, the menu bar item, the
+//! Dock badge, notifications and the threads that move the queue along.
+//!
+//! The queue state lives here (in Rust), fed only by the signals the page script reports
+//! (`ssu-watch://progress|heartbeat|ended|stalled|debug`), so the menu bar keeps updating even
+//! when the main window's web view is throttled or hidden. The React app reads the same state
+//! through `watch_queue_status` and the `watch-queue-changed` event.
+//!
+//! Rules this module keeps:
+//! - The playback window stays genuinely visible (small, always on top, bottom-right corner).
+//!   Nothing here spoofs visibility, speed or position; a covered or minimized window simply
+//!   shows as "멈춤" until the user brings it back.
+//! - One window serves the whole queue: the next lecture is loaded into it through the same
+//!   cookie bridge as the manual viewer.
+//! - The queue mutex is never held while calling window/tray/network APIs (those may wait for
+//!   the main thread, which may itself be waiting for the mutex): state changes are computed
+//!   under the lock into a [`View`], then applied after it is released.
+
+use crate::backend::{BackendManager, BACKEND_TOKEN_HEADER};
+use crate::reminders::{Notifier, OsascriptNotifier};
+use crate::viewer::{
+    bridge_session_and_navigate, session_bridge_target, watch_debug_event_from_url,
+    with_watch_assist, OfficialViewerSessionBridgeRequest, VIEWER_USER_AGENT,
+};
+use crate::watch_queue::{
+    bottom_right_position, dock_badge, finished_notification, skipped_notification, tray_menu_text,
+    tray_title, window_title, Phase, Progress, QueueCore, QueueItem, Rect, Snapshot, StallDecision,
+    Step, TrayMenuText, FINISHED_VISIBLE_SECS, NO_ACTIVITY_TIMEOUT_SECS, USER_SKIP_REASON,
+    WATCH_WINDOW_HEIGHT, WATCH_WINDOW_MARGIN, WATCH_WINDOW_MIN_HEIGHT, WATCH_WINDOW_MIN_WIDTH,
+    WATCH_WINDOW_WIDTH,
+};
+use serde::{Deserialize, Serialize};
+use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::{Duration, Instant};
+use tauri::menu::{IsMenuItem, Menu, MenuItem, PredefinedMenuItem};
+use tauri::tray::{TrayIconBuilder, TrayIconEvent};
+use tauri::{AppHandle, Emitter, Manager, Wry};
+
+const TRAY_ID: &str = "watch-queue";
+const WATCH_LABEL_PREFIX: &str = "watch-player";
+const QUEUE_EVENT: &str = "watch-queue-changed";
+const NOTICE_EVENT: &str = "watch-queue-notice";
+const ENDED_EVENT: &str = "official-watch-ended";
+const DEBUG_EVENT: &str = "official-watch-debug";
+const MENU_SHOW: &str = "watch-show-window";
+const MENU_NEXT: &str = "watch-next";
+const MENU_STOP: &str = "watch-stop";
+const MENU_OPEN_APP: &str = "watch-open-app";
+const MAX_QUEUE_ITEMS: usize = 200;
+const TICK_INTERVAL: Duration = Duration::from_secs(2);
+const PLAN_TIMEOUT: Duration = Duration::from_secs(120);
+const PAGE_SWAP_GRACE: Duration = Duration::from_millis(1500);
+/// After a click on the finished menu bar text it disappears a little later (not while the
+/// menu it just opened is still on screen).
+const FINISHED_ACK_DELAY: Duration = Duration::from_secs(8);
+
+// ------------------------------------------------------------------------- state
+
+struct RuntimeState {
+    core: QueueCore,
+    course_id: String,
+    course_name: String,
+    window_label: Option<String>,
+    /// The page the current lecture was opened at (reloaded once when it stalls).
+    target: Option<tauri::Url>,
+    last_activity: Instant,
+    /// Progress/ended/stalled signals count only once the current lecture's page is loaded:
+    /// until then the previous page may still be on screen and reporting.
+    accepting: bool,
+    finished_at: Option<Instant>,
+    finished_acknowledged: bool,
+    /// Distinguishes the playback windows of successive runs.
+    run_seq: u64,
+}
+
+impl RuntimeState {
+    fn new() -> Self {
+        Self {
+            core: QueueCore::new(Vec::new()),
+            course_id: String::new(),
+            course_name: String::new(),
+            window_label: None,
+            target: None,
+            last_activity: Instant::now(),
+            accepting: true,
+            finished_at: None,
+            finished_acknowledged: false,
+            run_seq: 0,
+        }
+    }
+}
+
+#[derive(Clone)]
+struct TrayMenuHandles {
+    header: MenuItem<Wry>,
+    total: MenuItem<Wry>,
+    rows: Vec<MenuItem<Wry>>,
+}
+
+#[derive(Default)]
+struct TrayState {
+    handles: Option<TrayMenuHandles>,
+    last_view: Option<TrayView>,
+    last_badge: Option<Option<i64>>,
+}
+
+pub(crate) struct WatchRuntime {
+    state: Mutex<RuntimeState>,
+    tray: Mutex<TrayState>,
+    notifier: Arc<dyn Notifier>,
+}
+
+impl WatchRuntime {
+    pub(crate) fn new() -> Self {
+        Self::with_notifier(Arc::new(OsascriptNotifier))
+    }
+
+    fn with_notifier(notifier: Arc<dyn Notifier>) -> Self {
+        Self {
+            state: Mutex::new(RuntimeState::new()),
+            tray: Mutex::new(TrayState::default()),
+            notifier,
+        }
+    }
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+// -------------------------------------------------------------------------- views
+
+/// What the outside world shows for one state: the snapshot for React plus the tray texts and
+/// the Dock badge. Computed under the lock, applied after it.
+#[derive(Clone)]
+struct View {
+    snapshot: Snapshot,
+    tray: TrayView,
+    badge: Option<i64>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct TrayView {
+    visible: bool,
+    title: String,
+    menu: TrayMenuText,
+}
+
+impl View {
+    fn of(state: &RuntimeState) -> Self {
+        let snapshot = state.core.snapshot();
+        let finished_visible = snapshot.phase == "finished"
+            && !state.finished_acknowledged
+            && state
+                .finished_at
+                .is_some_and(|at| at.elapsed() < Duration::from_secs(FINISHED_VISIBLE_SECS));
+        let visible = snapshot.active || finished_visible;
+        Self {
+            tray: TrayView {
+                visible,
+                title: if visible {
+                    tray_title(&snapshot)
+                } else {
+                    String::new()
+                },
+                menu: tray_menu_text(&snapshot),
+            },
+            badge: dock_badge(&snapshot),
+            snapshot,
+        }
+    }
+}
+
+/// Run `change` under the lock and return its result with the resulting view.
+fn update<R>(app: &AppHandle, change: impl FnOnce(&mut RuntimeState) -> R) -> (R, View) {
+    let runtime = app.state::<WatchRuntime>();
+    let mut state = lock(&runtime.state);
+    let result = change(&mut state);
+    let view = View::of(&state);
+    (result, view)
+}
+
+fn read<R>(app: &AppHandle, look: impl FnOnce(&RuntimeState) -> R) -> R {
+    let runtime = app.state::<WatchRuntime>();
+    let state = lock(&runtime.state);
+    look(&state)
+}
+
+/// Tell the world about a state change: React event, menu bar, Dock badge.
+fn publish(app: &AppHandle, view: &View) {
+    let _ = app.emit(QUEUE_EVENT, &view.snapshot);
+    apply_tray(app, &view.tray);
+    apply_badge(app, view.badge);
+}
+
+/// Menu bar and badge only (the periodic refresh does not need to wake React).
+fn publish_outputs(app: &AppHandle, view: &View) {
+    apply_tray(app, &view.tray);
+    apply_badge(app, view.badge);
+}
+
+fn apply_badge(app: &AppHandle, badge: Option<i64>) {
+    {
+        let runtime = app.state::<WatchRuntime>();
+        let mut tray = lock(&runtime.tray);
+        if tray.last_badge == Some(badge) {
+            return;
+        }
+        tray.last_badge = Some(badge);
+    }
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.set_badge_count(badge);
+    }
+}
+
+#[derive(Serialize, Clone)]
+struct Notice {
+    kind: &'static str,
+    text: String,
+    auth_expired: bool,
+}
+
+fn notice(app: &AppHandle, kind: &'static str, text: impl Into<String>) {
+    let _ = app.emit(
+        NOTICE_EVENT,
+        Notice {
+            kind,
+            text: text.into(),
+            auth_expired: false,
+        },
+    );
+}
+
+fn notify_later(app: &AppHandle, title: String, body: String) {
+    let notifier = Arc::clone(&app.state::<WatchRuntime>().notifier);
+    std::thread::spawn(move || {
+        let _ = notifier.notify(&title, &body);
+    });
+}
+
+// --------------------------------------------------------------------------- tray
+
+/// Create the (hidden) menu bar item once, on the main thread, at start-up.
+pub(crate) fn install_tray(app: &AppHandle) {
+    let menu = match Menu::new(app) {
+        Ok(menu) => menu,
+        Err(error) => {
+            eprintln!("watch tray: menu: {error}");
+            return;
+        }
+    };
+    let mut builder = TrayIconBuilder::with_id(TRAY_ID)
+        .menu(&menu)
+        .show_menu_on_left_click(true)
+        .tooltip("자동 재생")
+        .on_menu_event(|app, event| match event.id().as_ref() {
+            MENU_SHOW => {
+                let _ = show_playback_window(app);
+            }
+            MENU_NEXT => next_item(app),
+            MENU_STOP => stop_queue(app),
+            MENU_OPEN_APP => show_main_window(app),
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| {
+            if matches!(event, TrayIconEvent::Click { .. }) {
+                acknowledge_finished(tray.app_handle());
+            }
+        });
+    if let Some(icon) = app.default_window_icon() {
+        builder = builder.icon(icon.clone());
+    }
+    match builder.build(app) {
+        Ok(tray) => {
+            let _ = tray.set_visible(false);
+        }
+        Err(error) => eprintln!("watch tray: {error}"),
+    }
+}
+
+fn menu_item(app: &AppHandle, id: &str, text: &str, enabled: bool) -> Option<MenuItem<Wry>> {
+    MenuItem::with_id(app, id, text, enabled, None::<&str>).ok()
+}
+
+/// Build the menu for a queue with `rows` rows. The info lines are disabled items whose text
+/// is updated in place afterwards (rebuilding while the menu is open would close it).
+fn build_menu(app: &AppHandle, text: &TrayMenuText) -> Option<(Menu<Wry>, TrayMenuHandles)> {
+    let header = menu_item(app, "watch-header", &text.header, false)?;
+    let total = menu_item(app, "watch-total", &text.total, false)?;
+    let rows: Vec<MenuItem<Wry>> = text
+        .rows
+        .iter()
+        .enumerate()
+        .map(|(index, row)| menu_item(app, &format!("watch-row-{index}"), row, false))
+        .collect::<Option<_>>()?;
+    let show = menu_item(app, MENU_SHOW, "재생 창 보이기", true)?;
+    let next = menu_item(app, MENU_NEXT, "다음 강의", true)?;
+    let stop = menu_item(app, MENU_STOP, "자동 재생 중지", true)?;
+    let open = menu_item(app, MENU_OPEN_APP, "앱 열기", true)?;
+    let first_separator = PredefinedMenuItem::separator(app).ok()?;
+    let second_separator = PredefinedMenuItem::separator(app).ok()?;
+    let third_separator = PredefinedMenuItem::separator(app).ok()?;
+    let mut items: Vec<&dyn IsMenuItem<Wry>> = vec![&header, &total, &first_separator];
+    for row in &rows {
+        items.push(row);
+    }
+    items.push(&second_separator);
+    items.push(&show);
+    items.push(&next);
+    items.push(&stop);
+    items.push(&third_separator);
+    items.push(&open);
+    let menu = Menu::with_items(app, &items).ok()?;
+    Some((
+        menu,
+        TrayMenuHandles {
+            header,
+            total,
+            rows,
+        },
+    ))
+}
+
+fn apply_tray(app: &AppHandle, view: &TrayView) {
+    let Some(tray) = app.tray_by_id(TRAY_ID) else {
+        return;
+    };
+    let handles = {
+        let runtime = app.state::<WatchRuntime>();
+        let mut state = lock(&runtime.tray);
+        if state.last_view.as_ref() == Some(view) {
+            return;
+        }
+        state.last_view = Some(view.clone());
+        state.handles.clone()
+    };
+    if !view.visible {
+        let _ = tray.set_title(Some(""));
+        let _ = tray.set_visible(false);
+        return;
+    }
+    let handles = match handles {
+        Some(handles) if handles.rows.len() == view.menu.rows.len() => handles,
+        _ => {
+            let Some((menu, fresh)) = build_menu(app, &view.menu) else {
+                return;
+            };
+            let _ = tray.set_menu(Some(menu));
+            let runtime = app.state::<WatchRuntime>();
+            lock(&runtime.tray).handles = Some(fresh.clone());
+            fresh
+        }
+    };
+    let _ = handles.header.set_text(&view.menu.header);
+    let _ = handles.total.set_text(&view.menu.total);
+    for (item, text) in handles.rows.iter().zip(&view.menu.rows) {
+        let _ = item.set_text(text);
+    }
+    let _ = tray.set_title(Some(view.title.as_str()));
+    let _ = tray.set_visible(true);
+}
+
+/// A click on the "finished" menu bar text dismisses it after a moment.
+fn acknowledge_finished(app: &AppHandle) {
+    if read(app, |state| state.core.phase() != Phase::Finished) {
+        return;
+    }
+    let app = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(FINISHED_ACK_DELAY);
+        let (_, view) = update(&app, |state| {
+            if state.core.phase() == Phase::Finished {
+                state.finished_acknowledged = true;
+            }
+        });
+        publish_outputs(&app, &view);
+    });
+}
+
+// ------------------------------------------------------------------------ commands
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct WatchQueueItemInput {
+    module_item_id: String,
+    title: String,
+    /// Length in seconds from the lecture list, when known.
+    #[serde(default)]
+    duration: Option<f64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct WatchQueueStartRequest {
+    course_id: String,
+    course_name: String,
+    items: Vec<WatchQueueItemInput>,
+}
+
+fn queue_items(request: &WatchQueueStartRequest) -> Result<Vec<QueueItem>, String> {
+    if request.course_id.trim().is_empty() {
+        return Err("missing_course_id".to_string());
+    }
+    let mut seen = std::collections::HashSet::new();
+    let items: Vec<QueueItem> = request
+        .items
+        .iter()
+        .filter(|item| !item.module_item_id.trim().is_empty())
+        .filter(|item| seen.insert(item.module_item_id.trim().to_string()))
+        .take(MAX_QUEUE_ITEMS)
+        .map(|item| {
+            let title = item.title.trim();
+            QueueItem::new(
+                item.module_item_id.trim(),
+                if title.is_empty() { "강의" } else { title },
+                item.duration,
+            )
+        })
+        .collect();
+    if items.is_empty() {
+        return Err("empty_watch_queue".to_string());
+    }
+    Ok(items)
+}
+
+#[tauri::command]
+pub(crate) fn watch_queue_start(
+    app: AppHandle,
+    request: WatchQueueStartRequest,
+) -> Result<Snapshot, String> {
+    let items = queue_items(&request)?;
+    // A queue that is still running is replaced; its window goes away first.
+    let (previous, _) = update(&app, |state| {
+        let label = state.window_label.take();
+        state.core.stop();
+        label
+    });
+    close_window(&app, previous);
+    let (step, view) = update(&app, |state| {
+        state.run_seq += 1;
+        state.course_id = request.course_id.trim().to_string();
+        state.course_name = request.course_name.clone();
+        state.core = QueueCore::new(items).with_epoch(state.core.epoch() + 1);
+        state.target = None;
+        state.accepting = true;
+        state.finished_at = None;
+        state.finished_acknowledged = false;
+        state.last_activity = Instant::now();
+        state.core.start()
+    });
+    publish(&app, &view);
+    run_step(&app, step);
+    Ok(view.snapshot)
+}
+
+#[tauri::command]
+pub(crate) fn watch_queue_next(app: AppHandle) -> Snapshot {
+    next_item(&app);
+    read(&app, |state| state.core.snapshot())
+}
+
+#[tauri::command]
+pub(crate) fn watch_queue_stop(app: AppHandle) -> Snapshot {
+    stop_queue(&app);
+    read(&app, |state| state.core.snapshot())
+}
+
+#[tauri::command]
+pub(crate) fn watch_queue_status(app: AppHandle) -> Snapshot {
+    read(&app, |state| state.core.snapshot())
+}
+
+#[tauri::command]
+pub(crate) fn watch_queue_show_window(app: AppHandle) -> Result<(), String> {
+    show_playback_window(&app)
+}
+
+fn next_item(app: &AppHandle) {
+    let (step, view) = update(app, |state| state.core.skip_current(USER_SKIP_REASON));
+    if step == Step::None {
+        return;
+    }
+    publish(app, &view);
+    run_step(app, step);
+}
+
+fn stop_queue(app: &AppHandle) {
+    let (label, view) = update(app, |state| {
+        let label = state.window_label.take();
+        state.core.stop();
+        label
+    });
+    publish(app, &view);
+    close_window(app, label);
+}
+
+/// Whether a queue is running (the main window then hides instead of closing).
+pub(crate) fn is_queue_active(app: &AppHandle) -> bool {
+    app.try_state::<WatchRuntime>()
+        .is_some_and(|runtime| lock(&runtime.state).core.is_active())
+}
+
+/// App is quitting: close the playback window and clear the menu bar and Dock.
+pub(crate) fn shutdown(app: &AppHandle) {
+    if app.try_state::<WatchRuntime>().is_none() {
+        return;
+    }
+    stop_queue(app);
+}
+
+fn show_main_window(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+    }
+}
+
+fn show_playback_window(app: &AppHandle) -> Result<(), String> {
+    let label = read(app, |state| state.window_label.clone());
+    let window = label
+        .and_then(|label| app.get_webview_window(&label))
+        .ok_or_else(|| "재생 창이 열려 있지 않아요.".to_string())?;
+    window.show().map_err(|error| error.to_string())?;
+    window.unminimize().map_err(|error| error.to_string())?;
+    window.set_focus().map_err(|error| error.to_string())
+}
+
+fn close_window(app: &AppHandle, label: Option<String>) {
+    if let Some(window) = label.and_then(|label| app.get_webview_window(&label)) {
+        let _ = window.close();
+    }
+}
+
+// ----------------------------------------------------------------- queue driving
+
+fn run_step(app: &AppHandle, step: Step) {
+    match step {
+        Step::Open(index) => {
+            let (epoch, _) = update(app, |state| {
+                state.accepting = false;
+                state.last_activity = Instant::now();
+                state.core.epoch()
+            });
+            let app = app.clone();
+            std::thread::spawn(move || open_item(&app, epoch, index));
+        }
+        Step::Finished => finish_queue(app),
+        Step::None => {}
+    }
+}
+
+fn finish_queue(app: &AppHandle) {
+    let ((label, snapshot), view) = update(app, |state| {
+        state.finished_at = Some(Instant::now());
+        state.finished_acknowledged = false;
+        (state.window_label.take(), state.core.snapshot())
+    });
+    publish(app, &view);
+    close_window(app, label);
+    let (title, body) = finished_notification(&snapshot);
+    notify_later(app, title, body);
+    notice(
+        app,
+        "success",
+        format!(
+            "자동 재생을 마쳤어요. {}개 시청{}",
+            snapshot.done_count,
+            if snapshot.skipped_count > 0 {
+                format!(" · {}개 건너뜀", snapshot.skipped_count)
+            } else {
+                String::new()
+            }
+        ),
+    );
+}
+
+struct OpenJob {
+    course_id: String,
+    course_name: String,
+    module_item_id: String,
+    title: String,
+    total: usize,
+}
+
+enum OpenError {
+    /// The queue moved on while this was working; nothing to report.
+    Stale,
+    /// The LMS login is gone: the whole queue stops.
+    Auth,
+    Failed(String),
+}
+
+fn open_item(app: &AppHandle, epoch: u64, index: usize) {
+    let job = read(app, |state| {
+        if state.core.epoch() != epoch {
+            return None;
+        }
+        let item = state.core.items().get(index)?;
+        Some(OpenJob {
+            course_id: state.course_id.clone(),
+            course_name: state.course_name.clone(),
+            module_item_id: item.module_item_id.clone(),
+            title: item.title.clone(),
+            total: state.core.items().len(),
+        })
+    });
+    let Some(job) = job else {
+        return;
+    };
+    match plan_and_show(app, epoch, index, &job) {
+        Ok(()) | Err(OpenError::Stale) => {}
+        Err(OpenError::Auth) => {
+            let (label, view) = update(app, |state| {
+                if state.core.epoch() != epoch {
+                    return None;
+                }
+                let label = state.window_label.take();
+                state.core.stop();
+                Some(label)
+            });
+            if let Some(label) = label {
+                publish(app, &view);
+                close_window(app, label);
+                let _ = app.emit(
+                    NOTICE_EVENT,
+                    Notice {
+                        kind: "error",
+                        text: "로그인이 만료되어 자동 재생을 멈췄어요. 다시 로그인해 주세요."
+                            .to_string(),
+                        auth_expired: true,
+                    },
+                );
+            }
+        }
+        Err(OpenError::Failed(reason)) => {
+            let (step, view) = update(app, |state| {
+                if state.core.epoch() != epoch {
+                    return Step::None;
+                }
+                state.core.skip_current(&reason)
+            });
+            if step != Step::None {
+                publish(app, &view);
+                notice(
+                    app,
+                    "error",
+                    format!("‘{}’을(를) 열지 못해 건너뛰었어요. {reason}", job.title),
+                );
+                run_step(app, step);
+            }
+        }
+    }
+}
+
+fn stale(app: &AppHandle, epoch: u64) -> bool {
+    read(app, |state| state.core.epoch() != epoch)
+}
+
+fn plan_and_show(
+    app: &AppHandle,
+    epoch: u64,
+    index: usize,
+    job: &OpenJob,
+) -> Result<(), OpenError> {
+    let connection = app
+        .try_state::<Arc<BackendManager>>()
+        .map(|manager| manager.connection())
+        .ok_or_else(|| OpenError::Failed("앱 내부 서버를 사용할 수 없어요.".to_string()))?;
+    let plan = fetch_session_bridge_plan(
+        &connection.base_url,
+        connection.token.as_deref(),
+        &job.course_id,
+        &job.module_item_id,
+        &job.course_name,
+    )
+    .map_err(|error| match error {
+        PlanError::Auth => OpenError::Auth,
+        PlanError::Failed(reason) => OpenError::Failed(reason),
+    })?;
+    let target = session_bridge_target(&plan)
+        .map_err(|_| OpenError::Failed("시청 주소를 찾지 못했어요.".to_string()))?;
+    if stale(app, epoch) {
+        return Err(OpenError::Stale);
+    }
+    show_in_window(app, epoch, index, job, &plan, target.clone())?;
+    update(app, |state| {
+        if state.core.epoch() == epoch {
+            state.target = Some(target);
+            state.last_activity = Instant::now();
+        }
+    });
+    accept_signals_soon(app, epoch);
+    Ok(())
+}
+
+/// Let the previous page finish unloading before its successor's reports are believed.
+fn accept_signals_soon(app: &AppHandle, epoch: u64) {
+    std::thread::sleep(PAGE_SWAP_GRACE);
+    update(app, |state| {
+        if state.core.epoch() == epoch {
+            state.accepting = true;
+            state.last_activity = Instant::now();
+        }
+    });
+}
+
+/// Load the lecture into the queue's window, creating the window on first use.
+fn show_in_window(
+    app: &AppHandle,
+    epoch: u64,
+    index: usize,
+    job: &OpenJob,
+    plan: &OfficialViewerSessionBridgeRequest,
+    target: tauri::Url,
+) -> Result<(), OpenError> {
+    let title = window_title(index, job.total, &job.title);
+    let existing = read(app, |state| state.window_label.clone())
+        .and_then(|label| app.get_webview_window(&label));
+    let window = match existing {
+        Some(window) => {
+            let _ = window.set_title(&title);
+            window
+        }
+        None => {
+            let label = {
+                let (label, _) = update(app, |state| {
+                    if state.core.epoch() != epoch {
+                        return None;
+                    }
+                    let label = format!("{WATCH_LABEL_PREFIX}-{}", state.run_seq);
+                    state.window_label = Some(label.clone());
+                    Some(label)
+                });
+                label.ok_or(OpenError::Stale)?
+            };
+            match create_watch_window(app, &label, &title) {
+                Ok(window) => window,
+                Err(error) => {
+                    update(app, |state| {
+                        if state.window_label.as_deref() == Some(label.as_str()) {
+                            state.window_label = None;
+                        }
+                    });
+                    return Err(OpenError::Failed(format!(
+                        "재생 창을 만들지 못했어요. {error}"
+                    )));
+                }
+            }
+        }
+    };
+    bridge_session_and_navigate(&window, &plan.cookies, target)
+        .map_err(|_| OpenError::Failed("재생 페이지를 불러오지 못했어요.".to_string()))
+}
+
+/// The monitor the user is working on: the main window's, else the primary one.
+fn current_visible_frame(app: &AppHandle) -> Option<Rect> {
+    let monitor = app
+        .get_webview_window("main")
+        .and_then(|window| window.current_monitor().ok().flatten())
+        .or_else(|| app.primary_monitor().ok().flatten())?;
+    let area = monitor.work_area();
+    Some(Rect::from_physical(
+        (area.position.x, area.position.y),
+        (area.size.width, area.size.height),
+        monitor.scale_factor(),
+    ))
+}
+
+fn create_watch_window(
+    app: &AppHandle,
+    label: &str,
+    title: &str,
+) -> tauri::Result<tauri::WebviewWindow> {
+    let mut builder = tauri::WebviewWindowBuilder::new(
+        app,
+        label,
+        tauri::WebviewUrl::External(crate::viewer::official_viewer_bootstrap_url()),
+    )
+    .title(title)
+    .inner_size(WATCH_WINDOW_WIDTH, WATCH_WINDOW_HEIGHT)
+    .min_inner_size(WATCH_WINDOW_MIN_WIDTH, WATCH_WINDOW_MIN_HEIGHT)
+    .always_on_top(true)
+    // Opening and advancing must not pull the keyboard away from whatever the user is doing.
+    .focused(false)
+    .resizable(true)
+    .visible(true)
+    .decorations(true)
+    .user_agent(VIEWER_USER_AGENT);
+    match current_visible_frame(app) {
+        Some(frame) => {
+            let (x, y) = bottom_right_position(
+                frame,
+                WATCH_WINDOW_WIDTH,
+                WATCH_WINDOW_HEIGHT,
+                WATCH_WINDOW_MARGIN,
+            );
+            builder = builder.position(x, y);
+        }
+        None => builder = builder.center(),
+    }
+    let signal_app = app.clone();
+    let signal_label = label.to_string();
+    let window = with_watch_assist(builder, move |url| {
+        handle_signal(&signal_app, &signal_label, url)
+    })
+    .build()?;
+    let gone_app = app.clone();
+    let gone_label = label.to_string();
+    window.on_window_event(move |event| {
+        if matches!(event, tauri::WindowEvent::Destroyed) {
+            window_gone(&gone_app, &gone_label);
+        }
+    });
+    Ok(window)
+}
+
+/// The user closed the playback window: the queue cannot go on without it.
+fn window_gone(app: &AppHandle, label: &str) {
+    let (stopped, view) = update(app, |state| {
+        if state.window_label.as_deref() != Some(label) {
+            return false;
+        }
+        state.window_label = None;
+        state.core.stop();
+        true
+    });
+    if stopped {
+        publish(app, &view);
+        notice(app, "info", "재생 창이 닫혀 자동 재생을 멈췄어요.");
+    }
+}
+
+// ---------------------------------------------------------------------- signals
+
+/// A `ssu-watch://<kind>?...` navigation of the playback window (runs on the main thread, so
+/// it only does short work; anything slow is handed to a thread).
+fn handle_signal(app: &AppHandle, label: &str, url: &tauri::Url) {
+    if read(app, |state| state.window_label.as_deref() != Some(label)) {
+        return;
+    }
+    let pairs = query_pairs(url);
+    let kind = url.host_str().unwrap_or_default();
+    if matches!(kind, "progress" | "ended" | "stalled") && !read(app, |state| state.accepting) {
+        return;
+    }
+    match kind {
+        "debug" => {
+            let _ = app.emit(DEBUG_EVENT, watch_debug_event_from_url(url));
+        }
+        "progress" => {
+            if let Some(progress) = progress_from_pairs(&pairs) {
+                let (_, view) = update(app, |state| {
+                    state.last_activity = Instant::now();
+                    state.core.report_progress(progress)
+                });
+                publish(app, &view);
+            }
+        }
+        "heartbeat" => {
+            let rendering = pair(&pairs, "rendering") != Some("0");
+            let (_, view) = update(app, |state| state.core.report_rendering(rendering));
+            publish_outputs(app, &view);
+        }
+        "ended" => handle_ended(app),
+        "stalled" => handle_stalled(app),
+        _ => {}
+    }
+}
+
+fn handle_ended(app: &AppHandle) {
+    let ((step, ended_id), view) = update(app, |state| {
+        // The long video only counts once the player has reported it playing.
+        if state.core.phase() != Phase::Playing {
+            return (Step::None, None);
+        }
+        let id = state
+            .core
+            .current()
+            .map(|index| state.core.items()[index].module_item_id.clone());
+        (state.core.on_ended(), id)
+    });
+    if step == Step::None {
+        return;
+    }
+    publish(app, &view);
+    let _ = app.emit(
+        ENDED_EVENT,
+        EndedEvent {
+            stage: "ended",
+            module_item_id: ended_id,
+        },
+    );
+    run_step(app, step);
+}
+
+#[derive(Serialize, Clone)]
+struct EndedEvent {
+    stage: &'static str,
+    module_item_id: Option<String>,
+}
+
+fn handle_stalled(app: &AppHandle) {
+    let ((decision, title), view) = update(app, |state| {
+        let title = state
+            .core
+            .current()
+            .map(|index| state.core.items()[index].title.clone());
+        let decision = state.core.on_stalled();
+        if decision == StallDecision::Retry {
+            state.last_activity = Instant::now();
+        }
+        (decision, title)
+    });
+    match decision {
+        StallDecision::Ignore => {}
+        StallDecision::Retry => {
+            publish(app, &view);
+            notice(app, "info", "재생이 멈춰 한 번 다시 불러오고 있어요.");
+            let app = app.clone();
+            std::thread::spawn(move || reload_current(&app));
+        }
+        StallDecision::Next(step) => {
+            publish(app, &view);
+            let title = title.unwrap_or_default();
+            let (notice_title, body) =
+                skipped_notification(&title, crate::watch_queue::STALL_SKIP_REASON);
+            notify_later(app, notice_title, body);
+            notice(app, "error", format!("‘{title}’ 재생이 멈춰 건너뛰었어요."));
+            run_step(app, step);
+        }
+    }
+}
+
+/// Reload the lecture page of the current item (the single automatic retry of a stall).
+fn reload_current(app: &AppHandle) {
+    let (target, label) = read(app, |state| {
+        (state.target.clone(), state.window_label.clone())
+    });
+    if let (Some(target), Some(window)) = (target, label.and_then(|l| app.get_webview_window(&l))) {
+        let _ = window.navigate(target);
+    }
+}
+
+pub(crate) fn query_pairs(url: &tauri::Url) -> Vec<(String, String)> {
+    url.query_pairs()
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect()
+}
+
+fn pair<'a>(pairs: &'a [(String, String)], key: &str) -> Option<&'a str> {
+    pairs
+        .iter()
+        .find(|(name, _)| name == key)
+        .map(|(_, value)| value.as_str())
+}
+
+/// The progress report of the page script (`time`, `duration`, `main`, `paused`, `rendering`).
+pub(crate) fn progress_from_pairs(pairs: &[(String, String)]) -> Option<Progress> {
+    let number = |key: &str| {
+        pair(pairs, key)
+            .and_then(|value| value.parse::<f64>().ok())
+            .filter(|value| value.is_finite() && *value >= 0.0)
+    };
+    let position = number("time")?;
+    let duration = number("duration")?;
+    Some(Progress {
+        position,
+        duration,
+        main: pair(pairs, "main") == Some("1"),
+        paused: pair(pairs, "paused") == Some("1"),
+        rendering: pair(pairs, "rendering") != Some("0"),
+    })
+}
+
+// ------------------------------------------------------------------------ ticker
+
+/// Once per `TICK_INTERVAL`: keeps the menu bar current, hides the finished text after its
+/// time, and treats a page that has been silent for too long as stalled.
+pub(crate) fn spawn_ticker(app: AppHandle) {
+    std::thread::spawn(move || loop {
+        std::thread::sleep(TICK_INTERVAL);
+        tick(&app);
+    });
+}
+
+fn tick(app: &AppHandle) {
+    let (stalled, view) = update(app, |state| {
+        if !state.core.is_active() || !state.accepting {
+            return false;
+        }
+        if !state.core.rendering() {
+            // A covered or minimized window cannot play; waiting is not a stall.
+            state.last_activity = Instant::now();
+            return false;
+        }
+        if state.last_activity.elapsed() > Duration::from_secs(NO_ACTIVITY_TIMEOUT_SECS) {
+            state.last_activity = Instant::now();
+            return true;
+        }
+        false
+    });
+    publish_outputs(app, &view);
+    if stalled {
+        handle_stalled(app);
+    }
+}
+
+// ------------------------------------------------------------- backend plan call
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum PlanError {
+    /// The backend says the LMS login is gone (HTTP 401).
+    Auth,
+    Failed(String),
+}
+
+fn plan_error_reason(error_code: Option<&str>) -> String {
+    match error_code {
+        Some("network_error") | Some("network_timeout") => {
+            "LMS에 연결하지 못했어요. 인터넷 연결을 확인해 주세요.".to_string()
+        }
+        _ => "시청 주소를 찾지 못했어요.".to_string(),
+    }
+}
+
+/// Ask the local backend for the session-bridge plan of one lecture (viewer address, launch
+/// address and the LMS cookies to inject), the same call the React app makes for a manual watch.
+pub(crate) fn fetch_session_bridge_plan(
+    base_url: &str,
+    token: Option<&str>,
+    course_id: &str,
+    module_item_id: &str,
+    course_name: &str,
+) -> Result<OfficialViewerSessionBridgeRequest, PlanError> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(PLAN_TIMEOUT)
+        .build()
+        .map_err(|_| PlanError::Failed("앱 내부 통신을 준비하지 못했어요.".to_string()))?;
+    let body = serde_json::json!({
+        "course_id": course_id,
+        "module_item_id": module_item_id,
+        "course_name": course_name,
+    });
+    let mut request = client
+        .post(format!("{base_url}/api/watch/session-bridge-plan"))
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .body(body.to_string());
+    if let Some(token) = token {
+        request = request.header(BACKEND_TOKEN_HEADER, token);
+    }
+    let response = request.send().map_err(|error| {
+        if error.is_timeout() {
+            PlanError::Failed("시청 주소를 가져오는 데 너무 오래 걸렸어요.".to_string())
+        } else {
+            PlanError::Failed("앱 내부 서버에 연결하지 못했어요.".to_string())
+        }
+    })?;
+    let status = response.status();
+    let text = response.text().unwrap_or_default();
+    if !status.is_success() {
+        let code = serde_json::from_str::<serde_json::Value>(&text)
+            .ok()
+            .and_then(|value| value["error_code"].as_str().map(str::to_string));
+        if status == reqwest::StatusCode::UNAUTHORIZED
+            && code.as_deref() != Some("api_token_invalid")
+        {
+            return Err(PlanError::Auth);
+        }
+        return Err(PlanError::Failed(plan_error_reason(code.as_deref())));
+    }
+    serde_json::from_str::<OfficialViewerSessionBridgeRequest>(&text)
+        .map_err(|_| PlanError::Failed("시청 주소를 읽지 못했어요.".to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    fn pairs(url: &str) -> Vec<(String, String)> {
+        query_pairs(&tauri::Url::parse(url).expect("url"))
+    }
+
+    #[test]
+    fn progress_reports_are_parsed_from_the_signal_url() {
+        let progress = progress_from_pairs(&pairs(
+            "ssu-watch://progress?time=69.4&duration=450&main=1&paused=0&rendering=1&frame=child",
+        ))
+        .expect("progress");
+        assert_eq!(
+            progress,
+            Progress {
+                position: 69.4,
+                duration: 450.0,
+                main: true,
+                paused: false,
+                rendering: true,
+            }
+        );
+        let covered = progress_from_pairs(&pairs(
+            "ssu-watch://progress?time=3&duration=6&main=0&paused=1&rendering=0",
+        ))
+        .expect("progress");
+        assert!(!covered.main && covered.paused && !covered.rendering);
+    }
+
+    #[test]
+    fn broken_progress_reports_are_ignored() {
+        assert_eq!(progress_from_pairs(&pairs("ssu-watch://progress")), None);
+        assert_eq!(
+            progress_from_pairs(&pairs("ssu-watch://progress?time=abc&duration=10")),
+            None
+        );
+        assert_eq!(
+            progress_from_pairs(&pairs("ssu-watch://progress?time=-4&duration=10")),
+            None
+        );
+        assert_eq!(
+            progress_from_pairs(&pairs("ssu-watch://progress?time=NaN&duration=10")),
+            None
+        );
+    }
+
+    #[test]
+    fn queue_request_is_cleaned_deduplicated_and_must_not_be_empty() {
+        let request = WatchQueueStartRequest {
+            course_id: " 44070 ".to_string(),
+            course_name: "UX".to_string(),
+            items: vec![
+                WatchQueueItemInput {
+                    module_item_id: "1".into(),
+                    title: " 1주차 ".into(),
+                    duration: Some(600.0),
+                },
+                WatchQueueItemInput {
+                    module_item_id: "1".into(),
+                    title: "dup".into(),
+                    duration: None,
+                },
+                WatchQueueItemInput {
+                    module_item_id: " ".into(),
+                    title: "no id".into(),
+                    duration: None,
+                },
+                WatchQueueItemInput {
+                    module_item_id: "2".into(),
+                    title: "".into(),
+                    duration: Some(-1.0),
+                },
+            ],
+        };
+        let items = queue_items(&request).expect("items");
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].title, "1주차");
+        assert_eq!(items[0].duration_secs, Some(600.0));
+        assert_eq!(items[1].title, "강의");
+        assert_eq!(items[1].duration_secs, None);
+
+        let empty = WatchQueueStartRequest {
+            course_id: "1".into(),
+            course_name: String::new(),
+            items: Vec::new(),
+        };
+        assert_eq!(queue_items(&empty).unwrap_err(), "empty_watch_queue");
+        let no_course = WatchQueueStartRequest {
+            course_id: " ".into(),
+            ..request
+        };
+        assert_eq!(queue_items(&no_course).unwrap_err(), "missing_course_id");
+    }
+
+    /// One-shot HTTP server: returns the raw request it received.
+    fn serve_once(status_line: &str, body: &str) -> (String, std::thread::JoinHandle<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let address = listener.local_addr().expect("addr");
+        let response = format!(
+            "HTTP/1.1 {status_line}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut received = Vec::new();
+            let mut buffer = [0u8; 4096];
+            loop {
+                let read = stream.read(&mut buffer).expect("read");
+                received.extend_from_slice(&buffer[..read]);
+                let text = String::from_utf8_lossy(&received).to_string();
+                if let Some((head, rest)) = text.split_once("\r\n\r\n") {
+                    let length = head
+                        .lines()
+                        .find_map(|line| {
+                            line.to_ascii_lowercase()
+                                .strip_prefix("content-length:")
+                                .map(|value| value.trim().parse::<usize>().unwrap_or(0))
+                        })
+                        .unwrap_or(0);
+                    if rest.len() >= length {
+                        break;
+                    }
+                }
+                if read == 0 {
+                    break;
+                }
+            }
+            stream.write_all(response.as_bytes()).expect("write");
+            String::from_utf8_lossy(&received).to_string()
+        });
+        (format!("http://{address}"), handle)
+    }
+
+    #[test]
+    fn plan_call_sends_token_and_ids_and_reads_the_bridge_payload() {
+        let payload = r#"{"ok":true,"error_code":null,"title":"3주차","viewer_url":"https://commons.ssu.ac.kr/viewer","launch_url":"https://canvas.ssu.ac.kr/courses/7/modules/items/9","cookies":[{"name":"xn_api_token","value":"secret","domain":"canvas.ssu.ac.kr","path":"/","secure":true,"http_only":true,"same_site":null}],"diagnostics":{"cookie_count":1}}"#;
+        let (base, handle) = serve_once("200 OK", payload);
+        let plan =
+            fetch_session_bridge_plan(&base, Some("tok-123"), "7", "9", "UX방법론").expect("plan");
+        let received = handle.join().expect("server");
+        assert!(
+            received.starts_with("POST /api/watch/session-bridge-plan HTTP/1.1"),
+            "{received}"
+        );
+        assert!(received
+            .to_ascii_lowercase()
+            .contains("x-ssu-token: tok-123"));
+        assert!(received.contains(r#""course_id":"7""#), "{received}");
+        assert!(received.contains(r#""module_item_id":"9""#), "{received}");
+        assert_eq!(plan.title.as_deref(), Some("3주차"));
+        assert_eq!(plan.cookies.len(), 1);
+        let target = session_bridge_target(&plan).expect("target");
+        assert_eq!(
+            target.as_str(),
+            "https://canvas.ssu.ac.kr/courses/7/modules/items/9"
+        );
+    }
+
+    #[test]
+    fn plan_call_maps_login_loss_and_backend_errors() {
+        let (base, handle) = serve_once(
+            "401 Unauthorized",
+            r#"{"ok":false,"error_code":"session_expired"}"#,
+        );
+        assert_eq!(
+            fetch_session_bridge_plan(&base, None, "7", "9", "c"),
+            Err(PlanError::Auth)
+        );
+        handle.join().expect("server");
+
+        let (base, handle) = serve_once(
+            "401 Unauthorized",
+            r#"{"ok":false,"error_code":"api_token_invalid"}"#,
+        );
+        assert!(matches!(
+            fetch_session_bridge_plan(&base, None, "7", "9", "c"),
+            Err(PlanError::Failed(_))
+        ));
+        handle.join().expect("server");
+
+        let (base, handle) = serve_once(
+            "502 Bad Gateway",
+            r#"{"ok":false,"error_code":"network_error"}"#,
+        );
+        match fetch_session_bridge_plan(&base, None, "7", "9", "c") {
+            Err(PlanError::Failed(reason)) => {
+                assert!(reason.contains("인터넷"), "{reason}");
+                assert!(!reason.contains("network_error"), "{reason}");
+            }
+            other => panic!("{other:?}"),
+        }
+        handle.join().expect("server");
+
+        let (base, handle) = serve_once("200 OK", "not json");
+        assert!(matches!(
+            fetch_session_bridge_plan(&base, None, "7", "9", "c"),
+            Err(PlanError::Failed(_))
+        ));
+        handle.join().expect("server");
+    }
+
+    fn finished_state(finished_ago: Duration) -> RuntimeState {
+        let mut state = RuntimeState::new();
+        state.core = QueueCore::new(vec![QueueItem::new("a", "강의 A", Some(600.0))]);
+        state.core.start();
+        state.core.on_ended();
+        state.finished_at = Instant::now().checked_sub(finished_ago);
+        state
+    }
+
+    #[test]
+    fn menu_bar_shows_the_finished_text_for_ten_minutes_unless_dismissed() {
+        let fresh = View::of(&finished_state(Duration::from_secs(5)));
+        assert!(fresh.tray.visible);
+        assert_eq!(fresh.tray.title, "✓ 1/1 완료");
+        assert_eq!(fresh.badge, None);
+
+        let stale = View::of(&finished_state(Duration::from_secs(
+            FINISHED_VISIBLE_SECS + 5,
+        )));
+        assert!(!stale.tray.visible);
+        assert_eq!(stale.tray.title, "");
+
+        let mut dismissed = finished_state(Duration::from_secs(5));
+        dismissed.finished_acknowledged = true;
+        assert!(!View::of(&dismissed).tray.visible);
+    }
+
+    #[test]
+    fn menu_bar_follows_a_running_queue_and_disappears_when_stopped() {
+        let mut state = RuntimeState::new();
+        assert!(!View::of(&state).tray.visible, "nothing ever ran");
+        state.core = QueueCore::new(
+            (0..3)
+                .map(|n| QueueItem::new(&n.to_string(), &format!("강의 {n}"), Some(600.0)))
+                .collect(),
+        );
+        state.core.start();
+        state.core.report_progress(Progress {
+            position: 69.0,
+            duration: 450.0,
+            main: true,
+            paused: false,
+            rendering: true,
+        });
+        let running = View::of(&state);
+        assert!(running.tray.visible);
+        assert_eq!(running.tray.title, "▶ 1/3 · 6:21 남음");
+        assert_eq!(running.tray.menu.header, "강의 0 · 01:09 / 07:30");
+        assert_eq!(running.tray.menu.total, "전체 남은 시간 약 27분");
+        assert_eq!(running.badge, Some(2));
+        assert_eq!(running.snapshot.index, 0);
+
+        state.core.stop();
+        let stopped = View::of(&state);
+        assert!(!stopped.tray.visible);
+        assert_eq!(stopped.badge, None);
+    }
+
+    #[test]
+    fn runtime_wiring_keeps_the_rules_of_the_playback_window() {
+        let source = include_str!("watch_runtime.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production part");
+        // Small, always on top, user-movable, and never grabbing the keyboard on its own.
+        assert!(production.contains(".always_on_top(true)"));
+        assert!(production.contains(".focused(false)"));
+        assert!(production.contains(".resizable(true)"));
+        assert!(production.contains("WATCH_WINDOW_WIDTH"));
+        assert!(production.contains("with_watch_assist("));
+        // One window serves the queue: later lectures are navigated into it.
+        assert!(production.contains("bridge_session_and_navigate(&window"));
+        // No attempt to fake what the page reports.
+        for forbidden in ["visibilityState", "playbackRate", "set_cookie"] {
+            assert!(!production.contains(forbidden), "{forbidden}");
+        }
+    }
+}

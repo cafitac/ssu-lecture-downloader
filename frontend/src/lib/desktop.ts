@@ -1,5 +1,5 @@
 import type { CachedDeadline } from './reminders';
-import type { BackendConnection, BackendSupervisionStatus, DownloadJobStatus, DownloadResult, NativeDownloadPlanResult, OfficialViewerSessionBridgeResult, RemindersStatus } from './types';
+import type { BackendConnection, BackendSupervisionStatus, DownloadJobStatus, DownloadResult, NativeDownloadPlanResult, OfficialViewerBridgeCookie, OfficialViewerSessionBridgeResult, RemindersStatus, WatchQueueItemInput, WatchQueueState } from './types';
 import { open } from '@tauri-apps/plugin-dialog';
 import { invoke } from '@tauri-apps/api/core';
 import { downloadDir } from '@tauri-apps/api/path';
@@ -101,8 +101,8 @@ export async function openDownloadedFolder(path: string): Promise<void> {
 }
 
 /**
- * Opens an LMS page (an assignment or quiz) in the system browser, where the user is usually
- * signed in already. Only for explicit "open in LMS" actions: lecture playback stays in the app.
+ * Opens an LMS page in the system browser, where the user is usually signed in already. Only
+ * for the explicit "브라우저로 열기" actions; pages normally open in the app (`openLmsPageWindow`).
  */
 export async function openUrlInBrowser(address: string): Promise<void> {
   if (!isTauriRuntime()) {
@@ -149,16 +149,47 @@ export async function openOfficialViewer(url: string, title: string, sessionBrid
   });
 }
 
-export async function openAssistedOfficialViewer(url: string, title: string, sessionBridge?: OfficialViewerSessionBridgeResult): Promise<void> {
-  if (!isTauriRuntime()) {
-    await openOfficialViewer(url, title, sessionBridge);
-    return;
-  }
-  if (sessionBridge) {
-    await invoke<void>('open_assisted_official_viewer_with_session', { request: { ...sessionBridge, title: title || sessionBridge.title || '숭실 LMS 공식 시청 창' } });
-    return;
-  }
-  await invoke<void>('open_assisted_official_viewer', { url, title });
+// ----------------------------------------------------------------- sequential watch
+// The queue itself (state, playback window, menu bar item) lives in the Rust shell; these are
+// thin calls. Browser/Vite mode has no such shell.
+
+export interface WatchQueueStartRequest {
+  course_id: string;
+  course_name: string;
+  items: WatchQueueItemInput[];
+}
+
+export function watchQueueStart(request: WatchQueueStartRequest): Promise<WatchQueueState> {
+  return invoke<WatchQueueState>('watch_queue_start', { request });
+}
+
+export function watchQueueNext(): Promise<WatchQueueState> {
+  return invoke<WatchQueueState>('watch_queue_next');
+}
+
+export function watchQueueStop(): Promise<WatchQueueState> {
+  return invoke<WatchQueueState>('watch_queue_stop');
+}
+
+export function watchQueueStatus(): Promise<WatchQueueState> {
+  return invoke<WatchQueueState>('watch_queue_status');
+}
+
+export async function watchQueueShowWindow(): Promise<void> {
+  await invoke<void>('watch_queue_show_window');
+}
+
+// ------------------------------------------------------------------- LMS page windows
+
+export interface LmsPageWindowRequest {
+  title: string;
+  url: string;
+  cookies: OfficialViewerBridgeCookie[];
+}
+
+/** Opens an LMS page (wiki page, board, assignment, quiz) in a normal app window with the LMS session. */
+export async function openLmsPageWindow(request: LmsPageWindowRequest): Promise<void> {
+  await invoke<void>('open_lms_page_with_session', { request });
 }
 
 export function startNativeDownloadJob(plan: NativeDownloadPlanResult): Promise<DownloadJobStatus> {

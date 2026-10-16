@@ -68,6 +68,10 @@ export interface CourseContentItem {
   size_bytes: number | null;
   file_name: string | null;
   url: string | null;
+  /** LMS id of the page/board/assignment behind the module item (pages and boards). */
+  resource_id?: string | null;
+  /** Wiki pages only: slug or numeric id the Canvas pages API takes. */
+  page_ref?: string | null;
   /** Already-saved file in the download folder (backend lookup), or null. */
   downloaded_path?: string | null;
   published: boolean | null;
@@ -374,4 +378,88 @@ export type WatchDebugEvent = {
   error_message?: string;
 };
 
-export type WatchQueueState = { active: boolean; index: number; total: number };
+export type WatchItemState = 'pending' | 'playing' | 'done' | 'skipped';
+export type WatchPhase = 'idle' | 'opening' | 'playing' | 'stalled' | 'finished';
+
+export interface WatchQueueItemState {
+  module_item_id: string;
+  title: string;
+  state: WatchItemState;
+  reason: string | null;
+  duration_secs: number | null;
+}
+
+/** The sequential-watch queue as the desktop shell holds it (single source of truth). */
+export interface WatchQueueState {
+  active: boolean;
+  phase: WatchPhase;
+  /** Zero based index of the current lecture (`total` once finished). */
+  index: number;
+  total: number;
+  done_count: number;
+  skipped_count: number;
+  current_module_item_id: string | null;
+  current_title: string | null;
+  position_secs: number | null;
+  duration_secs: number | null;
+  remaining_secs: number | null;
+  total_remaining_secs: number;
+  paused: boolean;
+  /** False while the playback window is minimized or covered (the player stops then). */
+  rendering: boolean;
+  items: WatchQueueItemState[];
+}
+
+/** One lecture handed to the desktop shell's queue. */
+export interface WatchQueueItemInput {
+  module_item_id: string;
+  title: string;
+  /** Length in seconds when the lecture list knows it. */
+  duration: number | null;
+}
+
+export interface WatchQueueNotice {
+  kind: 'info' | 'success' | 'error';
+  text: string;
+  /** The LMS login is gone: back to the login screen. */
+  auth_expired: boolean;
+}
+
+export interface LmsSessionBridgeResponse {
+  ok: boolean;
+  error_code: string | null;
+  cookies: OfficialViewerBridgeCookie[];
+  diagnostics: { cookie_count: number; cookie_names: string[] };
+}
+
+export interface PageFile {
+  file_id: string;
+  display_name: string;
+  size: number | null;
+  /** Signed Canvas address; null when Canvas refuses the file. */
+  download_url: string | null;
+  content_type: string | null;
+  /** Already saved in the course folder. */
+  downloaded_path: string | null;
+}
+
+export interface PageFilesResponse {
+  ok: boolean;
+  error_code: string | null;
+  course_id: string;
+  page_ref: string;
+  title: string | null;
+  file_count: number;
+  files: PageFile[];
+}
+
+export interface CanvasFileDownloadResponse {
+  ok: boolean;
+  error_code: string | null;
+  file_id: string;
+  display_name: string | null;
+  output_path: string | null;
+  file_size: number | null;
+  skipped: boolean;
+  written: boolean;
+}

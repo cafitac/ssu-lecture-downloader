@@ -1,4 +1,4 @@
-import type { AudioExtractionResult, BatchDownloadItemResult, BatchDownloadResult, ConflictStrategy, CourseDetailResponse, CoursesResponse, CredentialStatus, DeadlinesResponse, DownloadJobStatus, DownloadOutputFormat, DownloadResult, MediaDependencyInstallResult, MediaDependencyStatusResponse, NativeDownloadPlanResult, OfficialViewerPlanResult, OfficialViewerSessionBridgeResult, PostprocessJobStatus, ProgressEvent, STTProviderStatusResponse, TermsResponse, TranscriptionResult } from './types';
+import type { AudioExtractionResult, BatchDownloadItemResult, BatchDownloadResult, CanvasFileDownloadResponse, ConflictStrategy, CourseDetailResponse, CoursesResponse, CredentialStatus, DeadlinesResponse, DownloadJobStatus, DownloadOutputFormat, DownloadResult, LmsSessionBridgeResponse, MediaDependencyInstallResult, MediaDependencyStatusResponse, NativeDownloadPlanResult, OfficialViewerPlanResult, OfficialViewerSessionBridgeResult, PageFilesResponse, PostprocessJobStatus, ProgressEvent, STTProviderStatusResponse, TermsResponse, TranscriptionResult } from './types';
 import { buildRequestHeaders } from './http';
 import { reportWithPostprocess } from './postprocess';
 import type { PostprocessEntry } from './postprocess';
@@ -157,6 +157,33 @@ export function planOfficialViewerSessionBridge(courseId: string | number, modul
   return requestJson<OfficialViewerSessionBridgeResult>('/api/watch/session-bridge-plan', {
     method: 'POST',
     body: downloadPayload(courseId, moduleItemId, courseName, '', 'rename'),
+  });
+}
+
+/** LMS cookies for an in-app page window (the desktop shell injects them into the new web view). */
+export function fetchLmsSessionBridge(): Promise<LmsSessionBridgeResponse> {
+  return requestJson<LmsSessionBridgeResponse>('/api/lms/session-bridge', { method: 'POST' });
+}
+
+/** Files linked from a wiki page ("1주차 강의자료"), each with name, size and download state. */
+export function fetchPageFiles(courseId: string | number, pageRef: string, courseName: string, outputDir: string): Promise<PageFilesResponse> {
+  const params = new URLSearchParams();
+  if (courseName) params.set('course_name', courseName);
+  if (outputDir.trim()) params.set('output_dir', outputDir.trim());
+  return requestJson<PageFilesResponse>(`/api/courses/${encodeURIComponent(String(courseId))}/pages/${encodeURIComponent(pageRef)}/files?${params.toString()}`);
+}
+
+/** Saves one Canvas file into the course folder (an existing file is kept). */
+export function downloadCanvasFile(courseId: string | number, fileId: string, courseName: string, outputDir: string, conflictStrategy: ConflictStrategy = 'skip'): Promise<CanvasFileDownloadResponse> {
+  return requestJson<CanvasFileDownloadResponse>('/api/download/canvas-file', {
+    method: 'POST',
+    body: JSON.stringify({
+      course_id: courseId,
+      file_id: fileId,
+      course_name: courseName,
+      output_dir: outputDir.trim() || undefined,
+      conflict_strategy: conflictStrategy,
+    }),
   });
 }
 

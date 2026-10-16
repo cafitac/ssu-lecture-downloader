@@ -1,9 +1,9 @@
 import { taskDeadline, taskStatus } from '../lib/deadline';
 import type { TaskStatus } from '../lib/deadline';
-import { itemKey, lmsItemUrl } from '../lib/content';
+import { itemKey, itemPageUrl } from '../lib/content';
 import type { CourseContentItem } from '../lib/types';
 import { DeadlineCell } from './DeadlineCell';
-import { ExternalIcon } from './Icons';
+import { ExternalIcon, WindowIcon } from './Icons';
 
 const STATUS_CHIP: Record<TaskStatus, { className: string; text: string }> = {
   done: { className: 'chip chip-success', text: '완료' },
@@ -13,12 +13,16 @@ const STATUS_CHIP: Record<TaskStatus, { className: string; text: string }> = {
 
 interface Props {
   tasks: CourseContentItem[];
+  courseId: string | number;
   now: Date;
+  /** Opens the task in an app window (primary action). */
   onOpen: (item: CourseContentItem) => void;
+  /** Opens the task in the system browser (secondary action). */
+  onOpenInBrowser: (item: CourseContentItem) => void;
 }
 
 /** Assignments and quizzes of a course. Rows are not selectable: there is nothing to download. */
-export function TaskList({ tasks, now, onOpen }: Props) {
+export function TaskList({ tasks, courseId, now, onOpen, onOpenInBrowser }: Props) {
   return (
     <div className="lecture-table is-task" role="group" aria-label="과제·퀴즈 목록">
       <div className="lecture-head">
@@ -30,7 +34,7 @@ export function TaskList({ tasks, now, onOpen }: Props) {
       </div>
       {tasks.map((item, index) => {
         const status = STATUS_CHIP[taskStatus(item, now)];
-        const url = lmsItemUrl(item.url);
+        const url = itemPageUrl(item, courseId);
         return (
           <div key={itemKey(item) ?? `task-${index}`} className="task-row">
             <span className="cell-title" title={item.title}>{item.title}</span>
@@ -41,10 +45,20 @@ export function TaskList({ tasks, now, onOpen }: Props) {
               <button
                 type="button"
                 className="btn btn-icon btn-ghost btn-sm"
-                aria-label={`${item.title} LMS에서 열기`}
-                title={url ? 'LMS에서 열기' : 'LMS 주소를 알 수 없어요'}
+                aria-label={`${item.title} 앱에서 열기`}
+                title={url ? '앱 안에서 열기' : 'LMS 주소를 알 수 없어요'}
                 disabled={url === null}
                 onClick={() => onOpen(item)}
+              >
+                <WindowIcon />
+              </button>
+              <button
+                type="button"
+                className="btn btn-icon btn-ghost btn-sm"
+                aria-label={`${item.title} 브라우저로 열기`}
+                title={url ? '브라우저로 열기' : 'LMS 주소를 알 수 없어요'}
+                disabled={url === null}
+                onClick={() => onOpenInBrowser(item)}
               >
                 <ExternalIcon />
               </button>
