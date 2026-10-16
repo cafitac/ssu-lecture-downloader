@@ -113,3 +113,20 @@ def test_download_to_plan_creates_course_dir_and_writes_response_bytes(tmp_path:
             {'headers': {'Referer': 'https://commons.ssu.ac.kr/em/id'}, 'allow_redirects': True, 'timeout': 10800, 'stream': True},
         )
     ]
+
+
+def test_skip_reuses_a_file_saved_earlier_under_another_title(tmp_path):
+    from ssu_lecture_downloader.download import plan_download_path
+
+    course_dir = tmp_path / 'UI디자인'
+    course_dir.mkdir()
+    earlier = course_dir / 'Ui_6주차_03 [6ac8fceb2f43d].mp4'
+    earlier.write_bytes(b'video')
+
+    plan = plan_download_path(output_dir=tmp_path, course_name='UI디자인', lecture_title='5주차_03_정리하기', content_id='6ac8fceb2f43d', extension='mp4', conflict_strategy='skip')
+    assert plan.file_path == earlier
+    assert plan.file_exists is True
+
+    fresh = plan_download_path(output_dir=tmp_path, course_name='UI디자인', lecture_title='5주차_02_웹접근성', content_id='aaaaaaaaaaaaa', extension='mp4', conflict_strategy='skip')
+    assert fresh.file_path.name == '5주차_02_웹접근성 [aaaaaaaaaaaaa].mp4'
+    assert fresh.file_exists is False

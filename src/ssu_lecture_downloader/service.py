@@ -1600,7 +1600,8 @@ class SsuLectureService:
             course_id=course_id,
             module_item_id=module_item_id,
             attendance_item_id=str(attendance_item_id) if attendance_item_id is not None else None,
-            title=download.title or media.title,
+            # The LMS lecture title, as the user sees it in the app; the media server's own name is a fallback.
+            title=media.title or download.title,
             content_id=download.content_id,
             content_type=media.content_type,
             duration=media.duration,

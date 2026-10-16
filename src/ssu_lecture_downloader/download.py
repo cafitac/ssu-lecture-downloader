@@ -65,6 +65,17 @@ def safe_filename(value: str, fallback: str = 'lecture') -> str:
     return cleaned or fallback
 
 
+def _existing_with_content_id(course_dir: Path, content_id: str, extension: str) -> Path | None:
+    if not content_id or content_id == 'content':
+        return None
+    marker = f'[{content_id}].{extension}'
+    try:
+        matches = sorted(entry for entry in course_dir.iterdir() if entry.is_file() and entry.name.endswith(marker))
+    except OSError:
+        return None
+    return matches[0] if matches else None
+
+
 def plan_download_path(
     *,
     output_dir: Path,
@@ -80,6 +91,12 @@ def plan_download_path(
     course_dir = output_dir / safe_filename(course_name, fallback='course')
     stem = safe_filename(f'{lecture_title} [{content_id}]')
     original = course_dir / f'{stem}.{normalized_extension}'
+    if conflict_strategy != 'rename' and not original.exists():
+        # Files saved earlier under another title (e.g. the media server's name) are matched
+        # by their `[content_id]`, so a re-download does not duplicate them.
+        earlier = _existing_with_content_id(course_dir, content_id, normalized_extension)
+        if earlier is not None:
+            original = earlier
     original_exists = original.exists()
     candidate = original
     if conflict_strategy == 'rename':
