@@ -608,9 +608,33 @@ fn open_item(app: &AppHandle, epoch: u64, index: usize) {
         })
     });
     let Some(job) = job else {
+        wlog(
+            app,
+            format!("open_item epoch={epoch} index={index}: stale before start"),
+        );
         return;
     };
-    match plan_and_show(app, epoch, index, &job) {
+    wlog(
+        app,
+        format!(
+            "open_item epoch={epoch} index={index} item={}",
+            job.module_item_id
+        ),
+    );
+    let outcome = plan_and_show(app, epoch, index, &job);
+    wlog(
+        app,
+        format!(
+            "open_item index={index} outcome={}",
+            match &outcome {
+                Ok(()) => "ok".to_string(),
+                Err(OpenError::Stale) => "stale".to_string(),
+                Err(OpenError::Auth) => "auth".to_string(),
+                Err(OpenError::Failed(reason)) => format!("failed: {reason}"),
+            }
+        ),
+    );
+    match outcome {
         Ok(()) | Err(OpenError::Stale) => {}
         Err(OpenError::Auth) => {
             let (label, view) = update(app, |state| {
@@ -655,6 +679,31 @@ fn open_item(app: &AppHandle, epoch: u64, index: usize) {
     }
 }
 
+/// Step log for the playback window (`<app log dir>/watch.log`), for diagnosing runtime issues.
+/// It records ids, stages and signal kinds only, never cookies or full URLs with tokens.
+fn wlog(app: &AppHandle, message: impl AsRef<str>) {
+    use std::io::Write;
+    let line = format!(
+        "{:?} {}\n",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or_default(),
+        message.as_ref()
+    );
+    eprint!("watch: {line}");
+    if let Ok(dir) = app.path().app_log_dir() {
+        let _ = std::fs::create_dir_all(&dir);
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(dir.join("watch.log"))
+        {
+            let _ = file.write_all(line.as_bytes());
+        }
+    }
+}
+
 fn stale(app: &AppHandle, epoch: u64) -> bool {
     read(app, |state| state.core.epoch() != epoch)
 }
@@ -680,8 +729,25 @@ fn plan_and_show(
         PlanError::Auth => OpenError::Auth,
         PlanError::Failed(reason) => OpenError::Failed(reason),
     })?;
+    wlog(
+        app,
+        format!(
+            "plan ok cookies={} launch={} viewer={}",
+            plan.cookies.len(),
+            plan.launch_url.is_some(),
+            plan.viewer_url.is_some()
+        ),
+    );
     let target = session_bridge_target(&plan)
         .map_err(|_| OpenError::Failed("시청 주소를 찾지 못했어요.".to_string()))?;
+    wlog(
+        app,
+        format!(
+            "target host={} path={}",
+            target.host_str().unwrap_or_default(),
+            target.path()
+        ),
+    );
     if stale(app, epoch) {
         return Err(OpenError::Stale);
     }
@@ -751,6 +817,10 @@ fn show_in_window_on_main(
     let title = window_title(index, job.total, &job.title);
     let existing = read(app, |state| state.window_label.clone())
         .and_then(|label| app.get_webview_window(&label));
+    wlog(
+        app,
+        format!("on main thread; existing window={}", existing.is_some()),
+    );
     let window = match existing {
         Some(window) => {
             let _ = window.set_title(&title);
@@ -785,8 +855,16 @@ fn show_in_window_on_main(
     };
     // Quiet the current page first so its signals cannot replace this navigation.
     let _ = window.eval("window.__SSU_WATCH_SILENT__ = true;");
-    bridge_session_and_navigate(&window, &plan.cookies, target)
-        .map_err(|_| OpenError::Failed("재생 페이지를 불러오지 못했어요.".to_string()))
+    wlog(app, "bridging cookies and navigating");
+    let result = bridge_session_and_navigate(&window, &plan.cookies, target);
+    wlog(
+        app,
+        format!(
+            "bridge result={:?}",
+            result.as_ref().map(|_| ()).map_err(|e| e.clone())
+        ),
+    );
+    result.map_err(|_| OpenError::Failed("재생 페이지를 불러오지 못했어요.".to_string()))
 }
 
 /// The monitor the user is working on: the main window's, else the primary one.
@@ -837,10 +915,24 @@ fn create_watch_window(
     }
     let signal_app = app.clone();
     let signal_label = label.to_string();
+    let load_app = app.clone();
     let window = with_watch_assist(builder, move |url| {
         handle_signal(&signal_app, &signal_label, url)
     })
+    .on_page_load(move |_, payload| {
+        let url = payload.url();
+        wlog(
+            &load_app,
+            format!(
+                "page {:?} host={} path={}",
+                payload.event(),
+                url.host_str().unwrap_or_default(),
+                url.path()
+            ),
+        );
+    })
     .build()?;
+    wlog(app, format!("window created label={label}"));
     let gone_app = app.clone();
     let gone_label = label.to_string();
     window.on_window_event(move |event| {
@@ -877,6 +969,14 @@ fn handle_signal(app: &AppHandle, label: &str, url: &tauri::Url) {
     }
     let pairs = query_pairs(url);
     let kind = url.host_str().unwrap_or_default();
+    let stage = pair(&pairs, "stage").unwrap_or_default().to_string();
+    wlog(
+        app,
+        format!(
+            "signal {kind} {stage} frame={}",
+            pair(&pairs, "frame").unwrap_or_default()
+        ),
+    );
     if matches!(kind, "progress" | "ended" | "stalled") && !read(app, |state| state.accepting) {
         return;
     }
