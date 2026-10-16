@@ -1,9 +1,12 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import type { MediaDependencies } from '../hooks/useMediaDependencies';
+import type { RemoteStt } from '../hooks/useRemoteStt';
 import { useReminders } from '../hooks/useReminders';
 import { formatDeadline } from '../lib/deadline';
 import { isTauriRuntime } from '../lib/desktop';
-import type { WatchDebugEvent } from '../lib/types';
+import { MAC_STUDIO_PRESET, REMOTE_KIND_LABEL, REMOTE_STT_NOTE, draftFromStatus, patchFromDraft, remoteSummary } from '../lib/remoteStt';
+import type { RemoteSttDraft } from '../lib/remoteStt';
+import type { RemoteSttKind, WatchDebugEvent } from '../lib/types';
 import { Dialog } from './Dialog';
 import { FolderIcon } from './Icons';
 import { Spinner } from './Screens';
@@ -24,6 +27,134 @@ function ComponentRow({ name, ready, unsupported = false }: { name: string; read
     <li className="setting-row">
       <span>{name}</span>
       {unsupported ? <span className="chip">지원 안 함</span> : ready === null ? <span className="chip">확인 중</span> : ready ? <span className="chip chip-success">사용 가능</span> : <span className="chip chip-warning">설치 필요</span>}
+    </li>
+  );
+}
+
+function RemoteSttSection({ remote }: { remote: RemoteStt }) {
+  const { status, busy } = remote;
+  const [draft, setDraft] = useState<RemoteSttDraft>(() => draftFromStatus(status));
+  const [formError, setFormError] = useState<string | null>(null);
+  // Every successful save returns the stored settings; the form follows them (and forgets the typed API key).
+  useEffect(() => setDraft(draftFromStatus(status)), [status]);
+  const working = busy !== null;
+  const openAiKind = draft.kind === 'openai_compatible';
+  const usesTunnel = draft.tunnelHost.trim() !== '';
+  const summary = remoteSummary(status);
+
+  function edit<K extends keyof RemoteSttDraft>(key: K, value: RemoteSttDraft[K]) {
+    setDraft((current) => ({ ...current, [key]: value }));
+    setFormError(null);
+  }
+
+  async function saveForm(enabled?: boolean): Promise<boolean> {
+    const built = patchFromDraft(draft, status);
+    if ('error' in built) {
+      setFormError(built.error);
+      return false;
+    }
+    setFormError(null);
+    return remote.save(enabled === undefined ? built.patch : { ...built.patch, enabled });
+  }
+
+  async function toggle(enabled: boolean) {
+    if (!enabled) {
+      await remote.save({ enabled: false });
+      return;
+    }
+    await saveForm(true);
+  }
+
+  async function usePreset() {
+    setFormError(null);
+    if (await remote.save(MAC_STUDIO_PRESET)) await remote.check();
+  }
+
+  async function checkConnection() {
+    if (await saveForm()) await remote.check();
+  }
+
+  return (
+    <div className="subsetting">
+      <h4>
+        원격 자막 서버{' '}
+        <span className={`chip${summary.tone === 'success' ? ' chip-success' : summary.tone === 'warning' ? ' chip-warning' : ''}`}>{summary.label}</span>
+      </h4>
+      <label className="switch">
+        <input
+          type="checkbox"
+          role="switch"
+          checked={status?.enabled ?? false}
+          disabled={status === null || working}
+          onChange={(event) => void toggle(event.currentTarget.checked)}
+        />
+        <span className="switch-track" aria-hidden="true" />
+        원격 서버로 자막 만들기
+      </label>
+      <div className="setting-actions">
+        <button type="button" className="btn btn-sm" disabled={status === null || working} onClick={() => void usePreset()}>Mac Studio 사용</button>
+      </div>
+      <div className="form-grid">
+        <label className="field">
+          <span>종류</span>
+          <select className="select" value={draft.kind} disabled={working} onChange={(event) => edit('kind', event.currentTarget.value as RemoteSttKind)}>
+            {(Object.keys(REMOTE_KIND_LABEL) as RemoteSttKind[]).map((kind) => <option key={kind} value={kind}>{REMOTE_KIND_LABEL[kind]}</option>)}
+          </select>
+        </label>
+        <label className="field">
+          <span>주소</span>
+          <input type="text" value={draft.baseUrl} placeholder="http://127.0.0.1:8795" disabled={working || usesTunnel} autoComplete="off" spellCheck={false} onChange={(event) => edit('baseUrl', event.currentTarget.value)} />
+        </label>
+        {openAiKind && (
+          <>
+            <label className="field">
+              <span>모델</span>
+              <input type="text" value={draft.model} placeholder="whisper-1" disabled={working} autoComplete="off" spellCheck={false} onChange={(event) => edit('model', event.currentTarget.value)} />
+            </label>
+            <label className="field">
+              <span>API 키</span>
+              <input type="password" value={draft.apiKey} placeholder={status?.api_key_set ? '저장돼 있어요 (바꾸려면 새로 입력)' : '필요한 서버만 입력'} disabled={working} autoComplete="off" onChange={(event) => edit('apiKey', event.currentTarget.value)} />
+            </label>
+          </>
+        )}
+        <label className="field">
+          <span>SSH 터널 호스트</span>
+          <input type="text" value={draft.tunnelHost} placeholder="macstudio (쓰지 않으면 비워 두세요)" disabled={working} autoComplete="off" spellCheck={false} onChange={(event) => edit('tunnelHost', event.currentTarget.value)} />
+        </label>
+        {usesTunnel && (
+          <label className="field">
+            <span>원격 포트</span>
+            <input type="text" inputMode="numeric" value={draft.tunnelRemotePort} placeholder="8795" disabled={working} autoComplete="off" onChange={(event) => edit('tunnelRemotePort', event.currentTarget.value)} />
+          </label>
+        )}
+      </div>
+      {usesTunnel && <p className="muted small">SSH 터널을 쓰면 주소는 자동으로 정해져요. 터널은 필요할 때 앱이 열고, 앱을 끄면 닫혀요.</p>}
+      <div className="setting-actions">
+        <button type="button" className="btn btn-sm" disabled={status === null || working} onClick={() => void checkConnection()}>
+          {busy === 'checking' ? <><Spinner />확인하는 중…</> : '연결 확인'}
+        </button>
+        <button type="button" className="btn btn-sm" disabled={status === null || working} onClick={() => void saveForm()}>
+          {busy === 'saving' ? <><Spinner />저장하는 중…</> : '저장'}
+        </button>
+        {openAiKind && status?.api_key_set && (
+          <button type="button" className="btn btn-sm" disabled={working} onClick={() => void remote.save({ api_key: '' })}>API 키 지우기</button>
+        )}
+      </div>
+      {formError && <p className="notice notice-danger" role="alert">{formError}</p>}
+      {remote.outcome && (remote.outcome.ok
+        ? <p className="small" role="status">{remote.outcome.text}</p>
+        : <p className="notice notice-danger" role="alert">{remote.outcome.text}</p>)}
+      <p className="muted small">{REMOTE_STT_NOTE}</p>
+    </div>
+  );
+}
+
+function RemoteComponentRow({ remote }: { remote: RemoteStt }) {
+  const summary = remoteSummary(remote.status);
+  return (
+    <li className="setting-row">
+      <span>자막 생성 (원격)</span>
+      <span className={`chip${summary.tone === 'success' ? ' chip-success' : ' chip-warning'}`}>{summary.label}</span>
     </li>
   );
 }
@@ -117,9 +248,15 @@ export function SettingsDialog({ downloadDir, busy, media, debugEvents, onPickFo
         <h3>음성·자막 구성요소</h3>
         <ul className="setting-list">
           <ComponentRow name="음성 변환" ready={known ? media.ffmpegDependency?.available ?? null : null} />
-          <ComponentRow name="자막 생성" ready={known ? media.whisperStatus?.available ?? null : null} unsupported={media.subtitlesUnsupportedReason !== null} />
+          {media.subtitlesViaRemote
+            ? <RemoteComponentRow remote={media.remote} />
+            : <ComponentRow name="자막 생성" ready={known ? media.whisperStatus?.available ?? null : null} unsupported={media.subtitlesUnsupportedReason !== null} />}
         </ul>
-        <p className="muted small">{media.subtitlesUnsupportedReason ?? '자막은 Whisper large-v3 모델로 만들어요. 처음 만들 때는 모델을 준비하느라 오래 걸릴 수 있어요.'}</p>
+        <p className="muted small">
+          {media.subtitlesViaRemote
+            ? '자막은 원격 서버가 만들어요. 이 Mac에는 자막 엔진을 설치하지 않아도 돼요.'
+            : media.subtitlesUnsupportedReason ?? '자막은 Whisper large-v3 모델로 만들어요. 처음 만들 때는 모델을 준비하느라 오래 걸릴 수 있어요.'}
+        </p>
         <div className="setting-actions">
           {missing.length > 0 && (
             <button
@@ -137,6 +274,7 @@ export function SettingsDialog({ downloadDir, busy, media, debugEvents, onPickFo
         {missing.length > 0 && !media.autoInstallAvailable && media.autoInstallUnavailableReason && (
           <p className="muted small">{media.autoInstallUnavailableReason}</p>
         )}
+        <RemoteSttSection remote={media.remote} />
       </section>
 
       <section className="setting">

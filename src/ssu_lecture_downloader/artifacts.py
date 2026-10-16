@@ -31,12 +31,13 @@ class _ItemPaths:
     text: Path
     md: Path
     json: Path
+    srt: Path
 
     @classmethod
     def for_video(cls, video_path: Path, audio_format: str) -> _ItemPaths:
         audio = postprocess_media.plan_audio_output_path(video_path, video_path.parent, audio_format)  # type: ignore[arg-type]
         text, md, json_path = stt.transcript_output_paths(audio, video_path.parent)
-        return cls(video=video_path, audio=audio, text=text, md=md, json=json_path)
+        return cls(video=video_path, audio=audio, text=text, md=md, json=json_path, srt=stt.transcript_srt_path(audio, video_path.parent))
 
     @property
     def transcript_exists(self) -> bool:
@@ -242,14 +243,18 @@ class ArtifactPipeline:
     def _ensure_transcript(self, paths: _ItemPaths, audio_path: Path, context: dict[str, Any]) -> str | None:
         request = self.request
         if paths.transcript_exists and not request.overwrite_artifacts:
-            self._add_artifact({"kind": "txt", "ok": True, "audio_path": str(audio_path), "text_path": str(paths.text), "md_path": str(paths.md), "json_path": str(paths.json), "segments": [], "file_exists": True, "skipped": True})
+            self._add_artifact({"kind": "txt", "ok": True, "audio_path": str(audio_path), "text_path": str(paths.text), "md_path": str(paths.md), "json_path": str(paths.json), "srt_path": str(paths.srt) if paths.srt.exists() else None, "segments": [], "file_exists": True, "skipped": True})
             self.on_progress({"stage": "transcript_skipped", **context, "output_path": str(paths.text), "progress_percent": 100})
             return None
         if not audio_path.exists():
             return "audio_not_found"
-        self.on_progress({"stage": "transcribing", **context, "output_path": str(audio_path), "provider": request.stt_provider, "model": request.stt_model})
+        use_remote = request.stt_provider != "fake" and self.ctx.remote_stt.is_enabled()
+        provider = "remote" if use_remote else request.stt_provider
+        self.on_progress({"stage": "transcribing", **context, "output_path": str(audio_path), "provider": provider, "model": request.stt_model, "remote": use_remote})
         stt_request = stt.TranscriptionRequest(audio_path=audio_path, output_dir=paths.video.parent, provider=request.stt_provider, language=request.stt_language, model=request.stt_model, overwrite=request.overwrite_artifacts)
-        stt_result = stt.transcribe_audio(stt_request, on_progress=self._with_context(context), should_cancel=self.should_cancel)
+        # Prefer a configured remote server over the local engine; the local path keeps its original call.
+        options: dict[str, Any] = {"remote": self.ctx.remote_stt} if use_remote else {}
+        stt_result = stt.transcribe_audio(stt_request, on_progress=self._with_context(context), should_cancel=self.should_cancel, **options)
         self._add_artifact({"kind": "txt", **stt_result.model_dump(mode="json")})
         if not stt_result.ok:
             return stt_result.error_code or "stt_failed"

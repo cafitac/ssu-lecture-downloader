@@ -24,6 +24,7 @@ function RowDetail({ row }: { row: JobRow }) {
   return (
     <span className="row-detail">
       {row.label}
+      {row.note && <> · {row.note}</>}
       {bytes && <> · {bytes}</>}
       {row.percent !== null && row.phase !== 'done' && row.phase !== 'waiting' && <> · {row.percent}%</>}
     </span>

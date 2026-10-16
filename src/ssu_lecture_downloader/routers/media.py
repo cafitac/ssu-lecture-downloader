@@ -70,7 +70,8 @@ def build_router(ctx: AppContext) -> APIRouter:
     # -------------------------------------------------------------- STT
 
     def stt_provider_status_payload() -> list[dict[str, object]]:
-        return [stt.check_stt_provider(provider).model_dump() for provider in ("faster_whisper", "whisper_cpp")]
+        providers = [stt.check_stt_provider(provider).model_dump() for provider in ("faster_whisper", "whisper_cpp")]
+        return [*providers, ctx.remote_stt.provider_status()]
 
     @router.get("/api/stt/providers/status")
     def stt_provider_status() -> dict[str, object]:
@@ -80,7 +81,9 @@ def build_router(ctx: AppContext) -> APIRouter:
     def start_stt_job(request: TranscriptionRequest) -> dict[str, Any]:
         def work(job: Job) -> JobOutcome:
             job.append_progress({"stage": "transcribing", "audio_path": str(request.audio_path), "provider": request.provider, "model": request.model})
-            result = stt.transcribe_audio(request, on_progress=job.append_progress, should_cancel=job.should_cancel)
+            # Only a configured remote server changes the call; the local engine path stays as it was.
+            options: dict[str, Any] = {"remote": ctx.remote_stt} if ctx.remote_stt.is_enabled() else {}
+            result = stt.transcribe_audio(request, on_progress=job.append_progress, should_cancel=job.should_cancel, **options)
             payload = result.model_dump(mode="json")
             if not result.ok:
                 return JobOutcome.failed(result.error_code or "stt_failed", result=payload)

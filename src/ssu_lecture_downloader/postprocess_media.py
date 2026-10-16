@@ -860,3 +860,24 @@ def extract_audio(
     finally:
         partial_path.unlink(missing_ok=True)
     return AudioExtractionResult(ok=True, input_path=input_path, output_path=output_path, file_size=output_path.stat().st_size)
+
+
+def convert_to_stt_wav(input_path: Path, output_path: Path, should_cancel: Callable[[], bool] | None = None) -> None:
+    """16 kHz mono pcm_s16le WAV (what Whisper servers expect) from any audio/video file.
+
+    Raises `FileNotFoundError` when ffmpeg is missing, `MediaCancelled` on cancel and
+    `subprocess.CalledProcessError` when ffmpeg fails.
+    """
+    ffmpeg = bundled_or_system_ffmpeg()
+    if not ffmpeg:
+        raise FileNotFoundError('ffmpeg')
+    _run_ffmpeg(_ffmpeg_command(ffmpeg, input_path, output_path, 'wav'), should_cancel=should_cancel)
+
+
+def cut_audio_segment(input_path: Path, output_path: Path, start: float, end: float, should_cancel: Callable[[], bool] | None = None) -> None:
+    """Copy the [start, end] seconds of a WAV into `output_path` without re-encoding."""
+    ffmpeg = bundled_or_system_ffmpeg()
+    if not ffmpeg:
+        raise FileNotFoundError('ffmpeg')
+    command = [ffmpeg, *FFMPEG_QUIET_ARGS, '-ss', f'{start:.3f}', '-to', f'{end:.3f}', '-i', str(input_path), '-c', 'copy', str(output_path)]
+    _run_ffmpeg(command, should_cancel=should_cancel)

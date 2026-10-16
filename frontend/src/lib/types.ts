@@ -161,6 +161,10 @@ export interface ProgressEvent {
   segment_count?: number;
   duration?: number | null;
   elapsed_seconds?: number | null;
+  /** True when the subtitles are made by the remote STT server. */
+  remote?: boolean;
+  repair_index?: number;
+  repair_total?: number;
 }
 
 export interface DownloadResult {
@@ -291,10 +295,13 @@ export interface TranscriptionResult {
   text_path: string | null;
   md_path: string | null;
   json_path: string | null;
+  srt_path?: string | null;
   segments: TranscriptSegment[];
   error_code: string | null;
   message: string | null;
   install_hint: string | null;
+  /** Non-fatal quality notes, for example a long silent stretch. */
+  warnings?: string[];
 }
 
 export interface STTProviderStatus {
@@ -306,6 +313,40 @@ export interface STTProviderStatus {
   quality_note?: string | null;
   /** False when this machine cannot run the provider at all; installing will not help. */
   platform_supported?: boolean;
+}
+
+export type RemoteSttKind = 'whisper_cpp_server' | 'openai_compatible';
+
+export interface RemoteSttTunnel {
+  host: string;
+  remote_port: number;
+  local_port: number | null;
+}
+
+/** Saved settings of the remote subtitle server. The API key is never returned, only whether one is set. */
+export interface RemoteSttStatus {
+  ok: boolean;
+  enabled: boolean;
+  kind: RemoteSttKind;
+  base_url: string;
+  model: string;
+  api_key_set: boolean;
+  tunnel: RemoteSttTunnel | null;
+  /** `null` until a connection check ran since the last settings change. */
+  reachable: boolean | null;
+  last_error: string | null;
+  error_code: string | null;
+  checked_at: number | null;
+}
+
+/** Partial update; `api_key: ''` removes the key, omitting it keeps the saved one, `tunnel: null` removes the tunnel. */
+export interface RemoteSttConfigPatch {
+  enabled?: boolean;
+  kind?: RemoteSttKind;
+  base_url?: string;
+  model?: string;
+  api_key?: string;
+  tunnel?: { host: string; remote_port: number; local_port?: number | null } | null;
 }
 
 export interface STTProviderStatusResponse {

@@ -1,4 +1,4 @@
-import type { AudioExtractionResult, BatchDownloadItemResult, BatchDownloadResult, CanvasFileDownloadResponse, ConflictStrategy, CourseDetailResponse, CoursesResponse, CredentialStatus, DeadlinesResponse, DownloadJobStatus, DownloadOutputFormat, DownloadResult, LmsSessionBridgeResponse, MediaDependencyInstallResult, MediaDependencyStatusResponse, NativeDownloadPlanResult, OfficialViewerPlanResult, OfficialViewerSessionBridgeResult, PageFilesResponse, PostprocessJobStatus, ProgressEvent, STTProviderStatusResponse, TermsResponse, TranscriptionResult } from './types';
+import type { AudioExtractionResult, BatchDownloadItemResult, BatchDownloadResult, CanvasFileDownloadResponse, ConflictStrategy, CourseDetailResponse, CoursesResponse, CredentialStatus, DeadlinesResponse, DownloadJobStatus, DownloadOutputFormat, DownloadResult, LmsSessionBridgeResponse, MediaDependencyInstallResult, MediaDependencyStatusResponse, NativeDownloadPlanResult, OfficialViewerPlanResult, OfficialViewerSessionBridgeResult, PageFilesResponse, PostprocessJobStatus, ProgressEvent, RemoteSttConfigPatch, RemoteSttStatus, STTProviderStatusResponse, TermsResponse, TranscriptionResult } from './types';
 import { buildRequestHeaders } from './http';
 import { reportWithPostprocess } from './postprocess';
 import type { PostprocessEntry } from './postprocess';
@@ -467,4 +467,17 @@ export function planUncompletedBatch(courseId: string | number, courseName: stri
     method: 'POST',
     body: batchPayload(courseId, courseName, 'uncompleted', outputDir, undefined, conflictStrategy),
   });
+}
+
+export function fetchRemoteSttStatus(): Promise<RemoteSttStatus> {
+  return requestJson<RemoteSttStatus>('/api/stt/remote/status');
+}
+
+export function saveRemoteSttConfig(patch: RemoteSttConfigPatch): Promise<RemoteSttStatus> {
+  return requestJson<RemoteSttStatus>('/api/stt/remote/config', { method: 'PUT', body: JSON.stringify(patch) });
+}
+
+/** Opens the SSH tunnel if needed and probes the server. A failed probe is data (`reachable: false`), not an error. */
+export function checkRemoteStt(): Promise<RemoteSttStatus> {
+  return requestJson<RemoteSttStatus>('/api/stt/remote/check', { method: 'POST' });
 }

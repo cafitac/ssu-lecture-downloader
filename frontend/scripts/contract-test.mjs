@@ -46,6 +46,8 @@ const requiredFiles = [
   'src/lib/deadline.ts',
   'src/hooks/useDeadlines.ts',
   'src/hooks/useReminders.ts',
+  'src/hooks/useRemoteStt.ts',
+  'src/lib/remoteStt.ts',
   'src/lib/reminders.ts',
   'src-tauri/src/reminders.rs',
   'src-tauri/src/launch_agent.rs',
@@ -87,6 +89,7 @@ const uiSourceFiles = [
   ...readTree('src/hooks', ['.ts']),
   'src/lib/progress.ts',
   'src/lib/jobItems.ts',
+  'src/lib/remoteStt.ts',
   'src/lib/errors.ts',
   'src/lib/polling.ts',
   'src/lib/format.ts',
@@ -507,6 +510,92 @@ const progress = await import('../src/lib/progress.ts');
   assert.ok(batchFailed[1].reason.includes('만료'));
   assert.deepEqual(buildJobRows(mp4Plan, job('cancelled', [{ stage: 'download_progress', module_item_id: 1, bytes_written: 1, total_bytes: 10 }])).map((row) => row.phase), ['cancelled', 'cancelled', 'cancelled']);
   assert.deepEqual(buildJobRows(mp4Plan, job('succeeded', [])).map((row) => row.phase), ['done', 'done', 'done']);
+}
+
+// Remote subtitle server: API client, settings UI copy, toggle enabling and progress text.
+{
+  const apiSource = readFileSync(new URL('../src/lib/api.ts', import.meta.url), 'utf8');
+  for (const endpoint of ['/api/stt/remote/status', '/api/stt/remote/config', '/api/stt/remote/check']) {
+    assert.ok(apiSource.includes(endpoint), `API client missing ${endpoint}`);
+  }
+  assert.ok(/'\/api\/stt\/remote\/config', \{ method: 'PUT'/.test(apiSource), 'the remote STT config is saved with PUT');
+
+  const { subtitleSupport, draftFromStatus, patchFromDraft, describeRemoteCheck, remoteSummary, MAC_STUDIO_PRESET, REMOTE_STT_NOTE } = await import('../src/lib/remoteStt.ts');
+
+  // The 자막 toggle: blocked on an unsupported Mac, but unblocked as soon as the remote server is enabled (even if unreachable).
+  const intel = { available: false, platform_supported: false, install_hint: '이 Mac(Intel)에서는 자막 생성을 지원하지 않아요.' };
+  const blocked = subtitleSupport(intel, false);
+  assert.ok(blocked.unsupportedReason.includes('Intel') && blocked.unsupportedReason.includes('원격 자막 서버'));
+  assert.equal(blocked.localMissing, false);
+  assert.deepEqual(subtitleSupport(intel, true), { unsupportedReason: null, localMissing: false, viaRemote: true });
+  // A supported Mac without faster-whisper still needs the install, unless the remote server replaces it.
+  const missing = { available: false, platform_supported: true, install_hint: null };
+  assert.equal(subtitleSupport(missing, false).localMissing, true);
+  assert.equal(subtitleSupport(missing, true).localMissing, false);
+  assert.equal(subtitleSupport({ available: true }, false).localMissing, false);
+  assert.equal(subtitleSupport(undefined, false).unsupportedReason, null);
+  const hookSource = readFileSync(new URL('../src/hooks/useMediaDependencies.ts', import.meta.url), 'utf8');
+  assert.ok(hookSource.includes('subtitleSupport(whisperStatus, remote.enabled)') && hookSource.includes('localMissing ?'), 'media dependencies must route through subtitleSupport');
+  const appSource = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
+  assert.ok(appSource.includes('media.subtitlesUnsupportedReason ? { txt: media.subtitlesUnsupportedReason } : {}'), 'the 자막 toggle is disabled only by subtitlesUnsupportedReason');
+
+  // Preset and form <-> config mapping.
+  assert.deepEqual(MAC_STUDIO_PRESET, { enabled: true, kind: 'whisper_cpp_server', base_url: 'http://127.0.0.1:18795', tunnel: { host: 'macstudio', remote_port: 8795, local_port: 18795 } });
+  const stored = { ok: true, enabled: true, kind: 'whisper_cpp_server', base_url: 'http://127.0.0.1:18795', model: '', api_key_set: false, tunnel: { host: 'macstudio', remote_port: 8795, local_port: 18795 }, reachable: null, last_error: null, error_code: null, checked_at: null };
+  const draft = draftFromStatus(stored);
+  assert.deepEqual(draft, { kind: 'whisper_cpp_server', baseUrl: 'http://127.0.0.1:18795', model: '', apiKey: '', tunnelHost: 'macstudio', tunnelRemotePort: '8795' });
+  assert.deepEqual(draftFromStatus(null).tunnelHost, '');
+  assert.deepEqual(patchFromDraft(draft, stored), { patch: { kind: 'whisper_cpp_server', model: '', tunnel: { host: 'macstudio', remote_port: 8795, local_port: 18795 } } });
+  assert.deepEqual(patchFromDraft({ ...draft, tunnelHost: '  ', baseUrl: ' http://10.0.0.5:8795 ' }, stored), { patch: { kind: 'whisper_cpp_server', model: '', tunnel: null, base_url: 'http://10.0.0.5:8795' } });
+  assert.ok('error' in patchFromDraft({ ...draft, tunnelRemotePort: 'abc' }, stored));
+  assert.ok('error' in patchFromDraft({ ...draft, tunnelRemotePort: '70000' }, stored));
+  // API key: only what was typed is sent, never for whisper.cpp, and an untouched field keeps the saved key.
+  const openai = { ...draft, kind: 'openai_compatible', model: ' whisper-1 ', tunnelHost: '', baseUrl: 'https://stt.example.com' };
+  assert.equal(patchFromDraft(openai, stored).patch.api_key, undefined);
+  assert.deepEqual(patchFromDraft({ ...openai, apiKey: ' sk-typed ' }, stored).patch, { kind: 'openai_compatible', model: 'whisper-1', tunnel: null, base_url: 'https://stt.example.com', api_key: 'sk-typed' });
+  assert.equal(patchFromDraft({ ...draft, apiKey: 'sk-ignored' }, stored).patch.api_key, undefined);
+  assert.equal(patchFromDraft({ ...draft, model: 'ignored' }, stored).patch.model, '');
+
+  // Connection check text and status chip.
+  assert.deepEqual(describeRemoteCheck({ ...stored, reachable: true }), { ok: true, text: '서버에 연결됐어요.' });
+  assert.deepEqual(describeRemoteCheck({ ...stored, reachable: false, last_error: 'SSH 터널을 열지 못했어요.' }), { ok: false, text: 'SSH 터널을 열지 못했어요.' });
+  assert.equal(describeRemoteCheck({ ...stored, reachable: false }).ok, false);
+  assert.deepEqual(remoteSummary({ ...stored, enabled: false }), { label: '꺼짐', tone: 'neutral' });
+  assert.deepEqual(remoteSummary({ ...stored, reachable: true }), { label: '연결됨', tone: 'success' });
+  assert.deepEqual(remoteSummary(stored), { label: '연결 확인 필요', tone: 'warning' });
+  assert.equal(REMOTE_STT_NOTE, '음성은 이 서버로만 보내져요. 외부 공개 주소 대신 SSH 터널 사용을 권장해요.');
+
+  // Settings dialog copy and controls.
+  const dialog = readFileSync(new URL('../src/components/SettingsDialog.tsx', import.meta.url), 'utf8');
+  for (const text of ['원격 자막 서버', '원격 서버로 자막 만들기', 'Mac Studio 사용', '연결 확인', '<span>종류</span>', '<span>주소</span>', '<span>모델</span>', '<span>API 키</span>', '<span>SSH 터널 호스트</span>', '<span>원격 포트</span>', 'REMOTE_STT_NOTE', 'type="password"']) {
+    assert.ok(dialog.includes(text), `settings dialog missing: ${text}`);
+  }
+  assert.ok(/openAiKind && \(\s*<>\s*<label className="field">\s*<span>모델<\/span>/.test(dialog), 'model and API key are only for the OpenAI kind');
+  assert.ok(!/value=\{[^}]*api_key/.test(dialog), 'the saved API key must never be put into an input');
+  assert.ok(dialog.includes('autoComplete="off"'));
+
+  // Progress drawer: remote label and the loop-repair text.
+  const { buildJobRows } = await import('../src/lib/jobItems.ts');
+  const item = { id: '1', rawId: 1, title: 'T1', sizeBytes: 1 };
+  const plan = { courseId: 1, courseName: 'c', kind: 'video', outputs: ['txt'], items: [item] };
+  const run = (events) => buildJobRows(plan, { job_id: 'artifact-1', status: 'running', cancel_requested: false, progress: events, result: null, error_code: null })[0];
+  let row = run([{ stage: 'transcribing', module_item_id: 1, remote: true }, { stage: 'transcript_connecting', module_item_id: 1, remote: true, progress_percent: 2 }]);
+  assert.equal(row.label, '자막 만드는 중 (원격)');
+  assert.equal(row.note, '서버에 연결하는 중');
+  row = run([{ stage: 'transcribing', module_item_id: 1, remote: true }, { stage: 'transcript_repair', module_item_id: 1, remote: true, repair_index: 2, repair_total: 3, progress_percent: 80 }]);
+  assert.deepEqual([row.phase, row.label, row.note, row.percent], ['transcribing', '자막 만드는 중 (원격)', '반복 구간 다시 인식 중 2/3', 80]);
+  row = run([{ stage: 'transcript_repair', module_item_id: 1, remote: true, repair_index: 1, repair_total: 1 }, { stage: 'transcript_progress', module_item_id: 1, remote: true, progress_percent: 99 }]);
+  assert.equal(row.note, undefined);
+  // Local transcription keeps its plain label.
+  row = run([{ stage: 'transcript_progress', module_item_id: 1, progress_percent: 30 }]);
+  assert.deepEqual([row.label, row.note], ['자막 만드는 중', undefined]);
+  assert.ok(readFileSync(new URL('../src/components/DownloadDrawer.tsx', import.meta.url), 'utf8').includes('row.note'));
+
+  // Remote error codes read as plain Korean.
+  const { describeErrorCode, GENERIC_ERROR: genericError } = await import('../src/lib/errors.ts');
+  for (const code of ['stt_remote_unreachable', 'stt_remote_timeout', 'stt_remote_auth_failed', 'ssh_tunnel_failed', 'invalid_ssh_host', 'missing_stt_base_url']) {
+    assert.ok(!describeErrorCode(code).includes(code) && describeErrorCode(code) !== genericError, `${code} needs its own message`);
+  }
 }
 
 // Pure content helpers.

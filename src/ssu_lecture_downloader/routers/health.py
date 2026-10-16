@@ -18,6 +18,7 @@ def build_router(ctx: AppContext) -> APIRouter:
                 "download_jobs",
                 "artifact_download_jobs",
                 "stt_provider_status",
+                "remote_stt",
                 "packaged_media_dependencies",
                 "lms_pages",
             ],

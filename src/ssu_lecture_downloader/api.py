@@ -22,11 +22,13 @@ from ssu_lecture_downloader.api_errors import (
 from ssu_lecture_downloader.app_context import AppContext, default_download_dir
 from ssu_lecture_downloader.credentials import CredentialStore, default_credential_store
 from ssu_lecture_downloader.jobs import JobRunner
+from ssu_lecture_downloader.stt_remote import RemoteSTTService
 from ssu_lecture_downloader.routers import credentials as credentials_routes
 from ssu_lecture_downloader.routers import download as download_routes
 from ssu_lecture_downloader.routers import health as health_routes
 from ssu_lecture_downloader.routers import lms_pages as lms_pages_routes
 from ssu_lecture_downloader.routers import media as media_routes
+from ssu_lecture_downloader.routers import stt_remote as stt_remote_routes
 from ssu_lecture_downloader.routers import watch as watch_routes
 from ssu_lecture_downloader.security import (
     ALLOWED_CORS_ORIGINS,
@@ -54,6 +56,7 @@ def create_app(
     default_output_dir: Path | None = None,
     credential_store: CredentialStore | None = None,
     api_token: str | None = None,
+    remote_stt: RemoteSTTService | None = None,
 ) -> FastAPI:
     app = FastAPI(title="SSU Lecture Downloader Local API")
 
@@ -65,7 +68,7 @@ def create_app(
         CORSMiddleware,
         allow_origins=ALLOWED_CORS_ORIGINS,
         allow_credentials=True,
-        allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+        allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
         allow_headers=["Content-Type", "Accept", API_TOKEN_HEADER],
     )
     app.add_middleware(LoopbackHostMiddleware)
@@ -82,8 +85,9 @@ def create_app(
         default_output_dir=output_dir,
         media_paths=MediaPathPolicy(output_dir),
         runner=JobRunner(error_code_for=lambda exc: background_job_error_code(exc, service)),
+        remote_stt=remote_stt or RemoteSTTService(),
     )
-    for module in (health_routes, credentials_routes, download_routes, media_routes, watch_routes, lms_pages_routes):
+    for module in (health_routes, credentials_routes, download_routes, media_routes, stt_remote_routes, watch_routes, lms_pages_routes):
         # The routes are already built; attach them as-is instead of having FastAPI rebuild each one.
         app.router.routes.extend(module.build_router(ctx).routes)
     return app
