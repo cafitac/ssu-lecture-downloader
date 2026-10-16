@@ -717,7 +717,7 @@ fn show_in_window(
     target: tauri::Url,
 ) -> Result<(), OpenError> {
     // WebKit's cookie store and window creation must run on the main thread, like the
-    // manual viewer's command does; from this worker thread `set_cookie` never returns.
+    // manual viewer's command does; from this worker thread the cookie call never returns.
     let main_app = app.clone();
     let job = job.clone();
     let plan = plan.clone();
