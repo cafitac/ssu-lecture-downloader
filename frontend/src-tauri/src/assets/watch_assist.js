@@ -299,6 +299,8 @@
 
   const clickLikelyPlayControl = () => {
     const selectors = [
+      '#front-screen .vc-front-screen-play-btn',
+      '.vc-front-screen-play-btn',
       '.vjs-big-play-button',
       '.vjs-play-control',
       '.play-button',
@@ -438,6 +440,8 @@
 
   // ------------------------------------------------------------------- main loop
 
+  let lastFrontPlayAt = 0;
+
   debug('installed');
   let ticks = 0;
   const tick = () => {
@@ -451,12 +455,28 @@
       }
       // Answer the dialog until playback has run on for a while.
       if (!playingSince || now - playingSince < 15000) answerResumeDialog(now);
+      // The Commons player shows its big play button before the lecture and again after the
+      // short intro clip; press it like a person would (at most every 5 s).
+      const frontPlay = document.querySelector('#front-screen .vc-front-screen-play-btn, .vc-front-screen-play-btn');
+      const mainPlaying = video && isLikelyMainVideo(video) && !video.paused && !video.ended;
+      // While the player's own start button is up, the player drives what plays next (resume
+      // prompt, intro, lecture): press only that button and do not start videos directly.
+      const frontPlayUp = Boolean(frontPlay && !mainPlaying && isShown(frontPlay));
+      if (frontPlayUp && !findResumeYesButton() && now - lastFrontPlayAt >= 5000) {
+        lastFrontPlayAt = now;
+        try {
+          frontPlay.click();
+          debug('front-play-clicked', { video: videoState(video) });
+        } catch (error) {
+          debug('front-play-error', { error: error && error.name ? error.name : 'unknown' });
+        }
+      }
       if (video && !endedSent) {
         attachVideo(video);
         muteOnce(video);
         if (video.paused && !video.ended) {
           playingSince = 0;
-          tryPlayVideo(video, now);
+          if (!frontPlayUp && isLikelyMainVideo(video)) tryPlayVideo(video, now);
           if (playAttempts >= 2 && now - lastPlayClickAt >= 5000 && !findResumeYesButton()) {
             lastPlayClickAt = now;
             clickLikelyPlayControl();
