@@ -39,56 +39,108 @@
   const RESUME_MAX_CLICKS = 6;
   const OUTBOX_GAP_MS = 150;
   const OUTBOX_MAX = 40;
-
-  const URLS = {
-    debug: 'ssu-watch://debug',
-    progress: 'ssu-watch://progress',
-    heartbeat: 'ssu-watch://heartbeat',
-    ended: 'ssu-watch://ended',
-    stalled: 'ssu-watch://stalled'
-  };
+  const IPC_RETRY_MS = 1000;
+  const SIGNAL_COMMAND = 'watch_signal';
+  const SIGNAL_KINDS = ['debug', 'progress', 'heartbeat', 'ended', 'stalled'];
+  const SIGNAL_VALUE_MAX = 180;
+  const TRUSTED_HOSTS = ['ssu.ac.kr', 'ssu-toast.commonscdn.com'];
 
   // ------------------------------------------------------------------ signalling
-  // Signals travel as navigations to ssu-watch:// URLs that the app intercepts. The page can
-  // only start one navigation at a time without replacing the previous one, so the top frame
-  // sends them one by one; child frames hand theirs to the top frame with postMessage.
+  // Signals reach the app through the Tauri command `watch_signal` (IPC), sent by the top
+  // frame only. Child frames (the cross-origin Commons player) hand theirs to the top frame
+  // with postMessage. A signal is never sent by navigating (`location`): that aborts the
+  // document and iframe loads still in flight. Sending is asynchronous and never throws, so
+  // it cannot hold up the page.
 
-  const encodeQuery = (payload) => Object.entries(payload)
-    .filter(([, value]) => value !== undefined && value !== null && String(value).length > 0)
-    .map(([key, value]) => `${encodeURIComponent(key)}=${encodeURIComponent(String(value).slice(0, 180))}`)
-    .join('&');
+  const cleanPayload = (payload) => {
+    const clean = {};
+    Object.keys(payload).forEach((key) => {
+      const value = payload[key];
+      if (value === undefined || value === null || String(value).length === 0) return;
+      clean[key] = String(value).slice(0, SIGNAL_VALUE_MAX);
+    });
+    return clean;
+  };
+
+  const tauriInvoke = () => {
+    try {
+      const internals = window.__TAURI_INTERNALS__;
+      return internals && typeof internals.invoke === 'function' ? internals : null;
+    } catch (_) {
+      return null;
+    }
+  };
 
   const outbox = [];
   let pumping = false;
+  let rejectionLogged = false;
   // Once the app starts loading the next page (or the page unloads) this page goes quiet,
-  // so a late signal cannot cancel that navigation.
+  // so a late signal from the old page is not mistaken for the next lecture's.
   const silenced = () => window.__SSU_WATCH_SILENT__ === true;
   try {
     window.addEventListener('beforeunload', () => { window.__SSU_WATCH_SILENT__ = true; });
     window.addEventListener('pagehide', () => { window.__SSU_WATCH_SILENT__ = true; });
   } catch (_) {}
+  const send = (entry) => {
+    const internals = tauriInvoke();
+    if (!internals) return false;
+    try {
+      const result = internals.invoke(SIGNAL_COMMAND, { kind: entry.kind, payload: entry.payload });
+      if (result && typeof result.catch === 'function') {
+        result.catch((error) => {
+          if (rejectionLogged) return;
+          rejectionLogged = true;
+          try { console.warn('[watch-assist] signal rejected', error); } catch (_) {}
+        });
+      }
+    } catch (_) {}
+    return true;
+  };
+  // Progress goes out at most every PROGRESS_INTERVAL_MS (the newest report replaces older
+  // waiting ones); everything else is spaced by OUTBOX_GAP_MS.
+  let lastProgressSentAt = 0;
+  const nextSendable = (now) => outbox.findIndex(
+    (entry) => entry.kind !== 'progress' || now - lastProgressSentAt >= PROGRESS_INTERVAL_MS,
+  );
   const pump = () => {
     if (pumping) return;
     pumping = true;
     const step = () => {
       if (silenced()) { outbox.length = 0; pumping = false; return; }
-      const next = outbox.shift();
-      if (!next) { pumping = false; return; }
-      try { window.location.href = `${URLS[next.kind]}?${encodeQuery(next.payload)}`; } catch (_) {}
-      setTimeout(step, OUTBOX_GAP_MS);
+      if (outbox.length === 0) { pumping = false; return; }
+      const now = Date.now();
+      const at = nextSendable(now);
+      let delay = OUTBOX_GAP_MS;
+      if (at < 0) {
+        delay = Math.max(OUTBOX_GAP_MS, PROGRESS_INTERVAL_MS - (now - lastProgressSentAt));
+      } else if (send(outbox[at])) {
+        if (outbox[at].kind === 'progress') lastProgressSentAt = now;
+        outbox.splice(at, 1);
+      } else {
+        // Tauri's IPC is not there (yet): wait, and let the size limit drop the oldest.
+        delay = IPC_RETRY_MS;
+      }
+      setTimeout(step, delay);
     };
-    step();
+    setTimeout(step, 0);
   };
   const enqueue = (kind, payload) => {
-    if (!URLS[kind]) return;
+    if (SIGNAL_KINDS.indexOf(kind) < 0) return;
+    const clean = cleanPayload(payload);
     if (kind === 'progress' || kind === 'heartbeat') {
       // Only the newest status matters.
       for (let index = outbox.length - 1; index >= 0; index -= 1) {
-        if (outbox[index].kind === kind && outbox[index].payload.frame === payload.frame) outbox.splice(index, 1);
+        if (outbox[index].kind === kind && outbox[index].payload.frame === clean.frame) outbox.splice(index, 1);
       }
     }
-    if (kind === 'debug' && outbox.length >= OUTBOX_MAX) return;
-    outbox.push({ kind, payload });
+    if (outbox.length >= OUTBOX_MAX) {
+      // Debug lines go first when the queue is full; the signals that move the queue stay.
+      if (kind === 'debug') return;
+      const debugAt = outbox.findIndex((entry) => entry.kind === 'debug');
+      if (debugAt >= 0) outbox.splice(debugAt, 1);
+      else outbox.shift();
+    }
+    outbox.push({ kind, payload: clean });
     pump();
   };
 
@@ -103,11 +155,21 @@
     } catch (_) {}
   };
 
+  const isTrustedOrigin = (origin) => {
+    try {
+      const hostname = new URL(origin).hostname.toLowerCase();
+      return TRUSTED_HOSTS.some((trusted) => hostname === trusted || hostname.endsWith(`.${trusted}`));
+    } catch (_) {
+      return false;
+    }
+  };
+
   if (isTop) {
     try {
       window.addEventListener('message', (event) => {
         const data = event && event.data;
-        if (!data || data.__SSU_WATCH_SIGNAL__ !== true || !data.payload) return;
+        if (!data || data.__SSU_WATCH_SIGNAL__ !== true || !data.payload || typeof data.payload !== 'object') return;
+        if (!isTrustedOrigin(event.origin)) return;
         enqueue(String(data.kind), { ...data.payload, frame: data.payload.frame || 'child' });
       });
     } catch (_) {}

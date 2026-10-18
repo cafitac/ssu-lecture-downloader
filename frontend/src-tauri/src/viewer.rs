@@ -160,11 +160,8 @@ fn validate_lms_page_url(url: &str) -> Result<tauri::Url, String> {
     Err("unsupported_lms_page_host".to_string())
 }
 
-pub(crate) fn watch_debug_event_from_url(url: &tauri::Url) -> WatchDebugEvent {
-    let mut values: HashMap<String, String> = HashMap::new();
-    for (key, value) in url.query_pairs() {
-        values.insert(key.into_owned(), value.into_owned());
-    }
+/// The debug event the settings screen lists, from the `debug` signal's payload.
+pub(crate) fn watch_debug_event(values: &HashMap<String, String>) -> WatchDebugEvent {
     WatchDebugEvent {
         stage: values
             .get("stage")
@@ -212,8 +209,8 @@ fn bridge_cookie_to_tauri(
     Ok(builder.build())
 }
 
-/// The sequential-watch helper: tries visible `video.play()` and signals
-/// `ssu-watch://ended` when the main video really ends.
+/// The sequential-watch helper: tries visible `video.play()` and reports through the
+/// `watch_signal` command (Tauri IPC) when the main video really ends.
 pub(crate) fn official_watch_assist_script() -> &'static str {
     include_str!("assets/watch_assist.js")
 }
@@ -262,21 +259,14 @@ fn session_viewer_builder<'a>(
     .user_agent(VIEWER_USER_AGENT)
 }
 
-/// Sequential-watch only: install the playback helper and route its `ssu-watch://` signals
-/// (debug, progress, heartbeat, ended, stalled) to `on_signal`. Such navigations never load.
+/// Sequential-watch only: install the playback helper in every frame. Its signals (debug,
+/// progress, heartbeat, ended, stalled) reach the app through the `watch_signal` command, which
+/// the capability `watch-remote` exposes to this window's LMS pages only. They are never sent as
+/// navigations: assigning `location` from the page aborts the document load still in flight.
 pub(crate) fn with_watch_assist<'a>(
     builder: tauri::WebviewWindowBuilder<'a, tauri::Wry, tauri::AppHandle>,
-    on_signal: impl Fn(&tauri::Url) + Send + 'static,
 ) -> tauri::WebviewWindowBuilder<'a, tauri::Wry, tauri::AppHandle> {
-    builder
-        .initialization_script_for_all_frames(official_watch_assist_script())
-        .on_navigation(move |nav_url| {
-            if nav_url.scheme() == "ssu-watch" {
-                on_signal(nav_url);
-                return false;
-            }
-            true
-        })
+    builder.initialization_script_for_all_frames(official_watch_assist_script())
 }
 
 /// Inject the Python-authenticated LMS cookies, then go to the validated target.
@@ -396,10 +386,10 @@ mod tests {
         assert!(script.contains("shouldEmitEnded = true"), "{script}");
         assert!(script.contains("isLikelyMainVideo(video)"), "{script}");
         assert!(script.contains("short-video-ended"), "{script}");
-        assert!(script.contains("ssu-watch://ended"), "{script}");
+        assert!(script.contains("signal('ended'"), "{script}");
         // Sequential mode reports how far the video is and when it stalls.
-        assert!(script.contains("ssu-watch://progress"), "{script}");
-        assert!(script.contains("ssu-watch://stalled"), "{script}");
+        assert!(script.contains("signal('progress'"), "{script}");
+        assert!(script.contains("signal('stalled'"), "{script}");
         assert!(script.contains("STALL_AFTER_MS = 60000"), "{script}");
     }
 
@@ -415,6 +405,33 @@ mod tests {
             "exact button text match: {script}"
         );
         assert!(script.contains("PLAY_RETRY_MAX_MS"), "{script}");
+    }
+
+    #[test]
+    fn watch_viewer_script_signals_over_tauri_ipc_and_never_navigates() {
+        let script = official_watch_assist_script();
+
+        assert!(script.contains("__TAURI_INTERNALS__"), "{script}");
+        assert!(
+            script.contains("SIGNAL_COMMAND = 'watch_signal'"),
+            "{script}"
+        );
+        // Assigning location from the page aborts the document and iframe loads in flight.
+        for forbidden in [
+            "location.href =",
+            "location.href=",
+            "location =",
+            "location=",
+            "location.assign",
+            "location.replace",
+            "ssu-watch",
+        ] {
+            assert!(!script.contains(forbidden), "{forbidden}");
+        }
+        // Child frames hand their reports to the top frame, which checks the sender's origin.
+        assert!(script.contains("window.top.postMessage"), "{script}");
+        assert!(script.contains("isTrustedOrigin(event.origin)"), "{script}");
+        assert!(script.contains("PROGRESS_INTERVAL_MS = 5000"), "{script}");
     }
 
     #[test]
@@ -463,7 +480,7 @@ mod tests {
             !body.contains("official_viewer_autoplay_configuration"),
             "{body}"
         );
-        assert!(!body.contains("ssu-watch://debug"), "{body}");
+        assert!(!body.contains("watch_signal"), "{body}");
 
         // The shared builders it uses must not carry assist hooks either.
         for builder in ["fn base_viewer_builder<", "fn session_viewer_builder<"] {
@@ -512,7 +529,7 @@ mod tests {
             "https://user:pw@canvas.ssu.ac.kr/",
             "https://canvas.ssu.ac.kr:8443/",
             "javascript:alert(1)",
-            "ssu-watch://debug",
+            "ssu-watch://debug", // the old navigation signals are not a valid page address either
             "/courses/1/pages/x",
             "",
         ] {

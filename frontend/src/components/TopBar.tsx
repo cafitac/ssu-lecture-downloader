@@ -1,5 +1,6 @@
 import type { ListState } from '../hooks/useLmsSession';
 import type { TermSummary } from '../lib/types';
+import { watchAllHint, watchAllLabel } from '../lib/watch';
 import { RefreshIcon, SettingsIcon } from './Icons';
 
 /** LMS term names when the backend has them; otherwise this term vs. earlier ones. */
@@ -19,13 +20,18 @@ interface Props {
   /** Items due today or within three days. */
   dueSoonCount: number;
   deadlinesOpen: boolean;
+  /** Open, unwatched videos of every course that the all-course auto playback would play. */
+  watchAllCount: number;
+  watchAllLoading: boolean;
+  queueActive: boolean;
+  onWatchAll: () => void;
   onToggleDeadlines: () => void;
   onTermChange: (termId: number) => void;
   onRefresh: () => void;
   onOpenSettings: () => void;
 }
 
-export function TopBar({ terms, termId, listState, busy, dueSoonCount, deadlinesOpen, onToggleDeadlines, onTermChange, onRefresh, onOpenSettings }: Props) {
+export function TopBar({ terms, termId, listState, busy, dueSoonCount, deadlinesOpen, watchAllCount, watchAllLoading, queueActive, onWatchAll, onToggleDeadlines, onTermChange, onRefresh, onOpenSettings }: Props) {
   const currentTermId = terms.find((term) => term.is_current)?.term_id ?? null;
   const loading = listState === 'loading';
   return (
@@ -44,6 +50,15 @@ export function TopBar({ terms, termId, listState, busy, dueSoonCount, deadlines
         </select>
       )}
       <span className="topbar-spacer" />
+      <button
+        type="button"
+        className="btn btn-sm"
+        disabled={queueActive || watchAllCount === 0}
+        title={watchAllHint(watchAllCount, { queueActive, loading: watchAllLoading })}
+        onClick={onWatchAll}
+      >
+        {watchAllLabel(watchAllCount, queueActive)}
+      </button>
       <button
         type="button"
         className={`btn btn-ghost deadlines-toggle${deadlinesOpen ? ' is-active' : ''}`}

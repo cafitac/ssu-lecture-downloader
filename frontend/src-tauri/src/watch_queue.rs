@@ -105,6 +105,9 @@ impl ItemState {
 #[derive(Clone, Debug, PartialEq)]
 pub struct QueueItem {
     pub module_item_id: String,
+    /// The course this lecture belongs to: a queue may mix courses (all-course auto playback).
+    pub course_id: String,
+    pub course_name: String,
     pub title: String,
     /// Length from the lecture list, in seconds, when known.
     pub duration_secs: Option<f64>,
@@ -115,10 +118,19 @@ impl QueueItem {
     pub fn new(module_item_id: &str, title: &str, duration_secs: Option<f64>) -> Self {
         Self {
             module_item_id: module_item_id.to_string(),
+            course_id: String::new(),
+            course_name: String::new(),
             title: title.to_string(),
             duration_secs: duration_secs.filter(|value| value.is_finite() && *value > 0.0),
             state: ItemState::Pending,
         }
+    }
+
+    /// The course this lecture is opened in.
+    pub fn with_course(mut self, course_id: &str, course_name: &str) -> Self {
+        self.course_id = course_id.to_string();
+        self.course_name = course_name.to_string();
+        self
     }
 }
 
@@ -1093,6 +1105,42 @@ mod tests {
         let (title, body) = skipped_notification("3주차 강의", STALL_SKIP_REASON);
         assert!(title.contains("건너뛰었어요"));
         assert_eq!(body, "3주차 강의 · 재생이 멈춰 건너뛰었어요");
+    }
+
+    #[test]
+    fn items_of_different_courses_play_in_queue_order_each_keeping_its_course() {
+        let mut core = QueueCore::new(vec![
+            QueueItem::new("1", "비전채플 · 7주차", Some(600.0)).with_course("100", "비전채플"),
+            QueueItem::new("2", "자료구조 · 3주차", Some(900.0)).with_course("200", "자료구조"),
+            QueueItem::new("3", "비전채플 · 8주차", None).with_course("100", "비전채플"),
+        ]);
+        let mut played = Vec::new();
+        let mut step = core.start();
+        while let Step::Open(index) = step {
+            let item = &core.items()[index];
+            played.push((item.course_id.clone(), item.module_item_id.clone()));
+            step = if index == 1 {
+                core.skip_current("직접 넘겼어요")
+            } else {
+                core.on_ended()
+            };
+        }
+        assert_eq!(step, Step::Finished);
+        assert_eq!(
+            played,
+            vec![
+                ("100".to_string(), "1".to_string()),
+                ("200".to_string(), "2".to_string()),
+                ("100".to_string(), "3".to_string()),
+            ]
+        );
+        // Totals span the whole queue, whatever the course.
+        let snapshot = core.snapshot();
+        assert_eq!(
+            (snapshot.done_count, snapshot.skipped_count, snapshot.total),
+            (2, 1, 3)
+        );
+        assert_eq!(QueueItem::new("9", "x", None).course_id, "");
     }
 
     #[test]

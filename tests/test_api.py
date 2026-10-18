@@ -1078,6 +1078,7 @@ def test_api_deadlines_lists_items_and_forwards_term_and_refresh(tmp_path):
     payload = plain.json()
     assert payload['ok'] is True and payload['deadline_count'] == 1 and payload['term_ids'] is None
     assert payload['deadlines'][0]['kind'] == 'quiz' and payload['deadlines'][0]['state'] == 'open'
+    assert payload['deadlines'][0]['duration'] is None
     assert refreshed.json()['term_ids'] == [46]
     assert seen == [(None, {}), ([46], {'refresh': True})]
 

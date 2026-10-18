@@ -8,6 +8,7 @@ import { BackendScreen, LoginScreen, SplashScreen } from './components/Screens';
 import { SettingsDialog } from './components/SettingsDialog';
 import { Toasts } from './components/Toasts';
 import { TopBar } from './components/TopBar';
+import { WatchAllDialog } from './components/WatchAllDialog';
 import { WatchStrip } from './components/WatchStrip';
 import { useBackendStatus } from './hooks/useBackendStatus';
 import { useCourseContent } from './hooks/useCourseContent';
@@ -30,6 +31,7 @@ import { friendlyError } from './lib/errors';
 import { formatBytes, shortFolderName } from './lib/format';
 import type { JobPlan, PlannedItem } from './lib/jobItems';
 import type { CourseContentItem, CourseSummary, DeadlineEntryDto, DownloadOutputFormat } from './lib/types';
+import { buildAllCoursesQueue } from './lib/watch';
 
 const FORMAT_ORDER: DownloadOutputFormat[] = ['mp4', 'mp3', 'txt'];
 /** The LMS needs a moment to count a lecture that just ended before a reload shows it as watched. */
@@ -51,6 +53,9 @@ function Workspace({ session }: { session: LmsSession }) {
   const [formats, setFormats] = useState<DownloadOutputFormat[]>(['mp4']);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [watchAllOpen, setWatchAllOpen] = useState(false);
+  // Lectures that played to their end in this session: not offered again before the LMS has counted them.
+  const [playedIds, setPlayedIds] = useState<ReadonlySet<string>>(new Set());
 
   const onAuthError = useCallback((message: string) => { void expire(message); }, [expire]);
   const onError = useCallback((message: string) => push(message, 'error'), [push]);
@@ -83,14 +88,31 @@ function Workspace({ session }: { session: LmsSession }) {
       timers.clear();
     };
   }, []);
-  const onQueueSettled = useCallback((finished: CourseSummary) => {
+  // The refresh runs later, so it reads what is current by then.
+  const latest = useRef({ course, content, refreshSession: session.refresh });
+  useEffect(() => {
+    latest.current = { course, content, refreshSession: session.refresh };
+  });
+  const onQueueSettled = useCallback((scope: CourseSummary | 'all') => {
     const timer = setTimeout(() => {
       refreshTimers.current.delete(timer);
-      void content.refreshQuietly(finished);
+      const current = latest.current;
+      if (scope === 'all') {
+        // The all-course run touched every course: reload the course list (which reloads the
+        // deadlines too) and the open course's lectures, all from the LMS.
+        current.refreshSession();
+        if (current.course) void current.content.refreshQuietly(current.course);
+      } else {
+        void current.content.refreshQuietly(scope);
+      }
     }, QUEUE_REFRESH_DELAY_MS);
     refreshTimers.current.add(timer);
-  }, [content]);
-  const viewer = useOfficialViewer({ notify: push, onAuthError, onItemWatched: content.markWatched, onQueueSettled });
+  }, []);
+  const onItemWatched = useCallback((moduleItemId: string) => {
+    latest.current.content.markWatched(moduleItemId);
+    setPlayedIds((current) => (current.has(moduleItemId) ? current : new Set(current).add(moduleItemId)));
+  }, []);
+  const viewer = useOfficialViewer({ notify: push, onAuthError, onItemWatched, onQueueSettled });
 
   useEffect(() => {
     setSelected(new Set());
@@ -99,6 +121,8 @@ function Workspace({ session }: { session: LmsSession }) {
   const videos = useMemo(() => content.items.filter((item) => item.kind === 'video'), [content.items]);
   const materials = useMemo(() => content.items.filter(isLibraryItem), [content.items]);
   const autoQueue = useMemo(() => buildWatchQueue(content.items, now), [content.items, now]);
+  // "전체 순서대로 시청": the open, unwatched videos of every course, by attendance deadline.
+  const allQueue = useMemo(() => buildAllCoursesQueue(deadlines.items, now, playedIds), [deadlines.items, now, playedIds]);
   const tasks = useMemo(() => sortTasks(content.items.filter(isTaskItem), now), [content.items, now]);
   const visibleItems = useMemo(() => {
     if (tab === 'task') return [];
@@ -191,6 +215,12 @@ function Workspace({ session }: { session: LmsSession }) {
     void lmsPages.openInApp(entry.title, deadlineAddress(entry));
   }
 
+  function startWatchAll() {
+    setWatchAllOpen(false);
+    // The clock may have moved since the dialog opened; start from what is true now.
+    void viewer.startAllQueue(buildAllCoursesQueue(deadlines.items, new Date(), playedIds));
+  }
+
   async function openFolder(path?: string) {
     try {
       await openDownloadedFolder(path ?? dir);
@@ -237,6 +267,10 @@ function Workspace({ session }: { session: LmsSession }) {
         busy={busyElsewhere}
         dueSoonCount={dueSoonCount(deadlines.items, now)}
         deadlinesOpen={view === 'deadlines'}
+        watchAllCount={allQueue.length}
+        watchAllLoading={deadlines.state === 'loading' || deadlines.state === 'idle'}
+        queueActive={viewer.queue.active}
+        onWatchAll={() => setWatchAllOpen(true)}
         onToggleDeadlines={() => setView((current) => (current === 'deadlines' ? 'course' : 'deadlines'))}
         onTermChange={session.changeTerm}
         onRefresh={() => { session.refresh(); content.reload(true); }}
@@ -261,6 +295,9 @@ function Workspace({ session }: { session: LmsSession }) {
                 state={deadlines.state}
                 error={deadlines.error}
                 now={now}
+                watchAllCount={allQueue.length}
+                queueActive={viewer.queue.active}
+                onWatchAll={() => setWatchAllOpen(true)}
                 onSelect={selectDeadline}
                 onOpenInBrowser={(entry) => void lmsPages.openInBrowser(deadlineAddress(entry))}
                 onReload={deadlines.reload}
@@ -343,6 +380,9 @@ function Workspace({ session }: { session: LmsSession }) {
         </main>
       </div>
       <Toasts toasts={toasts} dismiss={dismiss} />
+      {watchAllOpen && allQueue.length > 0 && !viewer.queue.active && (
+        <WatchAllDialog items={allQueue} onStart={startWatchAll} onClose={() => setWatchAllOpen(false)} />
+      )}
       {settingsOpen && (
         <SettingsDialog
           downloadDir={dir}

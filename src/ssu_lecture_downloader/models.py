@@ -209,6 +209,8 @@ class DeadlineItem(BaseModel):
     late_at: str | None = None
     lock_at: str | None = None
     completed: bool = False
+    # Video length in seconds when the LMS gave one (lets a watch queue estimate its total time).
+    duration: int | float | None = None
     # open: window is open; late: only a late window is left; upcoming: not open yet; missed: all windows closed.
     state: str
 
@@ -256,6 +258,7 @@ def build_deadline_items(
                     late_at=item.late_at,
                     lock_at=item.lock_at,
                     completed=False,
+                    duration=item.duration if item.kind == "video" else None,
                     state=state,
                 ),
             )

@@ -78,6 +78,11 @@
   border-radius: 9px; background: var(--danger-fg); color: var(--bg); font-size: var(--fs-12); font-weight: var(--fw-semibold);
 }
 .deadlines-pane { grid-template-rows: auto auto minmax(0, 1fr); }
+.pane-head-row { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-3); }
+.watch-all-preview { display: grid; gap: var(--sp-1); margin: 0; padding: 0; list-style: none; font-size: var(--fs-13); }
+.watch-all-preview li { display: flex; justify-content: space-between; gap: var(--sp-3); min-width: 0; }
+.watch-all-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.watch-all-time { flex: none; color: var(--text-muted); font-variant-numeric: tabular-nums; }
 .deadline-note { padding: 0 var(--sp-5) var(--sp-2); border-bottom: 1px solid var(--border); color: var(--text-muted); font-size: var(--fs-12); }
 .deadline-group-title {
   position: sticky; top: 0; z-index: 1; display: flex; justify-content: space-between; align-items: center;

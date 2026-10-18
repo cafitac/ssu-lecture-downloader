@@ -1,0 +1,11 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "watch-remote",
+  "description": "Lets the LMS pages loaded in the sequential-watch playback window report playback signals to the app. Nothing else: no core APIs, no other app command.",
+  "local": false,
+  "windows": ["watch-player-*"],
+  "remote": {
+    "urls": ["https://*.ssu.ac.kr/*", "https://ssu.ac.kr/*"]
+  },
+  "permissions": ["allow-watch-signal"]
+}

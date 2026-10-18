@@ -1,3 +1,5 @@
+#[cfg(test)]
+mod acl_tests;
 mod backend;
 mod launch_agent;
 mod native_download;
@@ -182,6 +184,12 @@ fn open_url_in_browser(url: String) -> Result<(), String> {
         })
 }
 
+/// The app's context (config, assets and the capabilities compiled in by `build.rs`). The macro
+/// may expand only once per crate, so the tests take it from here too.
+fn app_context<R: tauri::Runtime>() -> tauri::Context<R> {
+    tauri::generate_context!()
+}
+
 fn shutdown_backend(app: &tauri::AppHandle) {
     if let Some(manager) = app.try_state::<Arc<BackendManager>>() {
         manager.shutdown();
@@ -266,6 +274,7 @@ pub fn run() {
             watch_runtime::watch_queue_stop,
             watch_runtime::watch_queue_status,
             watch_runtime::watch_queue_show_window,
+            watch_runtime::watch_signal,
             backend::backend_supervision_status,
             backend::backend_api_base_url,
             backend::backend_api_connection,
@@ -275,7 +284,7 @@ pub fn run() {
             native_download::native_download_job_status,
             native_download::native_cancel_download_job
         ])
-        .build(tauri::generate_context!());
+        .build(app_context());
     match built {
         Ok(app) => app.run(|app_handle, event| {
             // Kill the managed backend's whole process group on every exit path;

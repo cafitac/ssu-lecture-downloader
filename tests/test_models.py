@@ -151,5 +151,23 @@ def test_deadline_rows_cover_open_late_upcoming_and_all_missed_items():
     first = result[1].model_dump()
     assert first == {
         'course_id': 7, 'course_name': '과목', 'kind': 'assignment', 'title': 'open', 'module_item_id': 'open', 'url': 'https://lms/a',
-        'unlock_at': None, 'due_at': '2026-10-20T14:59:59Z', 'late_at': None, 'lock_at': '2026-10-27T14:59:59Z', 'completed': False, 'state': 'open',
+        'unlock_at': None, 'due_at': '2026-10-20T14:59:59Z', 'late_at': None, 'lock_at': '2026-10-27T14:59:59Z', 'completed': False, 'duration': None, 'state': 'open',
     }
+
+
+def test_deadline_rows_carry_the_video_length_but_never_for_tasks():
+    from ssu_lecture_downloader.models import CourseContentItem, build_deadline_items
+
+    video = CourseContentItem(
+        module_id=1, module_name='m', item_id='v', module_item_id=11, title='1주차', kind='video', duration=1520.5,
+        due_at='2026-10-20T14:59:59Z',
+    )
+    unknown_length = video.model_copy(update={'item_id': 'w', 'module_item_id': 12, 'duration': None})
+    task = CourseContentItem(
+        module_id=1, module_name='m', item_id='t', module_item_id=13, title='과제', kind='assignment', duration=99,
+        due_at='2026-10-20T14:59:59Z',
+    )
+
+    rows = build_deadline_items(course_id=7, course_name='과목', content_items=[video, unknown_length, task], now=_now())
+
+    assert [item.duration for _, item in rows] == [1520.5, None, None]

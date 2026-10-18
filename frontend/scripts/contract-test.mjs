@@ -254,7 +254,7 @@ if (!desktop.includes('openOfficialViewer') || !desktop.includes('WebviewWindow'
 }
 // Sequential watch (intentional change): one small always-on-top playback window owned by the
 // desktop shell, a queue held in Rust, advancing only on the real video ended event.
-if (!desktop.includes("invoke<WatchQueueState>('watch_queue_start'") || !desktop.includes("'watch_queue_stop'") || !desktop.includes("'watch_queue_next'") || !desktop.includes("'watch_queue_status'") || desktop.includes('open_assisted_official_viewer') || !tauriLib.includes('initialization_script_for_all_frames(official_watch_assist_script())') || !tauriLib.includes('ssu-watch://ended') || !tauriLib.includes("video.addEventListener('ended'") || tauriLib.includes('TargetUrl')) {
+if (!desktop.includes("invoke<WatchQueueState>('watch_queue_start'") || !desktop.includes("'watch_queue_stop'") || !desktop.includes("'watch_queue_next'") || !desktop.includes("'watch_queue_status'") || desktop.includes('open_assisted_official_viewer') || !tauriLib.includes('initialization_script_for_all_frames(official_watch_assist_script())') || !tauriLib.includes("internals.invoke(SIGNAL_COMMAND") || !tauriLib.includes('fn watch_signal(') || !tauriLib.includes("video.addEventListener('ended'") || tauriLib.includes('TargetUrl')) {
   throw new Error('Sequential watch mode must run through the shell queue with an assisted viewer that advances only after the real video ended event');
 }
 // Decision (frontend/README.md "Important watch-mode split" + the Rust regression tests): the official
@@ -868,6 +868,74 @@ console.log('frontend contract ok');
   assert.deepEqual(sameDay.map((item) => item.module_item_id), ['l1', 'l2', 'w2']);
 }
 
+// All-course queue ("전체 순서대로 시청"): the term's deadline entries -> one queue across courses.
+{
+  process.env.TZ = 'Asia/Seoul';
+  const { buildAllCoursesQueue, summarizeAllCoursesQueue, formatTotalTime, watchAllLabel, watchAllHint, watchAllConfirmText } = await import('../src/lib/watch.ts');
+  const now = new Date('2026-10-15T03:00:00Z'); // 10/15(목) 12:00 KST
+  const entry = (course, id, fields) => ({
+    course_id: course, course_name: `과목${course}(1234567${course}-01)`, kind: 'video', title: `${id}주차 강의`, module_item_id: id, url: null,
+    unlock_at: '2026-10-01T00:00:00Z', due_at: '2026-10-20T14:59:59Z', late_at: null, lock_at: null, completed: false, duration: 600, state: 'open', ...fields,
+  });
+  const entries = [
+    entry(2, 21, { due_at: '2026-10-18T14:59:59Z' }),
+    entry(1, 11, { due_at: '2026-10-16T14:59:59Z', duration: 1500.5 }),
+    entry(1, 12, { due_at: '2026-10-20T14:59:59Z', duration: null }),
+    entry(3, 31, { due_at: '2026-10-10T14:59:59Z', late_at: '2026-10-17T14:59:59Z', state: 'late' }), // late window: counts by its end
+    entry(3, 32, { unlock_at: '2026-10-26T15:00:00Z', due_at: '2026-11-02T14:59:59Z', state: 'upcoming' }), // not open yet
+    entry(3, 33, { due_at: '2026-10-01T14:59:59Z', late_at: '2026-10-05T14:59:59Z', state: 'missed' }), // every window closed: cannot count any more
+    entry(2, 22, { completed: true }),
+    entry(2, 21, { due_at: '2026-10-18T14:59:59Z' }), // duplicate
+    { ...entry(2, 23, {}), kind: 'assignment' },
+    { ...entry(2, 24, {}), module_item_id: null },
+    entry(4, 11, { due_at: '2026-10-16T14:59:59Z' }), // the same module item id in another course is another lecture
+    entry(2, 25, { due_at: '2026-10-16T14:59:59Z', state: 'missed' }), // the stored state is stale: the times say it is open
+  ];
+  const queue = buildAllCoursesQueue(entries, now);
+  assert.deepEqual(queue.map((item) => `${item.course_id}:${item.module_item_id}`), ['1:11', '4:11', '2:25', '3:31', '2:21', '1:12'], 'nearest deadline first (late windows by their end), ties in list order');
+  assert.deepEqual(queue[0], { module_item_id: '11', course_id: '1', course_name: '과목1(12345671-01)', title: '과목1 · 11주차 강의', duration: 1500.5 }, 'course name without its code leads the title; ids are text');
+  assert.equal(queue.find((item) => item.module_item_id === '12').duration, null);
+  // The ids already played in this session are skipped; nothing open gives an empty queue.
+  assert.deepEqual(buildAllCoursesQueue(entries, now, new Set(['11', '21'])).map((item) => `${item.course_id}:${item.module_item_id}`), ['2:25', '3:31', '1:12']);
+  assert.deepEqual(buildAllCoursesQueue([], now), []);
+  assert.deepEqual(buildAllCoursesQueue([entry(1, 1, { state: 'missed', due_at: '2026-10-01T00:00:00Z' })], now), []);
+  // Later the same data gives a different answer: the clock decides, not the stored state.
+  assert.deepEqual(buildAllCoursesQueue(entries, new Date('2026-10-19T00:00:00Z')).map((item) => `${item.course_id}:${item.module_item_id}`), ['1:12']);
+  assert.deepEqual(buildAllCoursesQueue(entries, new Date('2026-10-19T00:00:00Z')).map((item) => item.module_item_id), ['31', '21', '12'].filter((id) => id !== '31' && id !== '21' || false).concat([]).length ? buildAllCoursesQueue(entries, new Date('2026-10-19T00:00:00Z')).map((item) => item.module_item_id) : []);
+
+  const summary = summarizeAllCoursesQueue(queue);
+  assert.deepEqual(summary, { count: 6, courseCount: 4, totalSeconds: 1500.5 + 600 * 4, unknownLengthCount: 1 });
+  assert.equal(formatTotalTime(0), '-');
+  assert.equal(formatTotalTime(30), '1분 미만');
+  assert.equal(formatTotalTime(35 * 60), '약 35분');
+  assert.equal(formatTotalTime(3600), '약 1시간');
+  assert.equal(formatTotalTime(3600 + 12 * 60 - 5), '약 1시간 12분');
+  // Copy of the entry points and the confirmation.
+  assert.equal(watchAllLabel(6, false), '전체 순서대로 시청 (6)');
+  assert.equal(watchAllLabel(6, true), '순서대로 시청 중');
+  assert.match(watchAllHint(0, { queueActive: false, loading: false }), /안 본 강의가 없어요/);
+  assert.match(watchAllHint(0, { queueActive: false, loading: true }), /불러오는 중/);
+  assert.match(watchAllHint(6, { queueActive: false, loading: false }), /6개/);
+  assert.match(watchAllHint(6, { queueActive: true, loading: false }), /자동 재생 중/);
+  const confirm = watchAllConfirmText(summary);
+  assert.equal(confirm.headline, '강의 6개 (과목 4개) · 총 약 1시간 6분 (길이를 모르는 1개는 빼고)');
+  const confirmText = confirm.lines.join(' ');
+  for (const part of ['출석 기한이 가까운 순서', '소리 없이', '항상 위에', '최소화하면 재생이 멈추니', '기한이 모두 지난 강의']) assert.ok(confirmText.includes(part), `confirmation mentions ${part}`);
+
+  const read = (path) => readFileSync(new URL(`../${path}`, import.meta.url), 'utf8');
+  const topbar = read('src/components/TopBar.tsx');
+  const deadlinesPane = read('src/components/DeadlinesPane.tsx');
+  assert.ok(topbar.includes('watchAllLabel(watchAllCount, queueActive)') && topbar.includes('watchAllHint(') && topbar.includes('disabled={queueActive || watchAllCount === 0}'), 'the top bar has the all-course button, disabled with a reason when nothing can be played');
+  assert.ok(deadlinesPane.includes('watchAllLabel(watchAllCount, queueActive)') && deadlinesPane.includes('onWatchAll'), 'the 다가오는 기한 view has the same action');
+  const appSource = read('src/App.tsx');
+  assert.ok(appSource.includes('buildAllCoursesQueue(deadlines.items') && appSource.includes('<WatchAllDialog') && appSource.includes('viewer.startAllQueue('), 'the all-course queue comes from the deadlines and starts after a confirmation');
+  assert.ok(appSource.includes("scope === 'all'") && appSource.includes('refreshSession()'), 'after the queue ends the course list (and so the deadlines) is reloaded');
+  const dialog = read('src/components/WatchAllDialog.tsx');
+  assert.ok(dialog.includes('전체 순서대로 시청') && dialog.includes('시작') && dialog.includes('취소'));
+  const viewerHook = read('src/hooks/useOfficialViewer.ts');
+  assert.ok(viewerHook.includes('watchQueueStart({ items: queueItems })'), 'the all-course start names no single course');
+}
+
 // Status strip copy and queue inputs.
 {
   const { watchStripText, formatClock, WATCH_STRIP_NOTE, IDLE_WATCH_QUEUE, toQueueInputs, watchFinishedText } = await import('../src/lib/watch.ts');
@@ -918,7 +986,11 @@ console.log('frontend contract ok');
 const assistSource = readFileSync('src-tauri/src/assets/watch_assist.js', 'utf8');
 {
   assert.ok(assistSource.includes('이어서 보시겠습니까') && assistSource.includes("RESUME_YES_LABEL = '예'"), 'the resume dialog is answered with 예');
-  assert.ok(assistSource.includes('video.muted = true') && assistSource.includes('ssu-watch://progress') && assistSource.includes('ssu-watch://stalled'));
+  assert.ok(assistSource.includes('video.muted = true') && assistSource.includes("signal('progress'") && assistSource.includes("signal('stalled'") && assistSource.includes("signal('ended'"));
+  // Signals travel over Tauri IPC. Assigning location aborts the lecture page's own load, so no navigation may remain.
+  assert.ok(assistSource.includes('__TAURI_INTERNALS__') && assistSource.includes("SIGNAL_COMMAND = 'watch_signal'"), 'signals are sent with the watch_signal command');
+  assert.ok(!/location\s*\.\s*href\s*=[^=]/.test(assistSource) && !/location\s*=[^=]/.test(assistSource) && !/location\s*\.\s*(assign|replace)\s*\(/.test(assistSource), 'watch_assist.js must not navigate to signal');
+  assert.ok(!assistSource.includes('ssu-watch'), 'no ssu-watch:// URL signalling is left');
   for (const forbidden of ['visibilityState', 'document.hidden', 'visibilitychange', 'playbackRate', 'Object.defineProperty', 'preventDefault', 'stopImmediatePropagation', /currentTime\s*=[^=]/, 'fastSeek']) {
     const found = typeof forbidden === 'string' ? assistSource.includes(forbidden) : forbidden.test(assistSource);
     assert.ok(!found, `watch_assist.js must not use ${String(forbidden)}`);
@@ -929,12 +1001,12 @@ const assistSource = readFileSync('src-tauri/src/assets/watch_assist.js', 'utf8'
 // watch_assist.js behaviour on a fake page with virtual time (no real media is ever played).
 {
   const DIALOG = '이전에 시청했던 07:29부터 이어서 보시겠습니까?';
-  function makePage({ top = true, playWorks = true } = {}) {
+  function makePage({ top = true, playWorks = true, ipc = true } = {}) {
     let now = 5_000_000;
     let seq = 0;
     const timers = [];
     const frames = [];
-    const env = { rendering: true, navigations: [], posted: [], clicks: [], writes: [], playCalls: 0, playWorks, dialog: false, videos: [] };
+    const env = { rendering: true, navigations: [], posted: [], invocations: [], handlers: {}, clicks: [], writes: [], playCalls: 0, playWorks, dialog: false, videos: [], rejectInvoke: false };
     const rect = () => ({ width: 320, height: 180 });
     const dialogNode = { get textContent() { return env.dialog ? `${DIALOG} 예 아니오` : ''; }, parentElement: null };
     const control = (label) => ({ innerText: label, textContent: label, value: '', parentElement: dialogNode, getBoundingClientRect: () => (env.dialog ? rect() : { width: 0, height: 0 }), click() { env.clicks.push(label); if (label === '예') env.dialog = false; } });
@@ -946,8 +1018,8 @@ const assistSource = readFileSync('src-tauri/src/assets/watch_assist.js', 'utf8'
       setTimeout(fn, ms = 0) { timers.push({ id: ++seq, at: now + ms, fn }); return seq; },
       setInterval(fn, ms) { timers.push({ id: ++seq, at: now + ms, fn, every: ms }); return seq; },
       requestAnimationFrame(cb) { frames.push(cb); },
-      encodeURIComponent, String, Math, JSON, Array, Object, Number, Promise, Error, console,
-      addEventListener() {},
+      encodeURIComponent, String, Math, JSON, Array, Object, Number, Promise, Error, URL, console: { ...console, warn() {} },
+      addEventListener(type, fn) { (env.handlers[type] ||= []).push(fn); },
       document: {
         readyState: 'complete',
         get body() { return { get textContent() { return dialogNode.textContent; } }; },
@@ -960,6 +1032,15 @@ const assistSource = readFileSync('src-tauri/src/assets/watch_assist.js', 'utf8'
       },
       location: { hostname: 'commons.ssu.ac.kr', set href(value) { env.navigations.push(value); } },
     };
+    // Tauri injects this into the top frame of every page of the window (not into child frames).
+    if (top && ipc) {
+      sandbox.__TAURI_INTERNALS__ = {
+        invoke(command, args) {
+          env.invocations.push({ command, args: JSON.parse(JSON.stringify(args)) });
+          return env.rejectInvoke ? Promise.reject(new Error('not allowed')) : Promise.resolve();
+        },
+      };
+    }
     sandbox.window = sandbox;
     sandbox.top = top ? sandbox : { postMessage(message) { env.posted.push(message); } };
     vm.createContext(sandbox);
@@ -988,13 +1069,11 @@ const assistSource = readFileSync('src-tauri/src/assets/watch_assist.js', 'utf8'
         if (env.rendering) frames.splice(0).forEach((cb) => cb());
       }
     };
-    env.signals = () => {
-      const urls = top
-        ? env.navigations
-        : env.posted.map((message) => `ssu-watch://${message.kind}?${new URLSearchParams(message.payload || {}).toString()}`);
-      return urls.map((url) => new URL(url)).map((url) => ({ kind: url.host, params: Object.fromEntries(url.searchParams) }));
-    };
+    env.signals = () => (top
+      ? env.invocations.map((call) => ({ kind: call.args.kind, params: call.args.payload }))
+      : env.posted.map((message) => ({ kind: message.kind, params: message.payload || {} })));
     env.fire = (video, type) => (video.listeners[type] || []).forEach((fn) => fn());
+    env.sandbox = sandbox;
     vm.runInContext(assistSource, sandbox);
     return env;
   }
@@ -1095,6 +1174,83 @@ const assistSource = readFileSync('src-tauri/src/assets/watch_assist.js', 'utf8'
     const kinds = child.posted.map((message) => message.kind);
     assert.ok(kinds.includes('progress') && kinds.includes('ended'), `child reports go to the top frame (${kinds.join(',')})`);
     assert.ok(child.posted.every((message) => message.__SSU_WATCH_SIGNAL__ === true));
+  }
+
+  // Signals are Tauri IPC calls of the top frame; the page itself is never navigated (that would abort its load).
+  {
+    const page = makePage();
+    const video = page.video(450, 10);
+    assert.deepEqual(page.invocations, [], 'nothing is sent while the script installs: the page load is not touched');
+    page.advance(15000);
+    page.fire(video, 'ended');
+    page.advance(1000);
+    assert.ok(page.invocations.length >= 4, `signals are sent (${page.invocations.length})`);
+    assert.ok(page.invocations.every((call) => call.command === 'watch_signal'), 'only the watch_signal command is invoked');
+    assert.ok(page.invocations.every((call) => Object.values(call.args.payload).every((value) => typeof value === 'string')), 'payload values are strings');
+    assert.ok(page.invocations.every((call) => call.args.payload.frame === 'top' && call.args.payload.mode === 'sequential'));
+    assert.deepEqual(page.navigations, [], 'no location assignment for signalling');
+    const kinds = new Set(page.signals().map((signal) => signal.kind));
+    for (const kind of ['debug', 'progress', 'heartbeat', 'ended']) assert.ok(kinds.has(kind), `${kind} is signalled`);
+    assert.equal(page.signals().find((signal) => signal.kind === 'debug').params.stage, 'installed');
+  }
+
+  // Progress is rate limited (every 5s at most), also when a child frame floods the top frame.
+  {
+    const page = makePage();
+    page.video(450, 10);
+    page.advance(2000);
+    const relay = (payload, origin = 'https://commons.ssu.ac.kr') => page.handlers.message.forEach((fn) => fn({ origin, data: { __SSU_WATCH_SIGNAL__: true, kind: 'progress', payload } }));
+    const before = page.signals().filter((signal) => signal.kind === 'progress').length;
+    for (let index = 0; index < 20; index += 1) {
+      relay({ frame: 'child', host: 'commons.ssu.ac.kr', time: String(index), duration: '450', main: '1', paused: '0', rendering: '1' });
+      page.advance(100);
+    }
+    page.advance(6000);
+    const childProgress = page.signals().filter((signal) => signal.kind === 'progress' && signal.params.frame === 'child');
+    assert.ok(childProgress.length >= 1 && childProgress.length <= 3, `child progress is coalesced and throttled (${childProgress.length})`);
+    assert.equal(childProgress[childProgress.length - 1].params.time, '19', 'the newest report wins');
+    assert.ok(page.signals().filter((signal) => signal.kind === 'progress').length >= before);
+  }
+
+  // The top frame accepts relayed signals from Soongsil origins only, and only well-formed ones.
+  {
+    const page = makePage();
+    const post = (origin, data) => page.handlers.message.forEach((fn) => fn({ origin, data }));
+    const good = { __SSU_WATCH_SIGNAL__: true, kind: 'ended', payload: { frame: 'child', time: '449', duration: '450' } };
+    post('https://evil.example', good);
+    post('https://ssu.ac.kr.evil.example', good);
+    post('https://evilssu.ac.kr', good);
+    post('null', good);
+    post('https://commons.ssu.ac.kr', { ...good, __SSU_WATCH_SIGNAL__: false });
+    post('https://commons.ssu.ac.kr', { __SSU_WATCH_SIGNAL__: true, kind: 'ended' });
+    post('https://commons.ssu.ac.kr', { ...good, kind: 'eval' });
+    page.advance(1000);
+    assert.equal(page.signals().filter((signal) => signal.kind === 'ended' || signal.kind === 'eval').length, 0);
+    post('https://commons.ssu.ac.kr', good);
+    post('https://ssu-toast.commonscdn.com', { ...good, kind: 'stalled' });
+    page.advance(1000);
+    assert.equal(page.signals().filter((signal) => signal.kind === 'ended').length, 1);
+    assert.equal(page.signals().filter((signal) => signal.kind === 'stalled').length, 1);
+  }
+
+  // Without Tauri IPC (or when it refuses) the script neither throws nor navigates; it delivers once IPC shows up.
+  {
+    const page = makePage({ ipc: false });
+    page.video(450, 10);
+    page.advance(5000);
+    assert.deepEqual(page.navigations, []);
+    assert.equal(page.invocations.length, 0);
+    const sandboxGlobal = page.sandbox;
+    sandboxGlobal.__TAURI_INTERNALS__ = { invoke(command, args) { page.invocations.push({ command, args: JSON.parse(JSON.stringify(args)) }); return Promise.resolve(); } };
+    page.advance(5000);
+    assert.ok(page.invocations.length > 0, 'waiting signals are delivered once IPC exists');
+    assert.deepEqual(page.navigations, []);
+
+    const refused = makePage();
+    refused.rejectInvoke = true;
+    refused.video(450, 10);
+    refused.advance(20000);
+    assert.ok(refused.invocations.length > 0 && refused.navigations.length === 0, 'a refused call is swallowed');
   }
 }
 

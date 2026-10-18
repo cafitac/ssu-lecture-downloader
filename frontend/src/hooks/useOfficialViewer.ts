@@ -11,6 +11,7 @@ import {
 } from '../lib/desktop';
 import { friendlyError } from '../lib/errors';
 import type { CourseContentItem, CourseSummary, WatchDebugEvent, WatchQueueNotice, WatchQueueState } from '../lib/types';
+import type { AllCoursesQueueItem } from '../lib/watch';
 import { IDLE_WATCH_QUEUE, toQueueInputs } from '../lib/watch';
 import { useTauriEvent } from './useTauriEvent';
 
@@ -19,8 +20,8 @@ interface Options {
   onAuthError: (message: string) => void;
   /** A lecture of the queue played to its real end (mark it watched right away). */
   onItemWatched: (moduleItemId: string) => void;
-  /** The queue ended or was stopped; the course it ran for (reload its videos later). */
-  onQueueSettled: (course: CourseSummary) => void;
+  /** The queue ended or was stopped; the course it ran for, or `'all'` for the all-course queue (reload later). */
+  onQueueSettled: (scope: CourseSummary | 'all') => void;
 }
 
 /**
@@ -34,7 +35,7 @@ export function useOfficialViewer({ notify, onAuthError, onItemWatched, onQueueS
   const [queue, setQueue] = useState<WatchQueueState>(IDLE_WATCH_QUEUE);
   const [debugEvents, setDebugEvents] = useState<WatchDebugEvent[]>([]);
   const openingRef = useRef(false);
-  const courseRef = useRef<CourseSummary | null>(null);
+  const scopeRef = useRef<CourseSummary | 'all' | null>(null);
   const wasActiveRef = useRef(false);
   const optionsRef = useRef({ notify, onAuthError, onItemWatched, onQueueSettled });
   useEffect(() => {
@@ -48,7 +49,7 @@ export function useOfficialViewer({ notify, onAuthError, onItemWatched, onQueueS
 
   function applyQueue(next: WatchQueueState) {
     setQueue(next);
-    if (wasActiveRef.current && !next.active && courseRef.current) optionsRef.current.onQueueSettled(courseRef.current);
+    if (wasActiveRef.current && !next.active && scopeRef.current) optionsRef.current.onQueueSettled(scopeRef.current);
     wasActiveRef.current = next.active;
   }
 
@@ -106,10 +107,30 @@ export function useOfficialViewer({ notify, onAuthError, onItemWatched, onQueueS
       optionsRef.current.notify('순서대로 시청할 영상이 없어요.', 'info');
       return;
     }
-    courseRef.current = course;
+    scopeRef.current = course;
     setDebugEvents([]);
     try {
       applyQueue(await watchQueueStart({ course_id: String(course.id), course_name: course.name, items: inputs }));
+    } catch (error) {
+      fail(error, '순서대로 시청을 시작하지 못했어요.');
+    }
+  }
+
+  /** Starts the all-course queue: every item names its own course and plays in the given order. */
+  async function startAllQueue(queueItems: AllCoursesQueueItem[]) {
+    if (queue.active) return;
+    if (!isTauriRuntime()) {
+      optionsRef.current.notify('순서대로 시청은 데스크톱 앱에서만 쓸 수 있어요.', 'info');
+      return;
+    }
+    if (queueItems.length === 0) {
+      optionsRef.current.notify('순서대로 시청할 영상이 없어요.', 'info');
+      return;
+    }
+    scopeRef.current = 'all';
+    setDebugEvents([]);
+    try {
+      applyQueue(await watchQueueStart({ items: queueItems }));
     } catch (error) {
       fail(error, '순서대로 시청을 시작하지 못했어요.');
     }
@@ -157,7 +178,7 @@ export function useOfficialViewer({ notify, onAuthError, onItemWatched, onQueueS
     setDebugEvents((current) => [payload, ...current].slice(0, 40));
   });
 
-  return { openingKey, queue, debugEvents, open, startQueue, stop, next, showWindow };
+  return { openingKey, queue, debugEvents, open, startQueue, startAllQueue, stop, next, showWindow };
 }
 
 export type OfficialViewer = ReturnType<typeof useOfficialViewer>;
