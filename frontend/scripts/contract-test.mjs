@@ -1293,3 +1293,11 @@ const assistSource = readFileSync('src-tauri/src/assets/watch_assist.js', 'utf8'
   const { knownErrorText } = await import('../src/lib/errors.ts');
   assert.ok(/[가-힣]/.test(knownErrorText('canvas_file_unavailable')));
 }
+
+// The injected watch script must parse (a duplicate declaration silently disables it in the page).
+{
+  const { execFileSync } = await import('node:child_process');
+  execFileSync(process.execPath, ['--check', new URL('../src-tauri/src/assets/watch_assist.js', import.meta.url).pathname]);
+  const script = readFileSync(new URL('../src-tauri/src/assets/watch_assist.js', import.meta.url), 'utf8');
+  assert.ok(script.includes('.vc-front-screen-play-btn'), 'Commons front-screen play button must be pressed');
+}

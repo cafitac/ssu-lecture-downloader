@@ -889,8 +889,8 @@ fn show_in_window_on_main(
             }
         }
     };
-    // Quiet the current page first so its signals cannot replace this navigation.
-    let _ = window.eval("window.__SSU_WATCH_SILENT__ = true;");
+    // No page silencing here: an eval queued now can land on the *next* document and mute
+    // it for good. Late signals from the old page are dropped by the epoch/accepting checks.
     wlog(app, "bridging cookies and navigating");
     let result = bridge_session_and_navigate(&window, &plan.cookies, target);
     wlog(
@@ -965,6 +965,9 @@ fn create_watch_window(
         })
         .build()?;
     wlog(app, format!("window created label={label}"));
+    // Debug builds: open the inspector so the page console can be checked during runtime QA.
+    #[cfg(debug_assertions)]
+    window.open_devtools();
     let gone_app = app.clone();
     let gone_label = label.to_string();
     window.on_window_event(move |event| {
@@ -1138,7 +1141,6 @@ fn reload_current(app: &AppHandle) {
     });
     if let (Some(target), Some(window)) = (target, label.and_then(|l| app.get_webview_window(&l))) {
         let _ = app.run_on_main_thread(move || {
-            let _ = window.eval("window.__SSU_WATCH_SILENT__ = true;");
             let _ = window.navigate(target);
         });
     }
