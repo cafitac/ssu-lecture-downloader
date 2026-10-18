@@ -567,3 +567,12 @@ def test_chrome_main_pid_is_the_browser_process_of_the_dedicated_profile():
     ]
     assert cw.find_chrome_main_pid(rows, "/tmp/p") == 11
     assert cw.find_chrome_main_pid(rows, "/tmp/none") is None
+
+
+def test_audio_is_silenced_by_chrome_not_by_muting_the_video():
+    args = cw.build_chrome_args("/x/Google Chrome", "/tmp/p")
+    assert "--mute-audio" in args
+    from ssu_lecture_downloader import chrome_watch_helper
+    source = next(v for k, v in vars(chrome_watch_helper).items() if isinstance(v, str) and "ssuWatchSignal" in v or (isinstance(v, str) and "findVideo" in v))
+    # Chrome pauses muted videos in a minimized window, so the helper must not mute them.
+    assert ".muted = true" not in source

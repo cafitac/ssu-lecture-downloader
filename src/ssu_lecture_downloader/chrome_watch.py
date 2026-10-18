@@ -9,7 +9,7 @@ main video until it ends.
 Rules this module keeps:
 - Nothing fakes visibility or speed: no visibility overrides, no backgrounding flags, no
   `video.play()` on the intro, no playback-rate change, no seeking. The player runs its own flow
-  (start button, resume prompt, short intro, lecture); the page helper only observes and mutes.
+  (start button, resume prompt, short intro, lecture); the page helper only observes; audio is silenced with --mute-audio.
 - A window that is minimized or covered is not treated specially: if the lecture time really
   stops for `stall_after` seconds the item is reloaded once and then skipped, and the status
   and notices say so (with a hint to bring the window back) instead of failing silently.
@@ -53,6 +53,8 @@ MINIMIZED_HINT = "Chrome 창이 최소화돼 있으면 다시 열어 주세요."
 PHASE_OPENING = "opening"
 PHASE_PLAYING = "playing"
 PHASE_STALLED = "stalled"
+MINIMIZE_CHECK_SECONDS = 10.0
+MINIMIZE_FALLBACK_NOTICE = "최소화하면 영상이 멈춰서, Chrome 창을 다른 창 뒤에 그대로 두고 재생해요."
 
 
 class ChromeWatchError(Exception):
@@ -134,6 +136,8 @@ def build_chrome_args(chrome: Path | str, profile_dir: Path | str, *, window_siz
         "--remote-debugging-port=0",
         "--no-first-run",
         "--no-default-browser-check",
+        # Silence at the browser's audio output (the page still plays normally).
+        "--mute-audio",
         f"--window-size={window_size[0]},{window_size[1]}",
         "--new-window",
         "about:blank",
@@ -756,6 +760,17 @@ class _Playback:
         self.window_closed = False
         self.connection_closed = False
 
+    def restore_window(self) -> None:
+        """Un-minimize without bringing Chrome to the front."""
+        if not self.page_target:
+            return
+        try:
+            window = self.call("Browser.getWindowForTarget", {"targetId": self.page_target})
+            if "windowId" in window:
+                self.call("Browser.setWindowBounds", {"windowId": window["windowId"], "bounds": {"windowState": "normal"}})
+        except (CdpError, CdpClosed, CdpTimeout):
+            pass
+
     def minimize_window(self) -> None:
         if not self.page_target:
             return
@@ -961,6 +976,7 @@ class _Playback:
         last_resume = -1e9
         resume_clicks = 0
         last_time: dict[bool, float] = {}
+        minimized_at: float | None = None
         while True:
             self.check_alive()
             if run.stop.is_set():
@@ -1004,6 +1020,20 @@ class _Playback:
                     if advanced and not video.get("paused") and run.auto_minimize and not run.auto_minimized:
                         run.auto_minimized = True
                         self.minimize_window()
+                        minimized_at = now
+                    if (
+                        minimized_at is not None
+                        and video.get("paused")
+                        and now - minimized_at <= MINIMIZE_CHECK_SECONDS
+                    ):
+                        # This player stops when minimized: keep the window un-minimized (behind
+                        # other windows, not activated) for the rest of the run.
+                        minimized_at = None
+                        run.auto_minimize = False
+                        self.restore_window()
+                        self.m._notice(run, "minimize_paused", "info", MINIMIZE_FALLBACK_NOTICE)
+                    elif minimized_at is not None and now - minimized_at > MINIMIZE_CHECK_SECONDS:
+                        minimized_at = None
                 elif fresh and any(r[2].get("video") for r in fresh):
                     video = next(r[2]["video"] for r in fresh if r[2].get("video"))
                     with self.m._lock:

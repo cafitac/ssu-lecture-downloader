@@ -99,7 +99,6 @@ HELPER_JS = r"""
     send({ kind: 'ended', time: video.currentTime, duration: video.duration });
   };
 
-  const mutedVideos = new WeakSet();
   const attached = new WeakSet();
   // The driver reads this itself (Runtime.evaluate), so progress does not depend on this page's
   // timers, which Chrome slows down in pages that are not on screen.
@@ -110,11 +109,8 @@ HELPER_JS = r"""
         attached.add(video);
         video.addEventListener('ended', () => sendEnded(video));
       }
-      // Muting is always fine; once per video so a hand-made unmute is not fought.
-      if (!mutedVideos.has(video)) {
-        mutedVideos.add(video);
-        try { video.muted = true; } catch (_) {}
-      }
+      // No element muting: Chrome pauses muted videos in a minimized window. The dedicated
+      // Chrome runs with --mute-audio instead, so nothing is heard and playback is unchanged.
       if (video.ended) sendEnded(video);
     }
     return {
