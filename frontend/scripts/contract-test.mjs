@@ -966,6 +966,127 @@ console.log('frontend contract ok');
   assert.ok(toolbar.includes('순서대로 시청') && !toolbar.includes('onStopWatch'), 'stopping lives in the status strip');
 }
 
+// Chrome window playback: mode choice, status -> strip/menu bar mapping, copy and wiring.
+{
+  const watch = await import('../src/lib/watch.ts');
+  const { resolveWatchMode, chromeStatusToQueue, toExternalView, watchStripText, watchStripNote, newChromeNotices, toChromeInputs, toChromeAllInputs, watchAllConfirmText, summarizeAllCoursesQueue, WATCH_MODE_LABEL, WATCH_STRIP_NOTE, WATCH_STRIP_NOTE_CHROME, CHROME_RESTORE_HINT, IDLE_WATCH_QUEUE, readWatchModePreference, writeWatchModePreference } = watch;
+  const read = (path) => readFileSync(new URL(`../${path}`, import.meta.url), 'utf8');
+
+  // Mode selection: Chrome by default when it is installed, the saved choice otherwise.
+  assert.equal(resolveWatchMode(null, true), 'chrome');
+  assert.equal(resolveWatchMode(null, false), 'app');
+  assert.equal(resolveWatchMode(null, null), 'app', 'unknown availability stays with the in-app window');
+  assert.equal(resolveWatchMode('app', true), 'app');
+  assert.equal(resolveWatchMode('chrome', true), 'chrome');
+  assert.equal(resolveWatchMode('chrome', null), 'chrome');
+  assert.equal(resolveWatchMode('chrome', false), 'app', 'a saved Chrome choice falls back once Chrome is known to be missing');
+  assert.equal(WATCH_MODE_LABEL.chrome, 'Chrome 창 (다른 작업 중에도 재생, 추천)');
+  assert.equal(WATCH_MODE_LABEL.app, '앱 안의 작은 창');
+  const memory = new Map();
+  globalThis.localStorage = { getItem: (key) => memory.get(key) ?? null, setItem: (key, value) => memory.set(key, value) };
+  assert.equal(readWatchModePreference(), null);
+  writeWatchModePreference('app');
+  assert.equal(readWatchModePreference(), 'app');
+  memory.set('ssu.watchMode', 'bogus');
+  assert.equal(readWatchModePreference(), null);
+  globalThis.localStorage = { getItem: () => { throw new Error('blocked'); }, setItem: () => { throw new Error('blocked'); } };
+  assert.equal(readWatchModePreference(), null, 'blocked storage must not break the page');
+  assert.doesNotThrow(() => writeWatchModePreference('chrome'));
+  delete globalThis.localStorage;
+
+  // Backend status -> the queue state the strip, buttons and menu bar use.
+  const status = (fields) => ({
+    ok: true, state: 'playing', run_id: 'r1', active: true, chrome_available: true, index: 0, total: 2, done_count: 0, skipped_count: 0,
+    current: { module_item_id: '11', course_id: '1', course_name: '디지털논리회로', title: '1주차 강의', phase: 'playing', position: 61, duration: 3026, paused: false },
+    items: [
+      { module_item_id: '11', course_id: '1', course_name: '디지털논리회로', title: '1주차 강의', state: 'playing', reason: null, duration: 3026 },
+      { module_item_id: '12', course_id: '1', course_name: '디지털논리회로', title: '2주차 강의', state: 'pending', reason: null, duration: 1800 },
+    ],
+    error_code: null, error_message: null, notices: [], ...fields,
+  });
+  const playing = chromeStatusToQueue(status({}));
+  assert.equal(playing.active, true);
+  assert.equal(playing.source, 'chrome');
+  assert.equal(playing.phase, 'playing');
+  assert.equal(playing.remaining_secs, 2965);
+  assert.equal(playing.total_remaining_secs, 2965 + 1800, 'the current lecture\'s time left plus the pending lengths');
+  assert.deepEqual(watchStripText(playing), { summary: '자동 재생 중 (Chrome) 1/2 · 디지털논리회로 · 1주차 강의 · 01:01 / 50:26', detail: null });
+  assert.equal(watchStripNote(playing), WATCH_STRIP_NOTE_CHROME);
+  assert.equal(watchStripNote({ ...IDLE_WATCH_QUEUE, active: true }), WATCH_STRIP_NOTE, 'the in-app queue keeps its own note');
+  assert.equal(WATCH_STRIP_NOTE_CHROME, 'Chrome 창은 다른 창 뒤에 두거나 다른 탭을 봐도 재생돼요. 최소화했을 때는 아직 확인되지 않았어요.');
+  // All-course titles already lead with the course: it is not repeated.
+  assert.equal(watchStripText(chromeStatusToQueue(status({ current: { ...status({}).current, title: '디지털논리회로 · 1주차 강의' } }))).summary, '자동 재생 중 (Chrome) 1/2 · 디지털논리회로 · 1주차 강의 · 01:01 / 50:26');
+  // A course code in the name is left out of the line.
+  assert.equal(watchStripText(chromeStatusToQueue(status({ current: { ...status({}).current, course_name: '디지털논리회로(21500123-01)' } }))).summary, '자동 재생 중 (Chrome) 1/2 · 디지털논리회로 · 1주차 강의 · 01:01 / 50:26');
+
+  // Time stopping is visible, with the way out; nothing claims that minimizing works.
+  const stalled = watchStripText(chromeStatusToQueue(status({ current: { ...status({}).current, phase: 'stalled' } })));
+  assert.match(stalled.detail, /멈춰/);
+  assert.ok(stalled.detail.includes(CHROME_RESTORE_HINT) && CHROME_RESTORE_HINT === 'Chrome 창이 최소화돼 있으면 다시 열어 주세요.');
+  assert.ok(watchStripText(chromeStatusToQueue(status({ current: { ...status({}).current, paused: true } }))).detail.includes(CHROME_RESTORE_HINT));
+  const starting = chromeStatusToQueue(status({ state: 'starting', current: null, index: 0 }));
+  assert.equal(starting.phase, 'opening');
+  assert.deepEqual(watchStripText({ ...starting, current_title: '1주차 강의' }).detail, 'Chrome 창을 여는 중이에요…');
+
+  // Only a starting or playing run is active; ends map to the shell's phases.
+  const finished = chromeStatusToQueue(status({ state: 'finished', active: false, index: 2, done_count: 2, current: null }));
+  assert.deepEqual([finished.active, finished.phase, finished.total_remaining_secs], [false, 'finished', 0]);
+  assert.equal(watchStripText(finished), null);
+  for (const state of ['stopped', 'failed', 'idle']) {
+    const ended = chromeStatusToQueue(status({ state, active: false, current: null }));
+    assert.deepEqual([ended.active, ended.phase], [false, 'idle'], state);
+  }
+  assert.deepEqual(chromeStatusToQueue(status({})).items.map((item) => [item.module_item_id, item.state, item.duration_secs]), [['11', 'playing', 3026], ['12', 'pending', 1800]]);
+
+  // What the shell gets for the menu bar: the queue, the run and its notices.
+  const notices = [{ id: 2, kind: 'skipped', level: 'error', text: 'b', item_title: 'x', reason: 'r' }, { id: 1, kind: 'stalled', level: 'error', text: 'a', item_title: 'x', reason: null }, { id: 3, kind: 'finished', level: 'success', text: 'c', item_title: null, reason: null }];
+  const view = toExternalView(status({ notices }));
+  assert.equal(view.run_id, 'r1');
+  assert.equal(view.notices.length, 3);
+  assert.equal(view.current_title, '1주차 강의');
+  assert.equal(toExternalView(status({ run_id: null })).run_id, '');
+  assert.deepEqual(newChromeNotices(status({ notices }), 1).map((notice) => notice.id), [2, 3]);
+  assert.deepEqual(newChromeNotices(status({ notices }), 3), []);
+
+  // Inputs for the backend carry each lecture's own course.
+  assert.deepEqual(toChromeInputs({ id: 44070, name: 'UX' }, [{ module_item_id: 7, title: 'a', duration: 450.5 }, { module_item_id: null, title: 'x', duration: 1 }]), [
+    { course_id: '44070', course_name: 'UX', module_item_id: '7', title: 'a', duration: 450.5 },
+  ]);
+  assert.deepEqual(toChromeAllInputs([{ module_item_id: '11', course_id: '1', course_name: 'A', title: 'A · 11', duration: null }]), [
+    { course_id: '1', course_name: 'A', module_item_id: '11', title: 'A · 11', duration: null },
+  ]);
+
+  // The confirmation tells which window plays; the Chrome text makes no promise about minimizing.
+  const summary = summarizeAllCoursesQueue([{ module_item_id: '1', course_id: '1', course_name: 'A', title: 'A', duration: 600 }]);
+  const chromeLines = watchAllConfirmText(summary, 'chrome').lines.join(' ');
+  assert.ok(chromeLines.includes('Chrome 창') && chromeLines.includes('최소화했을 때는 아직 확인되지 않았어요') && !chromeLines.includes('항상 위에'));
+  assert.ok(watchAllConfirmText(summary).lines.join(' ').includes('항상 위에'), 'the default confirmation is still the in-app one');
+
+  // No UI text may claim that a minimized Chrome window keeps playing.
+  for (const file of ['src/lib/watch.ts', 'src/components/SettingsDialog.tsx', 'src/components/WatchStrip.tsx', 'src/components/LectureToolbar.tsx', 'src/components/WatchAllDialog.tsx', 'src/hooks/useOfficialViewer.ts']) {
+    assert.ok(!/최소화해도/.test(read(file)), `${file} must not promise playback while minimized`);
+  }
+
+  // Wiring: settings choice, hook, API, shell command.
+  const settings = read('src/components/SettingsDialog.tsx');
+  assert.ok(settings.includes('자동 재생 방식') && settings.includes('WATCH_MODE_LABEL') && settings.includes('type="radio"') && settings.includes('onWatchModeChange'), 'settings offer the two playback modes');
+  const app = read('src/App.tsx');
+  assert.ok(app.includes('readWatchModePreference') && app.includes('modePreference: watchModePreference') && app.includes('watchMode={viewer.mode}') && app.includes('mode={viewer.mode}') && app.includes('onWatchModeChange={chooseWatchMode}'), 'the chosen mode reaches the viewer hook, the dialogs and the settings');
+  const viewerHook = read('src/hooks/useOfficialViewer.ts');
+  for (const marker of ['startChromeWatch(', 'fetchChromeWatchStatus', 'stopChromeWatch()', 'nextChromeWatch()', 'showChromeWatch()', 'watchExternalStatus(toExternalView(status))', "'watch-external-command'", 'startPolling<ChromeWatchStatus>', "mode === 'chrome'"]) {
+    assert.ok(viewerHook.includes(marker), `viewer hook missing ${marker}`);
+  }
+  assert.ok(!/\bsetInterval\b/.test(viewerHook), 'Chrome status polling is a setTimeout chain');
+  assert.ok(viewerHook.includes('watchQueueStart({ items: queueItems })'), 'the in-app all-course start is unchanged');
+  const apiSource = read('src/lib/api.ts');
+  for (const route of ['/api/watch/chrome/start', '/api/watch/chrome/status', '/api/watch/chrome/next', '/api/watch/chrome/stop', '/api/watch/chrome/show']) assert.ok(apiSource.includes(route), `${route} client`);
+  assert.ok(read('src/lib/desktop.ts').includes("invoke<void>('watch_external_status', { view })"));
+  assert.ok(/^\s+watch_runtime::watch_external_status,?$/m.test(read('src-tauri/src/lib.rs')), 'the menu bar bridge command is registered');
+  assert.ok(read('src-tauri/permissions/main-window-commands.toml').includes('allow-watch-external-status'), 'and allowed for the main window only');
+  assert.ok(!read('src-tauri/capabilities/watch-remote.json').includes('external'), 'the remote LMS pages never get the bridge');
+  assert.ok(read('src/components/WatchStrip.tsx').includes('Chrome 창 보이기'), 'the strip can bring the Chrome window back');
+}
+
 // The shell side: commands registered, tray enabled, window rules, state held in Rust.
 {
   const lib = readFileSync(new URL('../src-tauri/src/lib.rs', import.meta.url), 'utf8');

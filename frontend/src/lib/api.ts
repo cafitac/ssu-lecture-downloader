@@ -1,4 +1,4 @@
-import type { AudioExtractionResult, BatchDownloadItemResult, BatchDownloadResult, CanvasFileDownloadResponse, ConflictStrategy, CourseDetailResponse, CoursesResponse, CredentialStatus, DeadlinesResponse, DownloadJobStatus, DownloadOutputFormat, DownloadResult, LmsSessionBridgeResponse, MediaDependencyInstallResult, MediaDependencyStatusResponse, NativeDownloadPlanResult, OfficialViewerPlanResult, OfficialViewerSessionBridgeResult, PageFilesResponse, PostprocessJobStatus, ProgressEvent, RemoteSttConfigPatch, RemoteSttStatus, STTProviderStatusResponse, TermsResponse, TranscriptionResult } from './types';
+import type { AudioExtractionResult, ChromeWatchItemInput, ChromeWatchStatus, BatchDownloadItemResult, BatchDownloadResult, CanvasFileDownloadResponse, ConflictStrategy, CourseDetailResponse, CoursesResponse, CredentialStatus, DeadlinesResponse, DownloadJobStatus, DownloadOutputFormat, DownloadResult, LmsSessionBridgeResponse, MediaDependencyInstallResult, MediaDependencyStatusResponse, NativeDownloadPlanResult, OfficialViewerPlanResult, OfficialViewerSessionBridgeResult, PageFilesResponse, PostprocessJobStatus, ProgressEvent, RemoteSttConfigPatch, RemoteSttStatus, STTProviderStatusResponse, TermsResponse, TranscriptionResult } from './types';
 import { buildRequestHeaders } from './http';
 import { reportWithPostprocess } from './postprocess';
 import type { PostprocessEntry } from './postprocess';
@@ -158,6 +158,30 @@ export function planOfficialViewerSessionBridge(courseId: string | number, modul
     method: 'POST',
     body: downloadPayload(courseId, moduleItemId, courseName, '', 'rename'),
   });
+}
+
+// ------------------------------------------------------------ Chrome window playback
+
+/** Starts the queue in a dedicated Chrome window driven by the backend. */
+export function startChromeWatch(items: ChromeWatchItemInput[]): Promise<ChromeWatchStatus> {
+  return requestJson<ChromeWatchStatus>('/api/watch/chrome/start', { method: 'POST', body: JSON.stringify({ items }) });
+}
+
+export function fetchChromeWatchStatus(): Promise<ChromeWatchStatus> {
+  return requestJson<ChromeWatchStatus>('/api/watch/chrome/status');
+}
+
+export function nextChromeWatch(): Promise<ChromeWatchStatus> {
+  return requestJson<ChromeWatchStatus>('/api/watch/chrome/next', { method: 'POST' });
+}
+
+export function stopChromeWatch(): Promise<ChromeWatchStatus> {
+  return requestJson<ChromeWatchStatus>('/api/watch/chrome/stop', { method: 'POST' });
+}
+
+/** Brings the Chrome window back (un-minimizes and raises it). */
+export function showChromeWatch(): Promise<ChromeWatchStatus> {
+  return requestJson<ChromeWatchStatus>('/api/watch/chrome/show', { method: 'POST' });
 }
 
 /** LMS cookies for an in-app page window (the desktop shell injects them into the new web view). */

@@ -22,6 +22,18 @@ class DownloadPlanRequest(BaseModel):
     conflict_strategy: str = "rename"
 
 
+class ChromeWatchItemRequest(BaseModel):
+    course_id: int | str
+    course_name: str = ""
+    module_item_id: int | str
+    title: str = ""
+    duration: float | None = None
+
+
+class ChromeWatchStartRequest(BaseModel):
+    items: list[ChromeWatchItemRequest]
+
+
 # Starting a download takes the same fields as planning one.
 DownloadRequest = DownloadPlanRequest
 

@@ -7,12 +7,14 @@ security middleware, JSON error handlers, shared state and the routers.
 from __future__ import annotations
 
 from collections.abc import Callable
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from starlette.concurrency import run_in_threadpool
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from ssu_lecture_downloader.api_errors import (
@@ -20,6 +22,7 @@ from ssu_lecture_downloader.api_errors import (
     background_job_error_code,
 )
 from ssu_lecture_downloader.app_context import AppContext, default_download_dir
+from ssu_lecture_downloader.chrome_watch import ChromeWatchManager
 from ssu_lecture_downloader.credentials import CredentialStore, default_credential_store
 from ssu_lecture_downloader.jobs import JobRunner
 from ssu_lecture_downloader.stt_remote import RemoteSTTService
@@ -57,8 +60,19 @@ def create_app(
     credential_store: CredentialStore | None = None,
     api_token: str | None = None,
     remote_stt: RemoteSTTService | None = None,
+    chrome_watch: ChromeWatchManager | None = None,
 ) -> FastAPI:
-    app = FastAPI(title="SSU Lecture Downloader Local API")
+    contexts: list[AppContext] = []
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        yield
+        # Backend exit: no Chrome playback window may outlive it.
+        for context in contexts:
+            if context.chrome_watch is not None:
+                await run_in_threadpool(context.chrome_watch.shutdown)
+
+    app = FastAPI(title="SSU Lecture Downloader Local API", lifespan=lifespan)
 
     # Middleware order: the last one added is the outermost. Request flow is
     # Host check -> CORS -> API token -> unhandled-error catch-all -> routes.
@@ -86,7 +100,9 @@ def create_app(
         media_paths=MediaPathPolicy(output_dir),
         runner=JobRunner(error_code_for=lambda exc: background_job_error_code(exc, service)),
         remote_stt=remote_stt or RemoteSTTService(),
+        chrome_watch=chrome_watch,
     )
+    contexts.append(ctx)
     for module in (health_routes, credentials_routes, download_routes, media_routes, stt_remote_routes, watch_routes, lms_pages_routes):
         # The routes are already built; attach them as-is instead of having FastAPI rebuild each one.
         app.router.routes.extend(module.build_router(ctx).routes)

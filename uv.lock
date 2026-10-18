@@ -933,6 +933,7 @@ dependencies = [
     { name = "python-dotenv" },
     { name = "typer" },
     { name = "uvicorn", extra = ["standard"] },
+    { name = "websockets" },
 ]
 
 [package.dev-dependencies]
@@ -953,6 +954,7 @@ requires-dist = [
     { name = "python-dotenv", specifier = ">=1" },
     { name = "typer", specifier = ">=0.12" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.47.0" },
+    { name = "websockets", specifier = ">=13" },
 ]
 
 [package.metadata.requires-dev]

@@ -15,6 +15,7 @@ dependencies = [
     "python-dotenv>=1",
     "typer>=0.12",
     "uvicorn[standard]>=0.47.0",
+    "websockets>=13",
 ]
 
 [project.scripts]

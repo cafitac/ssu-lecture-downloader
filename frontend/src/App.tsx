@@ -30,8 +30,8 @@ import { isTauriRuntime, openDownloadedFolder } from './lib/desktop';
 import { friendlyError } from './lib/errors';
 import { formatBytes, shortFolderName } from './lib/format';
 import type { JobPlan, PlannedItem } from './lib/jobItems';
-import type { CourseContentItem, CourseSummary, DeadlineEntryDto, DownloadOutputFormat } from './lib/types';
-import { buildAllCoursesQueue } from './lib/watch';
+import type { CourseContentItem, CourseSummary, DeadlineEntryDto, DownloadOutputFormat, WatchMode } from './lib/types';
+import { buildAllCoursesQueue, readWatchModePreference, writeWatchModePreference } from './lib/watch';
 
 const FORMAT_ORDER: DownloadOutputFormat[] = ['mp4', 'mp3', 'txt'];
 /** The LMS needs a moment to count a lecture that just ended before a reload shows it as watched. */
@@ -54,6 +54,8 @@ function Workspace({ session }: { session: LmsSession }) {
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [watchAllOpen, setWatchAllOpen] = useState(false);
+  // How a started queue plays; unset until the user chooses (then Chrome when it is installed).
+  const [watchModePreference, setWatchModePreference] = useState<WatchMode | null>(readWatchModePreference);
   // Lectures that played to their end in this session: not offered again before the LMS has counted them.
   const [playedIds, setPlayedIds] = useState<ReadonlySet<string>>(new Set());
 
@@ -112,7 +114,11 @@ function Workspace({ session }: { session: LmsSession }) {
     latest.current.content.markWatched(moduleItemId);
     setPlayedIds((current) => (current.has(moduleItemId) ? current : new Set(current).add(moduleItemId)));
   }, []);
-  const viewer = useOfficialViewer({ notify: push, onAuthError, onItemWatched, onQueueSettled });
+  const viewer = useOfficialViewer({ notify: push, onAuthError, onItemWatched, onQueueSettled, modePreference: watchModePreference });
+  const chooseWatchMode = useCallback((mode: WatchMode) => {
+    writeWatchModePreference(mode);
+    setWatchModePreference(mode);
+  }, []);
 
   useEffect(() => {
     setSelected(new Set());
@@ -321,6 +327,7 @@ function Workspace({ session }: { session: LmsSession }) {
               watchSelected={selectedVideos.length > 0}
               attachments={attachments}
               queue={viewer.queue}
+              watchMode={viewer.mode}
               openingKey={viewer.openingKey}
               actionBlockedReason={actionBlockedReason}
               isDownloaded={(key) => course !== null && (downloads.isDownloaded(course.id, key) || savedKeys.has(key))}
@@ -381,7 +388,7 @@ function Workspace({ session }: { session: LmsSession }) {
       </div>
       <Toasts toasts={toasts} dismiss={dismiss} />
       {watchAllOpen && allQueue.length > 0 && !viewer.queue.active && (
-        <WatchAllDialog items={allQueue} onStart={startWatchAll} onClose={() => setWatchAllOpen(false)} />
+        <WatchAllDialog items={allQueue} mode={viewer.mode} onStart={startWatchAll} onClose={() => setWatchAllOpen(false)} />
       )}
       {settingsOpen && (
         <SettingsDialog
@@ -389,6 +396,10 @@ function Workspace({ session }: { session: LmsSession }) {
           busy={downloads.active}
           media={media}
           debugEvents={viewer.debugEvents}
+          watchMode={viewer.mode}
+          chromeAvailable={viewer.chromeAvailable}
+          queueActive={viewer.queue.active}
+          onWatchModeChange={chooseWatchMode}
           onPickFolder={() => void chooseFolder()}
           onOpenFolder={() => void openFolder()}
           onSignOut={async () => {

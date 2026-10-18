@@ -5,6 +5,7 @@ mod launch_agent;
 mod native_download;
 mod reminders;
 mod viewer;
+mod watch_external;
 mod watch_queue;
 mod watch_runtime;
 
@@ -274,6 +275,7 @@ pub fn run() {
             watch_runtime::watch_queue_stop,
             watch_runtime::watch_queue_status,
             watch_runtime::watch_queue_show_window,
+            watch_runtime::watch_external_status,
             watch_runtime::watch_signal,
             backend::backend_supervision_status,
             backend::backend_api_base_url,

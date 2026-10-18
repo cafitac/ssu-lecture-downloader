@@ -24,6 +24,7 @@ use crate::viewer::{
     bridge_session_and_navigate, session_bridge_target, watch_debug_event, with_watch_assist,
     OfficialViewerSessionBridgeRequest, VIEWER_USER_AGENT,
 };
+use crate::watch_external::{pending_notifications, ExternalWatchView};
 use crate::watch_queue::{
     bottom_right_position, dock_badge, finished_notification, skipped_notification, tray_menu_text,
     tray_title, window_title, Phase, Progress, QueueCore, QueueItem, Rect, Snapshot, StallDecision,
@@ -43,6 +44,7 @@ const TRAY_ID: &str = "watch-queue";
 pub(crate) const WATCH_LABEL_PREFIX: &str = "watch-player";
 const QUEUE_EVENT: &str = "watch-queue-changed";
 const NOTICE_EVENT: &str = "watch-queue-notice";
+const EXTERNAL_COMMAND_EVENT: &str = "watch-external-command";
 const ENDED_EVENT: &str = "official-watch-ended";
 const DEBUG_EVENT: &str = "official-watch-debug";
 const MENU_SHOW: &str = "watch-show-window";
@@ -73,6 +75,19 @@ struct RuntimeState {
     finished_acknowledged: bool,
     /// Distinguishes the playback windows of successive runs.
     run_seq: u64,
+    /// A queue played outside this app (the Chrome window); mirrored into the menu bar, badge
+    /// and notifications only while the in-app queue is idle.
+    external: Option<ExternalRun>,
+}
+
+/// What the shell knows about the externally played queue (see `watch_external.rs`).
+struct ExternalRun {
+    run_id: String,
+    snapshot: Snapshot,
+    /// Highest notice id already announced with a macOS notification.
+    last_notice_id: u64,
+    finished_at: Option<Instant>,
+    finished_acknowledged: bool,
 }
 
 impl RuntimeState {
@@ -86,7 +101,16 @@ impl RuntimeState {
             finished_at: None,
             finished_acknowledged: false,
             run_seq: 0,
+            external: None,
         }
+    }
+
+    /// The externally played queue shows only while the in-app queue has nothing to show.
+    fn external_shown(&self) -> Option<&ExternalRun> {
+        if self.core.is_active() || self.core.phase() != Phase::Idle {
+            return None;
+        }
+        self.external.as_ref()
     }
 }
 
@@ -150,11 +174,28 @@ struct TrayView {
 
 impl View {
     fn of(state: &RuntimeState) -> Self {
-        let snapshot = state.core.snapshot();
+        match state.external_shown() {
+            Some(external) => Self::from_snapshot(
+                external.snapshot.clone(),
+                external.finished_at,
+                external.finished_acknowledged,
+            ),
+            None => Self::from_snapshot(
+                state.core.snapshot(),
+                state.finished_at,
+                state.finished_acknowledged,
+            ),
+        }
+    }
+
+    fn from_snapshot(
+        snapshot: Snapshot,
+        finished_at: Option<Instant>,
+        finished_acknowledged: bool,
+    ) -> Self {
         let finished_visible = snapshot.phase == "finished"
-            && !state.finished_acknowledged
-            && state
-                .finished_at
+            && !finished_acknowledged
+            && finished_at
                 .is_some_and(|at| at.elapsed() < Duration::from_secs(FINISHED_VISIBLE_SECS));
         let visible = snapshot.active || finished_visible;
         Self {
@@ -257,10 +298,26 @@ pub(crate) fn install_tray(app: &AppHandle) {
         .tooltip("자동 재생")
         .on_menu_event(|app, event| match event.id().as_ref() {
             MENU_SHOW => {
-                let _ = show_playback_window(app);
+                if external_active(app) {
+                    external_command(app, "show");
+                } else {
+                    let _ = show_playback_window(app);
+                }
             }
-            MENU_NEXT => next_item(app),
-            MENU_STOP => stop_queue(app),
+            MENU_NEXT => {
+                if external_active(app) {
+                    external_command(app, "next");
+                } else {
+                    next_item(app);
+                }
+            }
+            MENU_STOP => {
+                if external_active(app) {
+                    external_command(app, "stop");
+                } else {
+                    stop_queue(app);
+                }
+            }
             MENU_OPEN_APP => show_main_window(app),
             _ => {}
         })
@@ -364,14 +421,23 @@ fn apply_tray(app: &AppHandle, view: &TrayView) {
 
 /// A click on the "finished" menu bar text dismisses it after a moment.
 fn acknowledge_finished(app: &AppHandle) {
-    if read(app, |state| state.core.phase() != Phase::Finished) {
+    if read(app, |state| match state.external_shown() {
+        Some(external) => external.snapshot.phase != "finished",
+        None => state.core.phase() != Phase::Finished,
+    }) {
         return;
     }
     let app = app.clone();
     std::thread::spawn(move || {
         std::thread::sleep(FINISHED_ACK_DELAY);
         let (_, view) = update(&app, |state| {
-            if state.core.phase() == Phase::Finished {
+            if state.external_shown().is_some() {
+                if let Some(external) = state.external.as_mut() {
+                    if external.snapshot.phase == "finished" {
+                        external.finished_acknowledged = true;
+                    }
+                }
+            } else if state.core.phase() == Phase::Finished {
                 state.finished_acknowledged = true;
             }
         });
@@ -470,6 +536,7 @@ pub(crate) fn watch_queue_start(
     close_window(&app, previous);
     let (step, view) = update(&app, |state| {
         state.run_seq += 1;
+        state.external = None;
         state.core = QueueCore::new(items).with_epoch(state.core.epoch() + 1);
         state.target = None;
         state.accepting = true;
@@ -505,6 +572,87 @@ pub(crate) fn watch_queue_show_window(app: AppHandle) -> Result<(), String> {
     show_playback_window(&app)
 }
 
+/// The Chrome-mode queue as the React app just read it from the backend: shown in the menu bar
+/// and Dock badge like an in-app queue, with macOS notifications for its new notices. Ignored
+/// while the in-app queue is running (only one mode runs at a time).
+#[tauri::command]
+pub(crate) fn watch_external_status(app: AppHandle, view: ExternalWatchView) {
+    let (notifications, shell_view) =
+        update(&app, |state| apply_external(state, &view, Instant::now()));
+    publish_outputs(&app, &shell_view);
+    for (title, body) in notifications {
+        notify_later(&app, title, body);
+    }
+}
+
+/// Fold one external status into the runtime state; returns the notifications to send.
+fn apply_external(
+    state: &mut RuntimeState,
+    view: &ExternalWatchView,
+    now: Instant,
+) -> Vec<(String, String)> {
+    if state.core.is_active() {
+        return Vec::new();
+    }
+    let snapshot = view.to_snapshot();
+    let relevant = snapshot.active || snapshot.phase == "finished";
+    if !relevant {
+        // Stopped, failed or idle: nothing to show any more.
+        state.external = None;
+        return Vec::new();
+    }
+    if state.core.phase() == Phase::Finished {
+        // A finished in-app run no longer hides the new one.
+        let epoch = state.core.epoch() + 1;
+        state.core = QueueCore::new(Vec::new()).with_epoch(epoch);
+    }
+    let fresh_run = state
+        .external
+        .as_ref()
+        .map_or(true, |external| external.run_id != view.run_id);
+    if fresh_run {
+        state.external = Some(ExternalRun {
+            run_id: view.run_id.clone(),
+            snapshot: snapshot.clone(),
+            last_notice_id: 0,
+            finished_at: None,
+            finished_acknowledged: false,
+        });
+    }
+    let Some(external) = state.external.as_mut() else {
+        return Vec::new();
+    };
+    let became_finished = snapshot.phase == "finished" && external.snapshot.phase != "finished";
+    external.snapshot = snapshot;
+    if became_finished || (external.snapshot.phase == "finished" && external.finished_at.is_none())
+    {
+        external.finished_at = Some(now);
+        external.finished_acknowledged = false;
+    }
+    let (notifications, newest) =
+        pending_notifications(&external.snapshot, &view.notices, external.last_notice_id);
+    external.last_notice_id = newest;
+    notifications
+}
+
+/// Ask the React app to run a menu bar action on the externally played queue.
+fn external_command(app: &AppHandle, command: &'static str) {
+    let _ = app.emit(EXTERNAL_COMMAND_EVENT, ExternalCommand { command });
+}
+
+#[derive(Serialize, Clone)]
+struct ExternalCommand {
+    command: &'static str,
+}
+
+fn external_active(app: &AppHandle) -> bool {
+    read(app, |state| {
+        state
+            .external_shown()
+            .is_some_and(|run| run.snapshot.active)
+    })
+}
+
 fn next_item(app: &AppHandle) {
     let (step, view) = update(app, |state| state.core.skip_current(USER_SKIP_REASON));
     if step == Step::None {
@@ -526,8 +674,13 @@ fn stop_queue(app: &AppHandle) {
 
 /// Whether a queue is running (the main window then hides instead of closing).
 pub(crate) fn is_queue_active(app: &AppHandle) -> bool {
-    app.try_state::<WatchRuntime>()
-        .is_some_and(|runtime| lock(&runtime.state).core.is_active())
+    app.try_state::<WatchRuntime>().is_some_and(|runtime| {
+        let state = lock(&runtime.state);
+        state.core.is_active()
+            || state
+                .external_shown()
+                .is_some_and(|run| run.snapshot.active)
+    })
 }
 
 /// App is quitting: close the playback window and clear the menu bar and Dock.
@@ -535,6 +688,7 @@ pub(crate) fn shutdown(app: &AppHandle) {
     if app.try_state::<WatchRuntime>().is_none() {
         return;
     }
+    update(app, |state| state.external = None);
     stop_queue(app);
 }
 
@@ -1621,6 +1775,178 @@ mod tests {
         assert_eq!(stopped.badge, None);
     }
 
+    fn external_view(
+        run_id: &str,
+        phase: &str,
+        active: bool,
+        notices: serde_json::Value,
+    ) -> ExternalWatchView {
+        serde_json::from_value(serde_json::json!({
+            "run_id": run_id,
+            "active": active,
+            "phase": phase,
+            "index": 0,
+            "total": 2,
+            "done_count": 0,
+            "skipped_count": 0,
+            "current_title": "1주차 강의",
+            "position_secs": 61.0,
+            "duration_secs": 3026.0,
+            "remaining_secs": 2965.0,
+            "total_remaining_secs": 5990.0,
+            "items": [
+                {"title": "1주차 강의", "state": "playing"},
+                {"title": "2주차 강의", "state": "pending"}
+            ],
+            "notices": notices,
+        }))
+        .expect("view")
+    }
+
+    #[test]
+    fn an_external_queue_drives_the_menu_bar_and_badge_like_the_in_app_one() {
+        let mut state = RuntimeState::new();
+        let sent = apply_external(
+            &mut state,
+            &external_view("r1", "playing", true, serde_json::json!([])),
+            Instant::now(),
+        );
+        assert!(sent.is_empty());
+        let view = View::of(&state);
+        assert!(view.tray.visible);
+        assert_eq!(view.tray.title, "▶ 1/2 · 49:25 남음");
+        assert_eq!(view.tray.menu.header, "1주차 강의 · 01:01 / 50:26");
+        assert_eq!(view.badge, Some(1));
+        assert!(state
+            .external_shown()
+            .is_some_and(|run| run.snapshot.active));
+
+        // It ends: the finished text shows, no badge, and one notification is sent once.
+        let notices = serde_json::json!([{"id": 1, "kind": "finished", "text": "done"}]);
+        let finished = external_view("r1", "finished", false, notices);
+        let sent = apply_external(&mut state, &finished, Instant::now());
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].0, "자동 재생 완료");
+        let view = View::of(&state);
+        assert!(view.tray.visible && view.tray.title.starts_with("✓"));
+        assert_eq!(view.badge, None);
+        assert!(apply_external(&mut state, &finished, Instant::now()).is_empty());
+
+        // A click on the finished text acknowledges it.
+        state
+            .external
+            .as_mut()
+            .expect("external")
+            .finished_acknowledged = true;
+        assert!(!View::of(&state).tray.visible);
+    }
+
+    #[test]
+    fn a_stopped_or_failed_external_queue_leaves_the_menu_bar() {
+        let mut state = RuntimeState::new();
+        apply_external(
+            &mut state,
+            &external_view("r1", "playing", true, serde_json::json!([])),
+            Instant::now(),
+        );
+        assert!(View::of(&state).tray.visible);
+        apply_external(
+            &mut state,
+            &external_view("r1", "idle", false, serde_json::json!([])),
+            Instant::now(),
+        );
+        assert!(state.external.is_none());
+        assert!(!View::of(&state).tray.visible);
+        assert_eq!(View::of(&state).badge, None);
+    }
+
+    #[test]
+    fn a_new_external_run_announces_its_notices_from_the_start() {
+        let mut state = RuntimeState::new();
+        let skipped = serde_json::json!([{"id": 1, "kind": "skipped", "text": "t", "item_title": "2주차", "reason": "재생이 멈춰 건너뛰었어요"}]);
+        assert_eq!(
+            apply_external(
+                &mut state,
+                &external_view("a", "playing", true, skipped.clone()),
+                Instant::now()
+            )
+            .len(),
+            1
+        );
+        assert!(apply_external(
+            &mut state,
+            &external_view("a", "playing", true, skipped.clone()),
+            Instant::now()
+        )
+        .is_empty());
+        // Another run restarts the ids at 1.
+        assert_eq!(
+            apply_external(
+                &mut state,
+                &external_view("b", "playing", true, skipped),
+                Instant::now()
+            )
+            .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn the_in_app_queue_wins_over_an_external_one() {
+        let mut state = RuntimeState::new();
+        state.core = QueueCore::new(vec![
+            QueueItem::new("1", "앱 강의", Some(600.0)).with_course("9", "c")
+        ]);
+        state.core.start();
+        let sent = apply_external(
+            &mut state,
+            &external_view("r1", "playing", true, serde_json::json!([])),
+            Instant::now(),
+        );
+        assert!(sent.is_empty() && state.external.is_none());
+        assert_eq!(
+            View::of(&state).snapshot.current_title.as_deref(),
+            Some("앱 강의")
+        );
+
+        // Started later in app mode, a stale external run disappears from the menu bar.
+        state.core.stop();
+        let mut other = RuntimeState::new();
+        apply_external(
+            &mut other,
+            &external_view("r1", "playing", true, serde_json::json!([])),
+            Instant::now(),
+        );
+        other.core = QueueCore::new(vec![
+            QueueItem::new("1", "앱 강의", Some(600.0)).with_course("9", "c")
+        ]);
+        other.core.start();
+        assert_eq!(
+            View::of(&other).snapshot.current_title.as_deref(),
+            Some("앱 강의")
+        );
+    }
+
+    #[test]
+    fn a_finished_in_app_run_gives_way_to_a_new_external_run() {
+        let mut state = RuntimeState::new();
+        state.core = QueueCore::new(vec![
+            QueueItem::new("1", "앱 강의", Some(600.0)).with_course("9", "c")
+        ]);
+        state.core.start();
+        state.core.on_ended();
+        assert_eq!(state.core.phase(), Phase::Finished);
+        apply_external(
+            &mut state,
+            &external_view("r1", "playing", true, serde_json::json!([])),
+            Instant::now(),
+        );
+        assert_eq!(
+            View::of(&state).snapshot.current_title.as_deref(),
+            Some("1주차 강의")
+        );
+    }
+
     #[test]
     fn runtime_wiring_keeps_the_rules_of_the_playback_window() {
         let source = include_str!("watch_runtime.rs");
@@ -1642,6 +1968,9 @@ mod tests {
         for forbidden in ["on_navigation", "ssu-watch"] {
             assert!(!production.contains(forbidden), "{forbidden}");
         }
+        // The external (Chrome) mode feeds the same tray code and is only reachable from the main window.
+        assert!(production.contains("pub(crate) fn watch_external_status("));
+        assert!(production.contains("external_command(app, \"stop\")"));
         // No attempt to fake what the page reports.
         for forbidden in ["visibilityState", "playbackRate", "set_cookie"] {
             assert!(!production.contains(forbidden), "{forbidden}");

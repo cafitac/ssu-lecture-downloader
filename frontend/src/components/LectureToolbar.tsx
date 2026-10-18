@@ -1,5 +1,6 @@
 import type { LectureTab } from '../lib/content';
-import type { WatchQueueState } from '../lib/types';
+import type { WatchMode, WatchQueueState } from '../lib/types';
+import { WATCH_WINDOW_HINT } from '../lib/watch';
 
 interface Props {
   tab: LectureTab;
@@ -8,6 +9,8 @@ interface Props {
   taskCount: number;
   unwatchedOnly: boolean;
   queue: WatchQueueState;
+  /** How a started queue plays (decides the window sentence of the tooltip). */
+  watchMode: WatchMode;
   /** Open, unwatched videos the queue would play. */
   watchCount: number;
   watchSelected: boolean;
@@ -18,7 +21,7 @@ interface Props {
 }
 
 export function LectureToolbar({
-  tab, videoCount, materialCount, taskCount, unwatchedOnly, queue, watchCount, watchSelected, watchDisabled, onTabChange, onUnwatchedOnlyChange, onStartWatch,
+  tab, videoCount, materialCount, taskCount, unwatchedOnly, queue, watchMode, watchCount, watchSelected, watchDisabled, onTabChange, onUnwatchedOnlyChange, onStartWatch,
 }: Props) {
   return (
     <div className="toolbar">
@@ -50,10 +53,10 @@ export function LectureToolbar({
             queue.active
               ? '자동 재생 중이에요. 위쪽 상태 줄에서 멈출 수 있어요.'
               : watchSelected
-                ? `선택한 강의 ${watchCount}개를 목록 순서대로 소리 없이 자동 재생해요. 작은 재생 창이 화면 구석에 떠 있어요.`
+                ? `선택한 강의 ${watchCount}개를 목록 순서대로 소리 없이 자동 재생해요. ${WATCH_WINDOW_HINT[watchMode]}`
                 : watchCount === 0
                   ? '열려 있는데 아직 안 본 강의가 없어요. 다시 보려면 강의를 선택하세요.'
-                  : `열린 안 본 강의 ${watchCount}개를 마감이 빠른 순서로 소리 없이 자동 재생해요. 작은 재생 창이 화면 구석에 떠 있어요.`
+                  : `열린 안 본 강의 ${watchCount}개를 마감이 빠른 순서로 소리 없이 자동 재생해요. ${WATCH_WINDOW_HINT[watchMode]}`
           }
           onClick={onStartWatch}
         >

@@ -14,6 +14,7 @@ from ssu_lecture_downloader.api_errors import (
     missing_credentials_error,
     service_exception_error,
 )
+from ssu_lecture_downloader.chrome_watch import ChromeWatchManager
 from ssu_lecture_downloader.credentials import CredentialStore
 from ssu_lecture_downloader.jobs import Job, JobOutcome, JobRegistry, JobRunner
 from ssu_lecture_downloader.security import MediaPathPolicy
@@ -46,6 +47,8 @@ class AppContext:
     dependency_jobs: JobRegistry = field(default_factory=JobRegistry)
     artifact_jobs: JobRegistry = field(default_factory=JobRegistry)
     remote_stt: RemoteSTTService = field(default_factory=RemoteSTTService)
+    # Built by the watch router (it needs the credentials/service helpers above) unless injected.
+    chrome_watch: ChromeWatchManager | None = None
 
     def require_credentials(self) -> tuple[str, str]:
         pair = self.credentials.get()
@@ -66,6 +69,10 @@ class AppContext:
 
     def job_error_code(self, exc: Exception) -> str:
         return background_job_error_code(exc, self.service)
+
+    def call_service_error(self, exc: Exception) -> HTTPException:
+        """The API error a service exception maps to (for callers outside a request)."""
+        return service_exception_error(exc, self.service)
 
     def call_service(self, operation: Callable[[], T]) -> T:
         """Run a service call, mapping any failure to the JSON error shape."""

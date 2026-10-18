@@ -6,7 +6,8 @@ import { formatDeadline } from '../lib/deadline';
 import { isTauriRuntime } from '../lib/desktop';
 import { MAC_STUDIO_PRESET, REMOTE_KIND_LABEL, REMOTE_STT_NOTE, draftFromStatus, patchFromDraft, remoteSummary } from '../lib/remoteStt';
 import type { RemoteSttDraft } from '../lib/remoteStt';
-import type { RemoteSttKind, WatchDebugEvent } from '../lib/types';
+import type { RemoteSttKind, WatchDebugEvent, WatchMode } from '../lib/types';
+import { CHROME_MISSING_NOTE, WATCH_MODE_DESCRIPTION, WATCH_MODE_LABEL } from '../lib/watch';
 import { Dialog } from './Dialog';
 import { FolderIcon } from './Icons';
 import { Spinner } from './Screens';
@@ -16,6 +17,11 @@ interface Props {
   busy: boolean;
   media: MediaDependencies;
   debugEvents: WatchDebugEvent[];
+  /** The mode a started queue plays in, whether Chrome is installed (null: not known yet) and whether a queue runs now. */
+  watchMode: WatchMode;
+  chromeAvailable: boolean | null;
+  queueActive: boolean;
+  onWatchModeChange: (mode: WatchMode) => void;
   onPickFolder: () => void;
   onOpenFolder: () => void;
   onSignOut: () => Promise<string | null>;
@@ -159,6 +165,36 @@ function RemoteComponentRow({ remote }: { remote: RemoteStt }) {
   );
 }
 
+function WatchModeSection({ mode, chromeAvailable, queueActive, onChange }: { mode: WatchMode; chromeAvailable: boolean | null; queueActive: boolean; onChange: (mode: WatchMode) => void }) {
+  const modes: WatchMode[] = ['chrome', 'app'];
+  return (
+    <section className="setting">
+      <h3>자동 재생 방식</h3>
+      <div className="choice-list" role="radiogroup" aria-label="자동 재생 방식">
+        {modes.map((option) => {
+          const unavailable = option === 'chrome' && chromeAvailable === false;
+          return (
+            <label key={option} className="choice">
+              <input
+                type="radio"
+                name="watch-mode"
+                value={option}
+                checked={mode === option}
+                disabled={unavailable || queueActive}
+                onChange={() => onChange(option)}
+              />
+              <span>{WATCH_MODE_LABEL[option]}</span>
+            </label>
+          );
+        })}
+      </div>
+      <p className="muted small">{WATCH_MODE_DESCRIPTION[mode]}</p>
+      {chromeAvailable === false && <p className="muted small">{CHROME_MISSING_NOTE}</p>}
+      {queueActive && <p className="muted small">자동 재생 중에는 바꿀 수 없어요.</p>}
+    </section>
+  );
+}
+
 function WatchDiagnostics({ events }: { events: WatchDebugEvent[] }) {
   return (
     <details className="diagnostics">
@@ -208,7 +244,7 @@ function RemindersSection() {
   );
 }
 
-export function SettingsDialog({ downloadDir, busy, media, debugEvents, onPickFolder, onOpenFolder, onSignOut, onClose }: Props) {
+export function SettingsDialog({ downloadDir, busy, media, debugEvents, watchMode, chromeAvailable, queueActive, onWatchModeChange, onPickFolder, onOpenFolder, onSignOut, onClose }: Props) {
   const [signingOut, setSigningOut] = useState(false);
   const [signOutError, setSignOutError] = useState<string | null>(null);
   const desktop = isTauriRuntime();
@@ -276,6 +312,8 @@ export function SettingsDialog({ downloadDir, busy, media, debugEvents, onPickFo
         )}
         <RemoteSttSection remote={media.remote} />
       </section>
+
+      <WatchModeSection mode={watchMode} chromeAvailable={chromeAvailable} queueActive={queueActive} onChange={onWatchModeChange} />
 
       <section className="setting">
         <h3>계정</h3>

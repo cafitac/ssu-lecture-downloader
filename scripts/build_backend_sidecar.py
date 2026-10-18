@@ -44,6 +44,9 @@ HIDDEN_IMPORTS = [
     "uvicorn.protocols.http.auto",
     "uvicorn.protocols.websockets.auto",
     "uvicorn.lifespan.on",
+    # Imported lazily by chrome_cdp (Chrome playback driver).
+    "websockets.sync.client",
+    "websockets.exceptions",
 ]
 
 

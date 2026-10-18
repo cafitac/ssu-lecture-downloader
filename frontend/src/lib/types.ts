@@ -451,6 +451,76 @@ export interface WatchQueueState {
   /** False while the playback window is minimized or covered (the player stops then). */
   rendering: boolean;
   items: WatchQueueItemState[];
+  /** Which playback mode runs this queue (the in-app window when left out). */
+  source?: WatchMode;
+  /** Course of the current lecture (shown by the Chrome mode strip). */
+  current_course_name?: string | null;
+  /** The Chrome window is still being opened (nothing is playing yet). */
+  launching?: boolean;
+}
+
+/** How "순서대로 시청" plays: a dedicated Chrome window, or the small window inside the app. */
+export type WatchMode = 'chrome' | 'app';
+
+export type ChromeWatchState = 'idle' | 'starting' | 'playing' | 'finished' | 'stopped' | 'failed';
+
+export interface ChromeWatchItemInput {
+  course_id: string;
+  course_name: string;
+  module_item_id: string;
+  title: string;
+  duration: number | null;
+}
+
+export interface ChromeWatchNotice {
+  id: number;
+  /** `finished`, `skipped`, `stalled` or `failed`. */
+  kind: string;
+  level: 'info' | 'success' | 'error';
+  text: string;
+  item_title: string | null;
+  reason: string | null;
+}
+
+/** `GET /api/watch/chrome/status`: the Chrome playback queue. */
+export interface ChromeWatchStatus {
+  ok: boolean;
+  state: ChromeWatchState;
+  run_id: string | null;
+  active: boolean;
+  chrome_available: boolean;
+  index: number;
+  total: number;
+  done_count: number;
+  skipped_count: number;
+  current: {
+    module_item_id: string;
+    course_id: string;
+    course_name: string;
+    title: string;
+    phase: 'opening' | 'playing' | 'stalled';
+    position: number | null;
+    duration: number | null;
+    paused: boolean;
+  } | null;
+  items: Array<{
+    module_item_id: string;
+    course_id: string;
+    course_name: string;
+    title: string;
+    state: WatchItemState;
+    reason: string | null;
+    duration: number | null;
+  }>;
+  error_code: string | null;
+  error_message: string | null;
+  notices: ChromeWatchNotice[];
+}
+
+/** What the desktop shell gets for the menu bar: the queue as shown plus the run and its notices. */
+export interface ExternalWatchView extends WatchQueueState {
+  run_id: string;
+  notices: ChromeWatchNotice[];
 }
 
 /** One lecture handed to the desktop shell's queue. */
