@@ -2,8 +2,10 @@
 //! Dock badge, notifications and the threads that move the queue along.
 //!
 //! The queue state lives here (in Rust), fed only by the signals the page script reports
-//! (`ssu-watch://progress|heartbeat|ended|stalled|debug`), so the menu bar keeps updating even
-//! when the main window's web view is throttled or hidden. The React app reads the same state
+//! through the `watch_signal` command (`progress|heartbeat|ended|stalled|debug`), so the menu
+//! bar keeps updating even when the main window's web view is throttled or hidden. Signals
+//! travel over Tauri IPC, never as navigations: assigning `location` from the page aborts the
+//! document (and iframe) load that is still in flight. The React app reads the same state
 //! through `watch_queue_status` and the `watch-queue-changed` event.
 //!
 //! Rules this module keeps:
@@ -19,8 +21,8 @@
 use crate::backend::{BackendManager, BACKEND_TOKEN_HEADER};
 use crate::reminders::{Notifier, OsascriptNotifier};
 use crate::viewer::{
-    bridge_session_and_navigate, session_bridge_target, watch_debug_event_from_url,
-    with_watch_assist, OfficialViewerSessionBridgeRequest, VIEWER_USER_AGENT,
+    bridge_session_and_navigate, session_bridge_target, watch_debug_event, with_watch_assist,
+    OfficialViewerSessionBridgeRequest, VIEWER_USER_AGENT,
 };
 use crate::watch_queue::{
     bottom_right_position, dock_badge, finished_notification, skipped_notification, tray_menu_text,
@@ -30,6 +32,7 @@ use crate::watch_queue::{
     WATCH_WINDOW_WIDTH,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 use tauri::menu::{IsMenuItem, Menu, MenuItem, PredefinedMenuItem};
@@ -37,7 +40,7 @@ use tauri::tray::{TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager, Wry};
 
 const TRAY_ID: &str = "watch-queue";
-const WATCH_LABEL_PREFIX: &str = "watch-player";
+pub(crate) const WATCH_LABEL_PREFIX: &str = "watch-player";
 const QUEUE_EVENT: &str = "watch-queue-changed";
 const NOTICE_EVENT: &str = "watch-queue-notice";
 const ENDED_EVENT: &str = "official-watch-ended";
@@ -59,8 +62,6 @@ const FINISHED_ACK_DELAY: Duration = Duration::from_secs(8);
 
 struct RuntimeState {
     core: QueueCore,
-    course_id: String,
-    course_name: String,
     window_label: Option<String>,
     /// The page the current lecture was opened at (reloaded once when it stalls).
     target: Option<tauri::Url>,
@@ -78,8 +79,6 @@ impl RuntimeState {
     fn new() -> Self {
         Self {
             core: QueueCore::new(Vec::new()),
-            course_id: String::new(),
-            course_name: String::new(),
             window_label: None,
             target: None,
             last_activity: Instant::now(),
@@ -385,6 +384,11 @@ fn acknowledge_finished(app: &AppHandle) {
 #[derive(Debug, Deserialize)]
 pub(crate) struct WatchQueueItemInput {
     module_item_id: String,
+    /// The lecture's own course (a queue may mix courses); falls back to the request's course.
+    #[serde(default)]
+    course_id: Option<String>,
+    #[serde(default)]
+    course_name: Option<String>,
     title: String,
     /// Length in seconds from the lecture list, when known.
     #[serde(default)]
@@ -393,31 +397,58 @@ pub(crate) struct WatchQueueItemInput {
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct WatchQueueStartRequest {
+    /// Default course of items that do not name their own (per-course queues).
+    #[serde(default)]
     course_id: String,
+    #[serde(default)]
     course_name: String,
     items: Vec<WatchQueueItemInput>,
 }
 
+/// Clean the request into queue items: each carries its own course (its own fields, else the
+/// request's), duplicates and blank ids are dropped, and every item must have a course.
 fn queue_items(request: &WatchQueueStartRequest) -> Result<Vec<QueueItem>, String> {
-    if request.course_id.trim().is_empty() {
-        return Err("missing_course_id".to_string());
-    }
     let mut seen = std::collections::HashSet::new();
-    let items: Vec<QueueItem> = request
+    let mut items: Vec<QueueItem> = Vec::new();
+    for item in request
         .items
         .iter()
         .filter(|item| !item.module_item_id.trim().is_empty())
-        .filter(|item| seen.insert(item.module_item_id.trim().to_string()))
-        .take(MAX_QUEUE_ITEMS)
-        .map(|item| {
-            let title = item.title.trim();
+    {
+        let course_id = item
+            .course_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| request.course_id.trim());
+        if course_id.is_empty() {
+            return Err("missing_course_id".to_string());
+        }
+        let course_name = item
+            .course_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| request.course_name.trim());
+        if !seen.insert((
+            course_id.to_string(),
+            item.module_item_id.trim().to_string(),
+        )) {
+            continue;
+        }
+        if items.len() >= MAX_QUEUE_ITEMS {
+            break;
+        }
+        let title = item.title.trim();
+        items.push(
             QueueItem::new(
                 item.module_item_id.trim(),
                 if title.is_empty() { "강의" } else { title },
                 item.duration,
             )
-        })
-        .collect();
+            .with_course(course_id, course_name),
+        );
+    }
     if items.is_empty() {
         return Err("empty_watch_queue".to_string());
     }
@@ -439,8 +470,6 @@ pub(crate) fn watch_queue_start(
     close_window(&app, previous);
     let (step, view) = update(&app, |state| {
         state.run_seq += 1;
-        state.course_id = request.course_id.trim().to_string();
-        state.course_name = request.course_name.clone();
         state.core = QueueCore::new(items).with_epoch(state.core.epoch() + 1);
         state.target = None;
         state.accepting = true;
@@ -576,13 +605,26 @@ fn finish_queue(app: &AppHandle) {
     );
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq)]
 struct OpenJob {
     course_id: String,
     course_name: String,
     module_item_id: String,
     title: String,
     total: usize,
+}
+
+impl OpenJob {
+    /// The lecture is opened in the course of its own queue item (queues may mix courses).
+    fn from_item(item: &QueueItem, total: usize) -> Self {
+        Self {
+            course_id: item.course_id.clone(),
+            course_name: item.course_name.clone(),
+            module_item_id: item.module_item_id.clone(),
+            title: item.title.clone(),
+            total,
+        }
+    }
 }
 
 enum OpenError {
@@ -599,13 +641,7 @@ fn open_item(app: &AppHandle, epoch: u64, index: usize) {
             return None;
         }
         let item = state.core.items().get(index)?;
-        Some(OpenJob {
-            course_id: state.course_id.clone(),
-            course_name: state.course_name.clone(),
-            module_item_id: item.module_item_id.clone(),
-            title: item.title.clone(),
-            total: state.core.items().len(),
-        })
+        Some(OpenJob::from_item(item, state.core.items().len()))
     });
     let Some(job) = job else {
         wlog(
@@ -913,25 +949,21 @@ fn create_watch_window(
         }
         None => builder = builder.center(),
     }
-    let signal_app = app.clone();
-    let signal_label = label.to_string();
     let load_app = app.clone();
-    let window = with_watch_assist(builder, move |url| {
-        handle_signal(&signal_app, &signal_label, url)
-    })
-    .on_page_load(move |_, payload| {
-        let url = payload.url();
-        wlog(
-            &load_app,
-            format!(
-                "page {:?} host={} path={}",
-                payload.event(),
-                url.host_str().unwrap_or_default(),
-                url.path()
-            ),
-        );
-    })
-    .build()?;
+    let window = with_watch_assist(builder)
+        .on_page_load(move |_, payload| {
+            let url = payload.url();
+            wlog(
+                &load_app,
+                format!(
+                    "page {:?} host={} path={}",
+                    payload.event(),
+                    url.host_str().unwrap_or_default(),
+                    url.path()
+                ),
+            );
+        })
+        .build()?;
     wlog(app, format!("window created label={label}"));
     let gone_app = app.clone();
     let gone_label = label.to_string();
@@ -961,20 +993,51 @@ fn window_gone(app: &AppHandle, label: &str) {
 
 // ---------------------------------------------------------------------- signals
 
-/// A `ssu-watch://<kind>?...` navigation of the playback window (runs on the main thread, so
-/// it only does short work; anything slow is handed to a thread).
-fn handle_signal(app: &AppHandle, label: &str, url: &tauri::Url) {
+/// Most fields and the longest value a signal may carry (the page script sends a handful of
+/// short fields; anything beyond that is cut).
+const MAX_SIGNAL_FIELDS: usize = 24;
+const MAX_SIGNAL_VALUE_CHARS: usize = 180;
+
+/// The page script's report (`progress`, `heartbeat`, `ended`, `stalled`, `debug`) arriving
+/// over Tauri IPC from the LMS page in the playback window. Only that window's remote pages may
+/// call it (capabilities/watch-remote.json); the calling webview's label is checked again here,
+/// so a signal from any other window, or from a window of an earlier run, is dropped.
+#[tauri::command]
+pub(crate) fn watch_signal(
+    app: AppHandle,
+    webview: tauri::Webview,
+    kind: String,
+    payload: HashMap<String, String>,
+) {
+    handle_signal(&app, webview.label(), &kind, &clean_signal(payload));
+}
+
+/// Bounded copy of a signal payload (never trust the page about sizes).
+fn clean_signal(payload: HashMap<String, String>) -> HashMap<String, String> {
+    payload
+        .into_iter()
+        .take(MAX_SIGNAL_FIELDS)
+        .map(|(key, value)| {
+            let key: String = key.chars().take(MAX_SIGNAL_VALUE_CHARS).collect();
+            let value: String = value.chars().take(MAX_SIGNAL_VALUE_CHARS).collect();
+            (key, value)
+        })
+        .collect()
+}
+
+/// Apply one signal of the playback window `label` (runs on the main thread, so it only does
+/// short work; anything slow is handed to a thread).
+fn handle_signal(app: &AppHandle, label: &str, kind: &str, values: &HashMap<String, String>) {
     if read(app, |state| state.window_label.as_deref() != Some(label)) {
         return;
     }
-    let pairs = query_pairs(url);
-    let kind = url.host_str().unwrap_or_default();
-    let stage = pair(&pairs, "stage").unwrap_or_default().to_string();
+    let field = |key: &str| values.get(key).map(String::as_str);
     wlog(
         app,
         format!(
-            "signal {kind} {stage} frame={}",
-            pair(&pairs, "frame").unwrap_or_default()
+            "signal {kind} {} frame={}",
+            field("stage").unwrap_or_default(),
+            field("frame").unwrap_or_default()
         ),
     );
     if matches!(kind, "progress" | "ended" | "stalled") && !read(app, |state| state.accepting) {
@@ -982,10 +1045,10 @@ fn handle_signal(app: &AppHandle, label: &str, url: &tauri::Url) {
     }
     match kind {
         "debug" => {
-            let _ = app.emit(DEBUG_EVENT, watch_debug_event_from_url(url));
+            let _ = app.emit(DEBUG_EVENT, watch_debug_event(values));
         }
         "progress" => {
-            if let Some(progress) = progress_from_pairs(&pairs) {
+            if let Some(progress) = progress_from_values(values) {
                 let (_, view) = update(app, |state| {
                     state.last_activity = Instant::now();
                     state.core.report_progress(progress)
@@ -994,7 +1057,7 @@ fn handle_signal(app: &AppHandle, label: &str, url: &tauri::Url) {
             }
         }
         "heartbeat" => {
-            let rendering = pair(&pairs, "rendering") != Some("0");
+            let rendering = field("rendering") != Some("0");
             let (_, view) = update(app, |state| state.core.report_rendering(rendering));
             publish_outputs(app, &view);
         }
@@ -1081,23 +1144,11 @@ fn reload_current(app: &AppHandle) {
     }
 }
 
-pub(crate) fn query_pairs(url: &tauri::Url) -> Vec<(String, String)> {
-    url.query_pairs()
-        .map(|(key, value)| (key.into_owned(), value.into_owned()))
-        .collect()
-}
-
-fn pair<'a>(pairs: &'a [(String, String)], key: &str) -> Option<&'a str> {
-    pairs
-        .iter()
-        .find(|(name, _)| name == key)
-        .map(|(_, value)| value.as_str())
-}
-
 /// The progress report of the page script (`time`, `duration`, `main`, `paused`, `rendering`).
-pub(crate) fn progress_from_pairs(pairs: &[(String, String)]) -> Option<Progress> {
+pub(crate) fn progress_from_values(values: &HashMap<String, String>) -> Option<Progress> {
+    let text = |key: &str| values.get(key).map(String::as_str);
     let number = |key: &str| {
-        pair(pairs, key)
+        text(key)
             .and_then(|value| value.parse::<f64>().ok())
             .filter(|value| value.is_finite() && *value >= 0.0)
     };
@@ -1106,9 +1157,9 @@ pub(crate) fn progress_from_pairs(pairs: &[(String, String)]) -> Option<Progress
     Some(Progress {
         position,
         duration,
-        main: pair(pairs, "main") == Some("1"),
-        paused: pair(pairs, "paused") == Some("1"),
-        rendering: pair(pairs, "rendering") != Some("0"),
+        main: text("main") == Some("1"),
+        paused: text("paused") == Some("1"),
+        rendering: text("rendering") != Some("0"),
     })
 }
 
@@ -1218,15 +1269,23 @@ mod tests {
     use std::io::{Read, Write};
     use std::net::TcpListener;
 
-    fn pairs(url: &str) -> Vec<(String, String)> {
-        query_pairs(&tauri::Url::parse(url).expect("url"))
+    fn values(fields: &[(&str, &str)]) -> HashMap<String, String> {
+        fields
+            .iter()
+            .map(|(key, value)| (key.to_string(), value.to_string()))
+            .collect()
     }
 
     #[test]
-    fn progress_reports_are_parsed_from_the_signal_url() {
-        let progress = progress_from_pairs(&pairs(
-            "ssu-watch://progress?time=69.4&duration=450&main=1&paused=0&rendering=1&frame=child",
-        ))
+    fn progress_reports_are_parsed_from_the_signal_payload() {
+        let progress = progress_from_values(&values(&[
+            ("time", "69.4"),
+            ("duration", "450"),
+            ("main", "1"),
+            ("paused", "0"),
+            ("rendering", "1"),
+            ("frame", "child"),
+        ]))
         .expect("progress");
         assert_eq!(
             progress,
@@ -1238,28 +1297,50 @@ mod tests {
                 rendering: true,
             }
         );
-        let covered = progress_from_pairs(&pairs(
-            "ssu-watch://progress?time=3&duration=6&main=0&paused=1&rendering=0",
-        ))
+        let covered = progress_from_values(&values(&[
+            ("time", "3"),
+            ("duration", "6"),
+            ("main", "0"),
+            ("paused", "1"),
+            ("rendering", "0"),
+        ]))
         .expect("progress");
         assert!(!covered.main && covered.paused && !covered.rendering);
     }
 
     #[test]
     fn broken_progress_reports_are_ignored() {
-        assert_eq!(progress_from_pairs(&pairs("ssu-watch://progress")), None);
-        assert_eq!(
-            progress_from_pairs(&pairs("ssu-watch://progress?time=abc&duration=10")),
-            None
-        );
-        assert_eq!(
-            progress_from_pairs(&pairs("ssu-watch://progress?time=-4&duration=10")),
-            None
-        );
-        assert_eq!(
-            progress_from_pairs(&pairs("ssu-watch://progress?time=NaN&duration=10")),
-            None
-        );
+        assert_eq!(progress_from_values(&values(&[])), None);
+        for (time, duration) in [("abc", "10"), ("-4", "10"), ("NaN", "10"), ("3", "inf")] {
+            assert_eq!(
+                progress_from_values(&values(&[("time", time), ("duration", duration)])),
+                None,
+                "{time} {duration}"
+            );
+        }
+    }
+
+    #[test]
+    fn signal_payloads_are_bounded_before_use() {
+        let mut payload = HashMap::new();
+        for index in 0..100 {
+            payload.insert(format!("key{index}"), "x".repeat(10_000));
+        }
+        let cleaned = clean_signal(payload);
+        assert_eq!(cleaned.len(), MAX_SIGNAL_FIELDS);
+        assert!(cleaned
+            .values()
+            .all(|value| value.chars().count() == MAX_SIGNAL_VALUE_CHARS));
+    }
+
+    fn input(id: &str, course: Option<(&str, &str)>) -> WatchQueueItemInput {
+        WatchQueueItemInput {
+            module_item_id: id.into(),
+            course_id: course.map(|(id, _)| id.to_string()),
+            course_name: course.map(|(_, name)| name.to_string()),
+            title: format!("강의 {id}"),
+            duration: Some(600.0),
+        }
     }
 
     #[test]
@@ -1269,24 +1350,23 @@ mod tests {
             course_name: "UX".to_string(),
             items: vec![
                 WatchQueueItemInput {
-                    module_item_id: "1".into(),
                     title: " 1주차 ".into(),
-                    duration: Some(600.0),
+                    ..input("1", None)
                 },
                 WatchQueueItemInput {
-                    module_item_id: "1".into(),
                     title: "dup".into(),
                     duration: None,
+                    ..input("1", None)
                 },
                 WatchQueueItemInput {
-                    module_item_id: " ".into(),
                     title: "no id".into(),
                     duration: None,
+                    ..input(" ", None)
                 },
                 WatchQueueItemInput {
-                    module_item_id: "2".into(),
                     title: "".into(),
                     duration: Some(-1.0),
+                    ..input("2", None)
                 },
             ],
         };
@@ -1296,6 +1376,9 @@ mod tests {
         assert_eq!(items[0].duration_secs, Some(600.0));
         assert_eq!(items[1].title, "강의");
         assert_eq!(items[1].duration_secs, None);
+        // Items without their own course take the request's.
+        assert_eq!(items[0].course_id, "44070");
+        assert_eq!(items[0].course_name, "UX");
 
         let empty = WatchQueueStartRequest {
             course_id: "1".into(),
@@ -1308,6 +1391,67 @@ mod tests {
             ..request
         };
         assert_eq!(queue_items(&no_course).unwrap_err(), "missing_course_id");
+    }
+
+    #[test]
+    fn mixed_course_queue_keeps_each_items_own_course_and_opens_it_there() {
+        let request = WatchQueueStartRequest {
+            course_id: String::new(),
+            course_name: String::new(),
+            items: vec![
+                input("11", Some((" 100 ", "비전채플"))),
+                input("21", Some(("200", "자료구조"))),
+                // The same module item id in another course is a different lecture.
+                input("11", Some(("300", "알고리즘"))),
+                // The same lecture twice is one.
+                input("21", Some(("200", "자료구조"))),
+                input("12", Some(("100", "비전채플"))),
+            ],
+        };
+        let items = queue_items(&request).expect("items");
+        let order: Vec<_> = items
+            .iter()
+            .map(|item| (item.course_id.as_str(), item.module_item_id.as_str()))
+            .collect();
+        assert_eq!(
+            order,
+            vec![("100", "11"), ("200", "21"), ("300", "11"), ("100", "12")]
+        );
+
+        let mut core = QueueCore::new(items);
+        let mut jobs = Vec::new();
+        let mut step = core.start();
+        while let Step::Open(index) = step {
+            jobs.push(OpenJob::from_item(&core.items()[index], core.items().len()));
+            step = core.on_ended();
+        }
+        assert_eq!(step, Step::Finished);
+        assert_eq!(
+            jobs.iter()
+                .map(|job| (
+                    job.course_id.as_str(),
+                    job.course_name.as_str(),
+                    job.module_item_id.as_str()
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                ("100", "비전채플", "11"),
+                ("200", "자료구조", "21"),
+                ("300", "알고리즘", "11"),
+                ("100", "비전채플", "12"),
+            ]
+        );
+        assert!(jobs.iter().all(|job| job.total == 4));
+    }
+
+    #[test]
+    fn an_item_without_any_course_is_rejected() {
+        let request = WatchQueueStartRequest {
+            course_id: String::new(),
+            course_name: String::new(),
+            items: vec![input("1", Some(("5", "a"))), input("2", None)],
+        };
+        assert_eq!(queue_items(&request).unwrap_err(), "missing_course_id");
     }
 
     /// One-shot HTTP server: returns the raw request it received.
@@ -1490,6 +1634,12 @@ mod tests {
         assert!(production.contains("with_watch_assist("));
         // One window serves the queue: later lectures are navigated into it.
         assert!(production.contains("bridge_session_and_navigate(&window"));
+        // Signals come in over IPC (a command), never as navigations of the playback window.
+        assert!(production.contains("pub(crate) fn watch_signal("));
+        assert!(production.contains("webview.label()"));
+        for forbidden in ["on_navigation", "ssu-watch"] {
+            assert!(!production.contains(forbidden), "{forbidden}");
+        }
         // No attempt to fake what the page reports.
         for forbidden in ["visibilityState", "playbackRate", "set_cookie"] {
             assert!(!production.contains(forbidden), "{forbidden}");

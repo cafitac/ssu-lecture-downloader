@@ -1,0 +1,7 @@
+# The only command the playback window's remote LMS pages may call (capabilities/watch-remote.json).
+# The page script reports progress, heartbeat, ended, stalled and debug signals through it.
+
+[[permission]]
+identifier = "allow-watch-signal"
+description = "Allows the sequential-watch page script to report playback signals."
+commands.allow = ["watch_signal"]

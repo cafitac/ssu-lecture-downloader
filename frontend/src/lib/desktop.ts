@@ -154,8 +154,9 @@ export async function openOfficialViewer(url: string, title: string, sessionBrid
 // thin calls. Browser/Vite mode has no such shell.
 
 export interface WatchQueueStartRequest {
-  course_id: string;
-  course_name: string;
+  /** Course of items that do not name their own (per-course queues). */
+  course_id?: string;
+  course_name?: string;
   items: WatchQueueItemInput[];
 }
 

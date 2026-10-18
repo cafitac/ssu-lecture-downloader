@@ -3,6 +3,7 @@ import { splitCourseName } from '../lib/content';
 import { groupDeadlines } from '../lib/deadline';
 import type { DeadlineEntry } from '../lib/deadline';
 import type { DeadlineEntryDto } from '../lib/types';
+import { watchAllHint, watchAllLabel } from '../lib/watch';
 import { DeadlineCell } from './DeadlineCell';
 import { ExternalIcon } from './Icons';
 import { Spinner } from './Screens';
@@ -14,6 +15,10 @@ interface Props {
   state: DeadlinesState;
   error: string | null;
   now: Date;
+  /** Lectures the all-course auto playback would play, and whether a queue already runs. */
+  watchAllCount: number;
+  queueActive: boolean;
+  onWatchAll: () => void;
   /** A lecture goes to its course; an assignment or quiz opens in an app window. */
   onSelect: (item: DeadlineEntryDto) => void;
   /** Secondary action of assignment/quiz rows: the system browser. */
@@ -62,12 +67,23 @@ function DeadlineRow({ entry, onSelect, onOpenInBrowser }: RowProps) {
 }
 
 /** "다가오는 기한": lectures, assignments and quizzes of the term grouped by how soon they close. */
-export function DeadlinesPane({ items, state, error, now, onSelect, onOpenInBrowser, onReload }: Props) {
+export function DeadlinesPane({ items, state, error, now, watchAllCount, queueActive, onWatchAll, onSelect, onOpenInBrowser, onReload }: Props) {
   const groups = groupDeadlines(items, now);
   return (
     <section className="lecture-pane deadlines-pane" aria-busy={state === 'loading'}>
       <header className="pane-head">
-        <h1 className="pane-title">다가오는 기한</h1>
+        <div className="pane-head-row">
+          <h1 className="pane-title">다가오는 기한</h1>
+          <button
+            type="button"
+            className="btn btn-sm"
+            disabled={queueActive || watchAllCount === 0}
+            title={watchAllHint(watchAllCount, { queueActive, loading: state === 'loading' })}
+            onClick={onWatchAll}
+          >
+            {watchAllLabel(watchAllCount, queueActive)}
+          </button>
+        </div>
         <p className="pane-sub">아직 끝내지 않은 강의·과제·퀴즈를 기한 순서로 모았어요.</p>
       </header>
       <p className="deadline-note">과제의 완료 표시는 LMS 기준이라 실제 제출 여부와 다를 수 있어요.</p>

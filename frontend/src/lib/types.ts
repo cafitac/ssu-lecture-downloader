@@ -103,6 +103,8 @@ export interface DeadlineEntryDto {
   late_at: string | null;
   lock_at: string | null;
   completed: boolean;
+  /** Video length in seconds when the LMS gave one (videos only). */
+  duration?: number | null;
   /** Backend's view when it answered; the UI recomputes it from the times. */
   state: 'open' | 'late' | 'missed' | 'upcoming';
 }
@@ -454,6 +456,9 @@ export interface WatchQueueState {
 /** One lecture handed to the desktop shell's queue. */
 export interface WatchQueueItemInput {
   module_item_id: string;
+  /** The lecture's own course (queues that mix courses); the request's course when left out. */
+  course_id?: string;
+  course_name?: string;
   title: string;
   /** Length in seconds when the lecture list knows it. */
   duration: number | null;

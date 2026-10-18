@@ -1,0 +1,145 @@
+# Permissions of the app's own commands (Tauri app manifest, see build.rs).
+#
+# Declaring an app manifest makes Tauri check every app command against the capabilities, so
+# each command the main window calls needs an entry here and in `main-window-commands`. A test in
+# `src/acl_tests.rs` keeps this file and `generate_handler!` in `lib.rs` in step.
+# The playback signal command is deliberately NOT part of the set: only the remote LMS pages of
+# the playback window may call it (capabilities/watch-remote.json).
+
+[[permission]]
+identifier = "allow-real-download-dir"
+description = "Allows the main window to call `real_download_dir`."
+commands.allow = ["real_download_dir"]
+
+[[permission]]
+identifier = "allow-deadline-cache-write"
+description = "Allows the main window to call `deadline_cache_write`."
+commands.allow = ["deadline_cache_write"]
+
+[[permission]]
+identifier = "allow-reminders-status"
+description = "Allows the main window to call `reminders_status`."
+commands.allow = ["reminders_status"]
+
+[[permission]]
+identifier = "allow-reminders-set-enabled"
+description = "Allows the main window to call `reminders_set_enabled`."
+commands.allow = ["reminders_set_enabled"]
+
+[[permission]]
+identifier = "allow-reminders-test"
+description = "Allows the main window to call `reminders_test`."
+commands.allow = ["reminders_test"]
+
+[[permission]]
+identifier = "allow-open-path-in-finder"
+description = "Allows the main window to call `open_path_in_finder`."
+commands.allow = ["open_path_in_finder"]
+
+[[permission]]
+identifier = "allow-open-url-in-browser"
+description = "Allows the main window to call `open_url_in_browser`."
+commands.allow = ["open_url_in_browser"]
+
+[[permission]]
+identifier = "allow-open-official-viewer-with-session"
+description = "Allows the main window to call `open_official_viewer_with_session`."
+commands.allow = ["open_official_viewer_with_session"]
+
+[[permission]]
+identifier = "allow-open-lms-page-with-session"
+description = "Allows the main window to call `open_lms_page_with_session`."
+commands.allow = ["open_lms_page_with_session"]
+
+[[permission]]
+identifier = "allow-watch-queue-start"
+description = "Allows the main window to call `watch_queue_start`."
+commands.allow = ["watch_queue_start"]
+
+[[permission]]
+identifier = "allow-watch-queue-next"
+description = "Allows the main window to call `watch_queue_next`."
+commands.allow = ["watch_queue_next"]
+
+[[permission]]
+identifier = "allow-watch-queue-stop"
+description = "Allows the main window to call `watch_queue_stop`."
+commands.allow = ["watch_queue_stop"]
+
+[[permission]]
+identifier = "allow-watch-queue-status"
+description = "Allows the main window to call `watch_queue_status`."
+commands.allow = ["watch_queue_status"]
+
+[[permission]]
+identifier = "allow-watch-queue-show-window"
+description = "Allows the main window to call `watch_queue_show_window`."
+commands.allow = ["watch_queue_show_window"]
+
+[[permission]]
+identifier = "allow-backend-supervision-status"
+description = "Allows the main window to call `backend_supervision_status`."
+commands.allow = ["backend_supervision_status"]
+
+[[permission]]
+identifier = "allow-backend-api-base-url"
+description = "Allows the main window to call `backend_api_base_url`."
+commands.allow = ["backend_api_base_url"]
+
+[[permission]]
+identifier = "allow-backend-api-connection"
+description = "Allows the main window to call `backend_api_connection`."
+commands.allow = ["backend_api_connection"]
+
+[[permission]]
+identifier = "allow-backend-restart"
+description = "Allows the main window to call `backend_restart`."
+commands.allow = ["backend_restart"]
+
+[[permission]]
+identifier = "allow-native-start-download-job"
+description = "Allows the main window to call `native_start_download_job`."
+commands.allow = ["native_start_download_job"]
+
+[[permission]]
+identifier = "allow-native-start-batch-download-job"
+description = "Allows the main window to call `native_start_batch_download_job`."
+commands.allow = ["native_start_batch_download_job"]
+
+[[permission]]
+identifier = "allow-native-download-job-status"
+description = "Allows the main window to call `native_download_job_status`."
+commands.allow = ["native_download_job_status"]
+
+[[permission]]
+identifier = "allow-native-cancel-download-job"
+description = "Allows the main window to call `native_cancel_download_job`."
+commands.allow = ["native_cancel_download_job"]
+
+[[set]]
+identifier = "main-window-commands"
+description = "Every app command the main window uses."
+permissions = [
+  "allow-real-download-dir",
+  "allow-deadline-cache-write",
+  "allow-reminders-status",
+  "allow-reminders-set-enabled",
+  "allow-reminders-test",
+  "allow-open-path-in-finder",
+  "allow-open-url-in-browser",
+  "allow-open-official-viewer-with-session",
+  "allow-open-lms-page-with-session",
+  "allow-watch-queue-start",
+  "allow-watch-queue-next",
+  "allow-watch-queue-stop",
+  "allow-watch-queue-status",
+  "allow-watch-queue-show-window",
+  "allow-backend-supervision-status",
+  "allow-backend-api-base-url",
+  "allow-backend-api-connection",
+  "allow-backend-restart",
+  "allow-native-start-download-job",
+  "allow-native-start-batch-download-job",
+  "allow-native-download-job-status",
+  "allow-native-cancel-download-job",
+]
