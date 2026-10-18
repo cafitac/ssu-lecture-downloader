@@ -2,7 +2,7 @@ import type { ContentState } from '../hooks/useCourseContent';
 import type { PageAttachmentsController } from '../hooks/usePageAttachments';
 import { countVideos, splitCourseName } from '../lib/content';
 import type { LectureTab, WeekGroup } from '../lib/content';
-import type { CourseContentItem, CourseSummary, WatchQueueState } from '../lib/types';
+import type { CourseContentItem, CourseSummary, WatchMode, WatchQueueState } from '../lib/types';
 import { LectureList } from './LectureList';
 import { LectureToolbar } from './LectureToolbar';
 import { Spinner } from './Screens';
@@ -29,6 +29,7 @@ interface Props {
   watchSelected: boolean;
   attachments: PageAttachmentsController;
   queue: WatchQueueState;
+  watchMode: WatchMode;
   openingKey: string | null;
   actionBlockedReason: string | null;
   isDownloaded: (key: string) => boolean;
@@ -70,6 +71,7 @@ export function LecturePane(props: Props) {
         taskCount={props.tasks.length}
         unwatchedOnly={unwatchedOnly}
         queue={props.queue}
+        watchMode={props.watchMode}
         watchCount={props.watchCount}
         watchSelected={props.watchSelected}
         watchDisabled={contentState !== 'ready' || props.watchCount === 0}

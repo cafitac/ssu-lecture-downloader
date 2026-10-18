@@ -1,19 +1,22 @@
+import type { WatchMode } from '../lib/types';
 import type { AllCoursesQueueItem } from '../lib/watch';
 import { formatTotalTime, summarizeAllCoursesQueue, watchAllConfirmText } from '../lib/watch';
 import { Dialog } from './Dialog';
 
 interface Props {
   items: AllCoursesQueueItem[];
+  /** How the queue will play (decides what the confirmation says about the window). */
+  mode: WatchMode;
   onStart: () => void;
   onClose: () => void;
 }
 
 const PREVIEW_COUNT = 5;
 
-/** Confirmation before "전체 순서대로 시청": how many lectures, how long, and what the player window needs. */
-export function WatchAllDialog({ items, onStart, onClose }: Props) {
+/** Confirmation before "전체 순서대로 시청": how many lectures, how long, and what the playback window needs. */
+export function WatchAllDialog({ items, mode, onStart, onClose }: Props) {
   const summary = summarizeAllCoursesQueue(items);
-  const text = watchAllConfirmText(summary);
+  const text = watchAllConfirmText(summary, mode);
   return (
     <Dialog title="전체 순서대로 시청" onClose={onClose}>
       <section className="setting">

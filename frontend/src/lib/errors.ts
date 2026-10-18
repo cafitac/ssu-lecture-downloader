@@ -92,6 +92,18 @@ const KNOWN: Record<string, string> = {
   stt_job_not_found: JOB_LOST,
   dependency_install_job_not_found: JOB_LOST,
   native_download_job_not_found: JOB_LOST,
+  chrome_not_found: 'Google Chrome을 찾지 못했어요. 설정의 자동 재생 방식에서 ‘앱 안의 작은 창’을 골라 주세요.',
+  chrome_watch_busy: '이미 자동 재생이 진행 중이에요.',
+  empty_watch_queue: '순서대로 시청할 영상이 없어요.',
+  chrome_launch_failed: 'Chrome을 실행하지 못했어요.',
+  chrome_launch_timeout: 'Chrome 창이 열리지 않았어요. 다시 시도해 주세요.',
+  chrome_exited: 'Chrome이 바로 종료됐어요. 다시 시도해 주세요.',
+  chrome_connect_failed: 'Chrome에 연결하지 못했어요. 다시 시도해 주세요.',
+  chrome_navigation_failed: '강의 페이지를 열지 못했어요.',
+  chrome_window_closed: 'Chrome 창이 닫혀 자동 재생을 멈췄어요.',
+  chrome_closed: 'Chrome과의 연결이 끊겨 자동 재생을 멈췄어요.',
+  chrome_window_missing: 'Chrome 창이 열려 있지 않아요.',
+  chrome_watch_error: '자동 재생 중 예상하지 못한 오류가 생겼어요.',
 };
 
 const KNOWN_PREFIXES: Array<[string, string]> = [

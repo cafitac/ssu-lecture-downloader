@@ -77,6 +77,11 @@ description = "Allows the main window to call `watch_queue_show_window`."
 commands.allow = ["watch_queue_show_window"]
 
 [[permission]]
+identifier = "allow-watch-external-status"
+description = "Allows the main window to call `watch_external_status`."
+commands.allow = ["watch_external_status"]
+
+[[permission]]
 identifier = "allow-backend-supervision-status"
 description = "Allows the main window to call `backend_supervision_status`."
 commands.allow = ["backend_supervision_status"]
@@ -134,6 +139,7 @@ permissions = [
   "allow-watch-queue-stop",
   "allow-watch-queue-status",
   "allow-watch-queue-show-window",
+  "allow-watch-external-status",
   "allow-backend-supervision-status",
   "allow-backend-api-base-url",
   "allow-backend-api-connection",

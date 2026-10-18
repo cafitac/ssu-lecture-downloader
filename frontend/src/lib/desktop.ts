@@ -1,5 +1,5 @@
 import type { CachedDeadline } from './reminders';
-import type { BackendConnection, BackendSupervisionStatus, DownloadJobStatus, DownloadResult, NativeDownloadPlanResult, OfficialViewerBridgeCookie, OfficialViewerSessionBridgeResult, RemindersStatus, WatchQueueItemInput, WatchQueueState } from './types';
+import type { BackendConnection, BackendSupervisionStatus, DownloadJobStatus, DownloadResult, NativeDownloadPlanResult, OfficialViewerBridgeCookie, OfficialViewerSessionBridgeResult, ExternalWatchView, RemindersStatus, WatchQueueItemInput, WatchQueueState } from './types';
 import { open } from '@tauri-apps/plugin-dialog';
 import { invoke } from '@tauri-apps/api/core';
 import { downloadDir } from '@tauri-apps/api/path';
@@ -178,6 +178,14 @@ export function watchQueueStatus(): Promise<WatchQueueState> {
 
 export async function watchQueueShowWindow(): Promise<void> {
   await invoke<void>('watch_queue_show_window');
+}
+
+/**
+ * Chrome-mode queue status for the menu bar item, Dock badge and macOS notifications. The queue
+ * itself runs in the backend; the shell only mirrors what the app read from it.
+ */
+export async function watchExternalStatus(view: ExternalWatchView): Promise<void> {
+  await invoke<void>('watch_external_status', { view });
 }
 
 // ------------------------------------------------------------------- LMS page windows
