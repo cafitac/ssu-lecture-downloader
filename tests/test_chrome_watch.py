@@ -59,6 +59,7 @@ class Harness:
 
         self.manager = cw.ChromeWatchManager(
             provider,
+            background_launch=False,
             profile_dir=self.profile,
             candidates=self.candidates,
             popen=FakePopen,
@@ -510,6 +511,7 @@ def test_a_chrome_left_by_an_earlier_backend_run_is_killed_by_its_pid_file(tmp_p
 
     manager = cw.ChromeWatchManager(
         lambda *a: {},
+        background_launch=False,
         profile_dir=profile,
         killpg=killpg,
         process_command=lambda pid: f"/x/Chrome --user-data-dir={profile}" if alive["yes"] else None,
@@ -528,9 +530,40 @@ def test_a_pid_file_of_an_unrelated_process_is_not_signalled(tmp_path):
     calls: list = []
     manager = cw.ChromeWatchManager(
         lambda *a: {},
+        background_launch=False,
         profile_dir=profile,
         killpg=lambda *args: calls.append(args),
         process_command=lambda pid: "/usr/bin/python something-else",
     )
     manager.shutdown()
     assert calls == []
+
+
+def test_chrome_window_is_minimized_once_when_the_first_lecture_plays(tmp_path):
+    harness = Harness(tmp_path, [FakePlayer(), FakePlayer()])
+    harness.manager.start(items(2))
+    harness.finish()
+    harness.wait_thread()
+
+    bounds = [m["params"]["bounds"] for m in harness.browser.sent if m["method"] == "Browser.setWindowBounds"]
+    # Only after real playback, and only once per run even though two lectures played.
+    assert bounds == [{"windowState": "minimized"}]
+
+
+
+def test_background_launch_uses_open_without_activation_and_a_separate_instance():
+    args = cw.build_chrome_args("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", "/tmp/p")
+    launch = cw.build_background_launch("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", args)
+    assert launch[:6] == ["/usr/bin/open", "-g", "-n", "-W", "-a", "/Applications/Google Chrome.app"]
+    assert launch[6] == "--args" and launch[7:] == args[1:]
+
+
+def test_chrome_main_pid_is_the_browser_process_of_the_dedicated_profile():
+    rows = [
+        (10, "/usr/bin/open -g -n -W -a /Applications/Google Chrome.app --args --user-data-dir=/tmp/p"),
+        (11, "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome --user-data-dir=/tmp/p --remote-debugging-port=0"),
+        (12, "/Applications/Google Chrome.app/.../Google Chrome Helper --type=renderer --user-data-dir=/tmp/p"),
+        (13, "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome --user-data-dir=/Users/me/other"),
+    ]
+    assert cw.find_chrome_main_pid(rows, "/tmp/p") == 11
+    assert cw.find_chrome_main_pid(rows, "/tmp/none") is None

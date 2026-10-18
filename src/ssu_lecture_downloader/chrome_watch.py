@@ -218,6 +218,41 @@ def default_process_command(pid: int) -> str | None:
     return text or None
 
 
+def build_background_launch(chrome: Path | str, chrome_args: list[str]) -> list[str]:
+    """Start Chrome through `open -g` so it does not come to the front and take the keyboard.
+
+    `-n` forces a separate instance (own profile), `-W` keeps `open` alive until that instance
+    quits, so the launcher process still tells whether Chrome is running.
+    """
+    chrome = Path(chrome)
+    bundle = next((parent for parent in chrome.parents if parent.suffix == ".app"), None)
+    if bundle is None:
+        return chrome_args
+    return ["/usr/bin/open", "-g", "-n", "-W", "-a", str(bundle), "--args", *chrome_args[1:]]
+
+
+def default_list_processes() -> list[tuple[int, str]]:
+    try:
+        completed = subprocess.run(["ps", "-axo", "pid=,command="], capture_output=True, text=True, timeout=5, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    rows: list[tuple[int, str]] = []
+    for line in completed.stdout.splitlines():
+        head, _, command = line.strip().partition(" ")
+        if head.isdigit():
+            rows.append((int(head), command.strip()))
+    return rows
+
+
+def find_chrome_main_pid(processes: list[tuple[int, str]], profile_dir: Path | str) -> int | None:
+    """The browser process of the dedicated profile (helpers carry a --type= flag)."""
+    marker = f"--user-data-dir={profile_dir}"
+    for pid, command in processes:
+        if marker in command and "--type=" not in command and not command.startswith("/usr/bin/open"):
+            return pid
+    return None
+
+
 def default_killpg(pgid: int, sig: int) -> None:
     os.killpg(pgid, sig)
 
@@ -255,6 +290,10 @@ class _Run:
     thread: threading.Thread | None = None
     client: CdpClient | None = None
     page_target: str | None = None
+    # Minimize the Chrome window once the first lecture really plays, so nobody has to look at it.
+    # Done once per run: if the user brings the window back, it stays where they put it.
+    auto_minimize: bool = True
+    auto_minimized: bool = False
 
     @property
     def active(self) -> bool:
@@ -322,6 +361,8 @@ class ChromeWatchManager:
         connect: Callable[[str], Transport] | None = None,
         killpg: Callable[[int, int], None] | None = None,
         process_command: Callable[[int], str | None] | None = None,
+        list_processes: Callable[[], list[tuple[int, str]]] | None = None,
+        background_launch: bool = True,
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
         timings: Timings | None = None,
@@ -333,6 +374,9 @@ class ChromeWatchManager:
         self._connect = connect or WebSocketTransport
         self._killpg = killpg or default_killpg
         self._process_command = process_command or default_process_command
+        self._list_processes = list_processes or default_list_processes
+        self._background_launch = background_launch
+        self._chrome_pid: int | None = None
         self._clock = clock
         self._sleep = sleep
         self.timings = timings or Timings()
@@ -571,8 +615,9 @@ class ChromeWatchManager:
         except FileNotFoundError:
             pass
         try:
+            args = build_chrome_args(chrome, profile)
             proc = self._popen(
-                build_chrome_args(chrome, profile),
+                build_background_launch(chrome, args) if self._background_launch else args,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
@@ -580,7 +625,9 @@ class ChromeWatchManager:
             )
         except OSError as exc:
             raise ChromeWatchError("chrome_launch_failed", "Chrome을 실행하지 못했어요.") from exc
-        self._write_pidfile(proc.pid)
+        self._chrome_pid = None if self._background_launch else proc.pid
+        if self._chrome_pid is not None:
+            self._write_pidfile(self._chrome_pid)
         try:
             port, path = wait_for_devtools_port(
                 profile,
@@ -595,6 +642,10 @@ class ChromeWatchManager:
             if run.stop.is_set():
                 raise _Stopped() from exc
             raise
+        if self._background_launch:
+            self._chrome_pid = find_chrome_main_pid(self._list_processes(), profile)
+            if self._chrome_pid is not None:
+                self._write_pidfile(self._chrome_pid)
         events: "queue.Queue[tuple[str, dict[str, Any], str | None]]" = queue.Queue()
         try:
             transport = self._connect(f"ws://127.0.0.1:{port}{path}")
@@ -615,6 +666,26 @@ class ChromeWatchManager:
 
     def _terminate(self, proc: Any) -> None:
         """SIGTERM the whole process group, then SIGKILL what is left. The profile stays."""
+        if self._background_launch:
+            # `proc` is the `open -W` launcher; Chrome itself is a separate process group.
+            pid = self._chrome_pid or find_chrome_main_pid(self._list_processes(), self.profile_dir)
+            if pid is not None:
+                self._signal_group(pid, signal.SIGTERM)
+                deadline = self._clock() + self.timings.terminate_grace
+                while self._process_command(pid) and self._clock() < deadline:
+                    self._sleep(0.1)
+                if self._process_command(pid):
+                    self._signal_group(pid, signal.SIGKILL)
+            try:
+                proc.wait(timeout=5)
+            except Exception:  # noqa: BLE001
+                pass
+            self._chrome_pid = None
+            try:
+                self._pidfile().unlink()
+            except OSError:
+                pass
+            return
         pgid = getattr(proc, "pid", None)
         if isinstance(pgid, int) and pgid > 0:
             self._signal_group(pgid, signal.SIGTERM)
@@ -684,6 +755,16 @@ class _Playback:
         self.ended = False
         self.window_closed = False
         self.connection_closed = False
+
+    def minimize_window(self) -> None:
+        if not self.page_target:
+            return
+        try:
+            window = self.call("Browser.getWindowForTarget", {"targetId": self.page_target})
+            if "windowId" in window:
+                self.call("Browser.setWindowBounds", {"windowId": window["windowId"], "bounds": {"windowState": "minimized"}})
+        except (CdpError, CdpClosed, CdpTimeout):
+            pass
 
     # ---------------------------------------------------------------------- setup
 
@@ -920,6 +1001,9 @@ class _Playback:
                         run.position = float(video.get("time") or 0)
                         run.duration = float(video.get("duration") or 0) or None
                         run.paused = bool(video.get("paused"))
+                    if advanced and not video.get("paused") and run.auto_minimize and not run.auto_minimized:
+                        run.auto_minimized = True
+                        self.minimize_window()
                 elif fresh and any(r[2].get("video") for r in fresh):
                     video = next(r[2]["video"] for r in fresh if r[2].get("video"))
                     with self.m._lock:

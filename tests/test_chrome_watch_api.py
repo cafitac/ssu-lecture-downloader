@@ -129,6 +129,9 @@ def test_a_queue_runs_end_to_end_through_the_api_with_the_service_plan(tmp_path,
     browser = FakeBrowser([FakePlayer(duration=5.0)])
     monkeypatch.setattr(cw, "chrome_candidates", lambda: [chrome])
     monkeypatch.setattr(cw.subprocess, "Popen", FakePopen)
+    # Launch Chrome directly (no `open -g` wrapper) so the fake process stands for Chrome itself.
+    monkeypatch.setattr(cw, "build_background_launch", lambda chrome, args: args)
+    monkeypatch.setattr(cw, "default_list_processes", lambda: [])
     monkeypatch.setattr(cw, "WebSocketTransport", lambda url: browser)
     fast = cw.Timings(tick=0.002, poll_interval=0.01, stall_after=30.0, terminate_grace=0.5, stop_join=5.0)
     monkeypatch.setattr(cw, "Timings", lambda: fast)
