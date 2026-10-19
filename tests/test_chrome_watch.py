@@ -576,3 +576,11 @@ def test_audio_is_silenced_by_chrome_not_by_muting_the_video():
     source = next(v for k, v in vars(chrome_watch_helper).items() if isinstance(v, str) and "ssuWatchSignal" in v or (isinstance(v, str) and "findVideo" in v))
     # Chrome pauses muted videos in a minimized window, so the helper must not mute them.
     assert ".muted = true" not in source
+
+
+def test_player_prompts_are_answered_like_a_person_would():
+    from ssu_lecture_downloader import chrome_watch_helper
+    source = "\n".join(v for v in vars(chrome_watch_helper).values() if isinstance(v, str))
+    # Resume prompt -> 예, progress-tracking prompt -> 확인.
+    assert "이어서 보시겠습니까" in source and "button: '예'" in source
+    assert "진도체크를 시작합니다" in source and "button: '확인'" in source
