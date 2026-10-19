@@ -28,7 +28,7 @@ export const IDLE_WATCH_QUEUE: WatchQueueState = {
 export const WATCH_STRIP_NOTE = '재생 창이 가려지거나 최소화되면 재생이 멈춰요. 화면 구석에 보이게 두세요.';
 
 /** Same place, Chrome mode. Minimizing is deliberately not promised: it has not been confirmed. */
-export const WATCH_STRIP_NOTE_CHROME = 'Chrome 창은 다른 창 뒤에 두거나 다른 탭을 봐도 재생돼요. 최소화했을 때는 아직 확인되지 않았어요.';
+export const WATCH_STRIP_NOTE_CHROME = '재생이 시작되면 Chrome 창은 자동으로 최소화돼요. 소리는 나지 않아요.';
 
 /** Appended to every "playback stopped moving" message of the Chrome mode. */
 export const CHROME_RESTORE_HINT = 'Chrome 창이 최소화돼 있으면 다시 열어 주세요.';
@@ -42,7 +42,7 @@ export const WATCH_MODE_LABEL: Record<WatchMode, string> = {
 
 /** One sentence per mode under the setting, and on the start buttons' tooltips. */
 export const WATCH_MODE_DESCRIPTION: Record<WatchMode, string> = {
-  chrome: '앱 전용 Chrome 창이 따로 열려서 소리 없이 재생돼요. 다른 창 뒤에 두거나 다른 탭을 봐도 재생돼요. 최소화했을 때는 아직 확인되지 않았어요.',
+  chrome: '앱 전용 Chrome 창이 뒤에서 열리고, 재생이 시작되면 자동으로 최소화돼요. 소리 없이 재생돼서 다른 작업을 그대로 하셔도 돼요.',
   app: '화면 구석에 작은 재생 창이 항상 위에 떠서 소리 없이 재생돼요. 이 창을 가리거나 최소화하면 재생이 멈춰요.',
 };
 
@@ -329,7 +329,7 @@ export function watchAllConfirmText(summary: AllCoursesSummary, mode: WatchMode 
     : '길이는 아직 알 수 없어요';
   const order = '출석 기한이 가까운 순서로 한 편씩 자동 재생해요. 기한이 모두 지난 강의와 아직 열리지 않은 강의는 빼요.';
   const windowLine = mode === 'chrome'
-    ? '앱 전용 Chrome 창이 따로 열려서 소리 없이 재생돼요. 다른 창 뒤에 두거나 다른 탭을 봐도 재생돼요. 최소화했을 때는 아직 확인되지 않았어요.'
+    ? '앱 전용 Chrome 창이 뒤에서 열리고, 재생이 시작되면 자동으로 최소화돼요. 소리 없이 재생돼서 다른 작업을 그대로 하셔도 돼요.'
     : '화면 구석에 작은 재생 창이 항상 위에 떠서 소리 없이 재생돼요. 이 창을 가리거나 최소화하면 재생이 멈추니 계속 보이게 두세요.';
   return {
     headline: `강의 ${summary.count}개 (과목 ${summary.courseCount}개) · ${length}`,
