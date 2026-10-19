@@ -656,7 +656,17 @@ class ChromeWatchManager:
         except Exception as exc:
             self._terminate(proc)
             raise ChromeWatchError("chrome_connect_failed", "Chrome에 연결하지 못했어요.") from exc
-        client = CdpClient(transport, lambda method, params, session: events.put((method, params, session)), default_timeout=self.timings.call_timeout)
+        holder: list[CdpClient] = []
+
+        def on_event(method: str, params: dict[str, Any], session: str | None) -> None:
+            # A page that asks "Leave site?" blocks the app's own navigation to the next lecture
+            # (Page.navigate would wait for it), so answer it right here on the reader thread.
+            if method == "Page.javascriptDialogOpening" and params.get("type") == "beforeunload" and holder:
+                holder[0].send_nowait("Page.handleJavaScriptDialog", {"accept": True}, session_id=session)
+            events.put((method, params, session))
+
+        client = CdpClient(transport, on_event, default_timeout=self.timings.call_timeout)
+        holder.append(client)
         return proc, client, events
 
     def _pidfile(self) -> Path:
@@ -759,6 +769,7 @@ class _Playback:
         self.ended = False
         self.window_closed = False
         self.connection_closed = False
+        self.expected_duration: float | None = None
 
     def restore_window(self) -> None:
         """Un-minimize without bringing Chrome to the front."""
@@ -930,9 +941,10 @@ class _Playback:
             return
         context = params.get("executionContextId")
         if data.get("kind") == "ended":
-            self.ended = True
+            if self.is_main(data.get("duration")):
+                self.ended = True
         elif data.get("kind") == "state" and isinstance(context, int):
-            self.reports[(session, context)] = (self.m._clock(), data)
+            self.reports[(session, context)] = (self.m._clock(), self.normalize_report(data))
 
     # ------------------------------------------------------------------- lecture
 
@@ -967,6 +979,10 @@ class _Playback:
         plan = self._fetch_plan(item)
         if isinstance(plan, str):
             return plan  # already skipped
+        try:
+            self.expected_duration = float(plan.get("duration") or item.duration or 0) or None
+        except (TypeError, ValueError):
+            self.expected_duration = None
         retried = False
         self._open(plan)
         clock = self.m._clock
@@ -1124,6 +1140,27 @@ class _Playback:
         limit = max(self.m.timings.poll_interval * 4, 8.0)
         return [(s, c, data) for (s, c), (at, data) in self.reports.items() if now - at <= limit]
 
+    def is_main(self, duration: Any) -> bool:
+        """The lecture itself, not the intro/notice clip before it.
+
+        With the LMS's own length for the item, the main video is the one at least half as long
+        (intro clips on some courses run well over 10 s); without it, anything over 10 s.
+        """
+        try:
+            seconds = float(duration or 0)
+        except (TypeError, ValueError):
+            return False
+        expected = self.expected_duration
+        if expected and expected > 60:
+            return seconds >= expected * 0.5
+        return seconds > 10
+
+    def normalize_report(self, value: dict[str, Any]) -> dict[str, Any]:
+        video = value.get("video")
+        if isinstance(video, dict):
+            video["main"] = self.is_main(video.get("duration"))
+        return value
+
     @staticmethod
     def pick(reports: list[tuple[str, int, dict[str, Any]]], *, main: bool) -> tuple[str, int, dict[str, Any]] | None:
         for report in reports:
@@ -1146,6 +1183,7 @@ class _Playback:
                 continue
             value = (result.get("result") or {}).get("value")
             if isinstance(value, dict) and value.get("kind") == "state":
+                value = self.normalize_report(value)
                 self.reports[(session, context)] = (self.m._clock(), value)
                 if value.get("video") and value["video"].get("ended") and value["video"].get("main"):
                     self.ended = True

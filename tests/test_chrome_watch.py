@@ -35,7 +35,7 @@ def plan_for(item_id: str) -> dict:
         "ok": True,
         "launch_url": f"https://canvas.ssu.ac.kr/courses/1/modules/items/{item_id}",
         "viewer_url": "https://commons.ssu.ac.kr/x",
-        "duration": 600,
+        "duration": 20,
         "cookies": [{"name": "xn_api_token", "value": "secret-cookie", "domain": "canvas.ssu.ac.kr", "path": "/", "secure": True, "http_only": True, "same_site": "lax"}],
     }
 
@@ -584,3 +584,36 @@ def test_player_prompts_are_answered_like_a_person_would():
     # Resume prompt -> 예, progress-tracking prompt -> 확인.
     assert "이어서 보시겠습니까" in source and "button: '예'" in source
     assert "진도체크를 시작합니다" in source and "button: '확인'" in source
+
+
+def test_main_video_is_judged_by_the_lms_length_not_a_fixed_ten_seconds():
+    driver_cls = next(c for n, c in vars(cw).items() if isinstance(c, type) and hasattr(c, "is_main"))
+    probe = type("Probe", (), {"expected_duration": 3027.0, "is_main": driver_cls.is_main})()
+    # A 40 s notice clip before a 50 min chapel lecture is not the lecture.
+    assert probe.is_main(40) is False
+    assert probe.is_main(3026.5) is True
+    probe.expected_duration = None
+    assert probe.is_main(40) is True and probe.is_main(8) is False
+
+
+def test_leave_site_prompts_are_answered_without_waiting():
+    from ssu_lecture_downloader.chrome_cdp import CdpClient
+
+    sent = []
+
+    class Transport:
+        def send(self, text):
+            sent.append(json.loads(text))
+
+        def recv(self):
+            time.sleep(0.01)
+            return None
+
+        def close(self):
+            pass
+
+    client = CdpClient(Transport(), lambda *a: None)
+    client.send_nowait("Page.handleJavaScriptDialog", {"accept": True}, session_id="S1")
+    assert sent[-1]["method"] == "Page.handleJavaScriptDialog" and sent[-1]["params"] == {"accept": True} and sent[-1]["sessionId"] == "S1"
+    source = open(cw.__file__, encoding="utf-8").read()
+    assert '"Page.javascriptDialogOpening"' in source and 'params.get("type") == "beforeunload"' in source
