@@ -21,8 +21,14 @@ HELPER_JS = r"""
 
   const SHORT_INTRO_MAX_SECONDS = 10;
   const REPORT_INTERVAL_MS = 1000;
-  const RESUME_DIALOG_TEXT = '이어서 보시겠습니까';
-  const RESUME_YES_LABEL = '예';
+  // Player prompts answered the way a person would: (question text, button to press).
+  //  - resume: "이전에 시청했던 07:29부터 이어서 보시겠습니까?" -> 예
+  //  - progress tracking: "본 콘텐츠의 진도체크를 시작합니다. 실행중인 다른 콘텐츠의
+  //    진도체크는 중단됩니다." -> 확인
+  const PROMPTS = [
+    { text: '이어서 보시겠습니까', button: '예' },
+    { text: '진도체크를 시작합니다', button: '확인' },
+  ];
   const FRONT_SELECTOR = '#front-screen .vc-front-screen-play-btn, .vc-front-screen-play-btn';
 
   const isTop = (() => { try { return window.top === window; } catch (_) { return false; } })();
@@ -62,23 +68,29 @@ HELPER_JS = r"""
     return button && isShown(button) ? button : null;
   };
 
-  // A control whose whole label is "예" in the same dialog as the resume question.
-  const pickYes = (candidates) => {
+  // A control labelled exactly like the prompt's button, inside the dialog with its question.
+  const pickButton = (candidates, prompt) => {
     for (const control of candidates) {
-      if (normalize(control.innerText || control.textContent || control.value) !== RESUME_YES_LABEL || !isShown(control)) continue;
+      if (normalize(control.innerText || control.textContent || control.value) !== prompt.button || !isShown(control)) continue;
       let scope = control.parentElement;
       for (let depth = 0; scope && depth < 6; depth += 1, scope = scope.parentElement) {
-        if (normalize(scope.textContent).includes(RESUME_DIALOG_TEXT)) return control;
+        if (normalize(scope.textContent).includes(prompt.text)) return control;
       }
     }
     return null;
   };
   const findYes = () => {
     const body = document.body;
-    if (!body || !normalize(body.textContent).includes(RESUME_DIALOG_TEXT)) return null;
-    const buttons = Array.from(document.querySelectorAll('button,[role="button"],a,input[type="button"],input[type="submit"]'));
-    return pickYes(buttons)
-      || pickYes(Array.from(document.querySelectorAll('div,span,li,p')).filter((element) => !element.children || element.children.length === 0));
+    if (!body) return null;
+    const text = normalize(body.textContent);
+    for (const prompt of PROMPTS) {
+      if (!text.includes(prompt.text)) continue;
+      const buttons = Array.from(document.querySelectorAll('button,[role="button"],a,input[type="button"],input[type="submit"]'));
+      const found = pickButton(buttons, prompt)
+        || pickButton(Array.from(document.querySelectorAll('div,span,li,p')).filter((element) => !element.children || element.children.length === 0), prompt);
+      if (found) return found;
+    }
+    return null;
   };
 
   // Where the driver should click: the element's box in this frame's viewport, after a
