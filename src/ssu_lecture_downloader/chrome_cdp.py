@@ -125,6 +125,18 @@ class CdpClient:
             raise CdpError(method, str(pending.error.get("message", "error")), pending.error.get("code"))
         return pending.result or {}
 
+    def send_nowait(self, method: str, params: dict[str, Any] | None = None, *, session_id: str | None = None) -> None:
+        """Fire a command without waiting for its reply (safe from the event-reader thread)."""
+        message: dict[str, Any] = {"id": next(self._ids), "method": method, "params": params or {}}
+        if session_id:
+            message["sessionId"] = session_id
+        if self._closed:
+            return
+        try:
+            self._transport.send(json.dumps(message))
+        except Exception:  # noqa: BLE001
+            pass
+
     def close(self) -> None:
         self._fail_all()
         self._transport.close()

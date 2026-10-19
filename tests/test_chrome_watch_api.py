@@ -126,7 +126,7 @@ def test_the_backend_shutdown_closes_the_chrome_window(tmp_path):
 
 def test_a_queue_runs_end_to_end_through_the_api_with_the_service_plan(tmp_path, monkeypatch):
     chrome = make_chrome_binary(tmp_path)
-    browser = FakeBrowser([FakePlayer(duration=5.0)])
+    browser = FakeBrowser([FakePlayer(duration=42.0)])  # the fake service plan says 42 s
     monkeypatch.setattr(cw, "chrome_candidates", lambda: [chrome])
     monkeypatch.setattr(cw.subprocess, "Popen", FakePopen)
     # Launch Chrome directly (no `open -g` wrapper) so the fake process stands for Chrome itself.
