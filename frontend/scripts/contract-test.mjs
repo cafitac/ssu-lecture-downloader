@@ -1013,7 +1013,7 @@ console.log('frontend contract ok');
   assert.deepEqual(watchStripText(playing), { summary: '자동 재생 중 (Chrome) 1/2 · 디지털논리회로 · 1주차 강의 · 01:01 / 50:26', detail: null });
   assert.equal(watchStripNote(playing), WATCH_STRIP_NOTE_CHROME);
   assert.equal(watchStripNote({ ...IDLE_WATCH_QUEUE, active: true }), WATCH_STRIP_NOTE, 'the in-app queue keeps its own note');
-  assert.equal(WATCH_STRIP_NOTE_CHROME, 'Chrome 창은 다른 창 뒤에 두거나 다른 탭을 봐도 재생돼요. 최소화했을 때는 아직 확인되지 않았어요.');
+  assert.equal(WATCH_STRIP_NOTE_CHROME, '재생이 시작되면 Chrome 창은 자동으로 최소화돼요. 소리는 나지 않아요.');
   // All-course titles already lead with the course: it is not repeated.
   assert.equal(watchStripText(chromeStatusToQueue(status({ current: { ...status({}).current, title: '디지털논리회로 · 1주차 강의' } }))).summary, '자동 재생 중 (Chrome) 1/2 · 디지털논리회로 · 1주차 강의 · 01:01 / 50:26');
   // A course code in the name is left out of the line.
@@ -1059,7 +1059,7 @@ console.log('frontend contract ok');
   // The confirmation tells which window plays; the Chrome text makes no promise about minimizing.
   const summary = summarizeAllCoursesQueue([{ module_item_id: '1', course_id: '1', course_name: 'A', title: 'A', duration: 600 }]);
   const chromeLines = watchAllConfirmText(summary, 'chrome').lines.join(' ');
-  assert.ok(chromeLines.includes('Chrome 창') && chromeLines.includes('최소화했을 때는 아직 확인되지 않았어요') && !chromeLines.includes('항상 위에'));
+  assert.ok(chromeLines.includes('Chrome 창') && chromeLines.includes('자동으로 최소화돼요') && !chromeLines.includes('항상 위에'));
   assert.ok(watchAllConfirmText(summary).lines.join(' ').includes('항상 위에'), 'the default confirmation is still the in-app one');
 
   // No UI text may claim that a minimized Chrome window keeps playing.
