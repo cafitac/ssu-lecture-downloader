@@ -50,10 +50,13 @@ export function useLmsSession() {
     }
   }, [reset]);
 
-  const loadCourses = useCallback(async (id: number | null, refresh = false) => {
+  const loadCourses = useCallback(async (id: number | null, refresh = false, quiet = false) => {
     const request = ++requestRef.current;
-    setListState('loading');
-    setListError(null);
+    // A quiet (background) reload keeps the current list on screen and keeps it on failure.
+    if (!quiet) {
+      setListState('loading');
+      setListError(null);
+    }
     try {
       const response = await fetchCourses(id, refresh);
       if (request !== requestRef.current) return;
@@ -66,6 +69,7 @@ export function useLmsSession() {
         await expire(friendlyError(error));
         return;
       }
+      if (quiet) return;
       setListState('error');
       setListError(friendlyError(error, '과목 목록을 불러오지 못했어요.'));
       setPhase('signed-in');
@@ -153,7 +157,12 @@ export function useLmsSession() {
     void loadCourses(termId, true);
   }, [loadCourses, termId]);
 
-  return { phase, notice, signingIn, terms, termId, courses, listState, listError, signIn, signOut, expire, changeTerm, refresh };
+  // Background refresh from the LMS (new deadlines, completions) without a loading state.
+  const refreshQuietly = useCallback(() => {
+    void loadCourses(termId, true, true);
+  }, [loadCourses, termId]);
+
+  return { phase, notice, signingIn, terms, termId, courses, listState, listError, signIn, signOut, expire, changeTerm, refresh, refreshQuietly };
 }
 
 export type LmsSession = ReturnType<typeof useLmsSession>;

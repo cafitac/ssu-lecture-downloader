@@ -31,6 +31,9 @@ import { friendlyError } from './lib/errors';
 import { formatBytes, shortFolderName } from './lib/format';
 import type { JobPlan, PlannedItem } from './lib/jobItems';
 import type { CourseContentItem, CourseSummary, DeadlineEntryDto, DownloadOutputFormat, WatchMode } from './lib/types';
+
+const AUTO_REFRESH_EVERY_MS = 30 * 60 * 1000;
+const AUTO_REFRESH_ON_FOCUS_GAP_MS = 5 * 60 * 1000;
 import { buildAllCoursesQueue, readWatchModePreference, writeWatchModePreference } from './lib/watch';
 
 const FORMAT_ORDER: DownloadOutputFormat[] = ['mp4', 'mp3', 'txt'];
@@ -95,6 +98,35 @@ function Workspace({ session }: { session: LmsSession }) {
   useEffect(() => {
     latest.current = { course, content, refreshSession: session.refresh };
   });
+
+  // Keep course list, deadlines and the reminder copy current while the app stays open: the
+  // LMS adds deadlines (e.g. an exam window) long after login. Every 30 min, and when the
+  // window gets focus again (at most every 5 min).
+  const lastAutoRefresh = useRef(Date.now());
+  useEffect(() => {
+    if (session.phase !== 'signed-in') return undefined;
+    const run = (minGapMs: number) => {
+      if (Date.now() - lastAutoRefresh.current < minGapMs) return;
+      lastAutoRefresh.current = Date.now();
+      session.refreshQuietly();
+      const current = latest.current;
+      if (current.course) void current.content.refreshQuietly(current.course);
+    };
+    let timer: ReturnType<typeof setTimeout>;
+    const schedule = () => {
+      timer = setTimeout(() => {
+        run(AUTO_REFRESH_EVERY_MS - 1000);
+        schedule();
+      }, AUTO_REFRESH_EVERY_MS);
+    };
+    schedule();
+    const onFocus = () => run(AUTO_REFRESH_ON_FOCUS_GAP_MS);
+    window.addEventListener('focus', onFocus);
+    return () => {
+      clearTimeout(timer);
+      window.removeEventListener('focus', onFocus);
+    };
+  }, [session.phase, session.refreshQuietly]);
   const onQueueSettled = useCallback((scope: CourseSummary | 'all') => {
     const timer = setTimeout(() => {
       refreshTimers.current.delete(timer);
