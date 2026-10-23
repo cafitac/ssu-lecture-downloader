@@ -294,8 +294,9 @@ class _Run:
     thread: threading.Thread | None = None
     client: CdpClient | None = None
     page_target: str | None = None
-    # Minimize the Chrome window once the first lecture really plays, so nobody has to look at it.
-    # Done once per run: if the user brings the window back, it stays where they put it.
+    # Minimize the Chrome window when each lecture really starts playing, so nobody has to look
+    # at it (moving to the next lecture can bring the window back, e.g. for a Leave-site prompt).
+    # Once the user asks to see the window, it stays where they put it for the rest of the run.
     auto_minimize: bool = True
     auto_minimized: bool = False
 
@@ -453,6 +454,8 @@ class ChromeWatchManager:
             target = run.page_target if run is not None else None
         if client is None or target is None:
             raise ChromeWatchError("chrome_window_missing", "Chrome 창이 열려 있지 않아요.")
+        with self._lock:
+            run.auto_minimize = False  # the user wants to see it
         try:
             window = client.call("Browser.getWindowForTarget", {"targetId": target}, timeout=self.timings.call_timeout)
             if "windowId" in window:
@@ -951,6 +954,7 @@ class _Playback:
     def play(self, index: int) -> None:
         run = self.run
         item = run.items[index]
+        run.auto_minimized = False  # minimize again once this lecture plays
         with self.m._lock:
             item.state = "playing"
             run.phase = PHASE_OPENING
