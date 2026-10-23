@@ -1422,3 +1422,11 @@ const assistSource = readFileSync('src-tauri/src/assets/watch_assist.js', 'utf8'
   const script = readFileSync(new URL('../src-tauri/src/assets/watch_assist.js', import.meta.url), 'utf8');
   assert.ok(script.includes('.vc-front-screen-play-btn'), 'Commons front-screen play button must be pressed');
 }
+
+// The app keeps courses, deadlines and the reminder copy current while it stays open.
+{
+  const app = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
+  assert.ok(app.includes('AUTO_REFRESH_EVERY_MS = 30 * 60 * 1000') && app.includes("addEventListener('focus'"), 'periodic and on-focus refresh');
+  const session = readFileSync(new URL('../src/hooks/useLmsSession.ts', import.meta.url), 'utf8');
+  assert.ok(session.includes('refreshQuietly') && session.includes('loadCourses(termId, true, true)'), 'background refresh bypasses LMS caches quietly');
+}
