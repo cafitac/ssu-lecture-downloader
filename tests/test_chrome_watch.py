@@ -539,15 +539,15 @@ def test_a_pid_file_of_an_unrelated_process_is_not_signalled(tmp_path):
     assert calls == []
 
 
-def test_chrome_window_is_minimized_once_when_the_first_lecture_plays(tmp_path):
+def test_chrome_window_is_minimized_when_each_lecture_starts_playing(tmp_path):
     harness = Harness(tmp_path, [FakePlayer(), FakePlayer()])
     harness.manager.start(items(2))
     harness.finish()
     harness.wait_thread()
 
     bounds = [m["params"]["bounds"] for m in harness.browser.sent if m["method"] == "Browser.setWindowBounds"]
-    # Only after real playback, and only once per run even though two lectures played.
-    assert bounds == [{"windowState": "minimized"}]
+    # After real playback of each lecture (moving on can bring the window back).
+    assert bounds == [{"windowState": "minimized"}, {"windowState": "minimized"}]
 
 
 
