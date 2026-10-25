@@ -37,6 +37,24 @@ def test_find_repeat_runs_needs_four_identical_neighbours():
     assert stt_cues.find_repeat_runs([]) == []
 
 
+def test_find_repeat_runs_catches_two_and_three_cue_cycles():
+    two = [cue(i, i + 1, '영양이' if i % 2 else '있어야 되는') for i in range(20, 36)]
+    three = [cue(i, i + 1, ('가', '나', '다')[i % 3]) for i in range(100, 112)]
+    speech = [cue(0, 1, '처음'), cue(1, 2, '그리고'), cue(2, 3, '처음'), cue(3, 4, '그리고'), cue(4, 5, '끝')]
+    cues = [*speech, *two, cue(60, 61, '중간'), *three]
+
+    assert stt_cues.find_repeat_runs(cues) == [(5, 20), (22, 33)]
+    assert stt_cues.find_repeat_runs(speech) == []
+
+
+def test_repair_windows_split_long_windows():
+    cues = [cue(i, i + 1, '영양이' if i % 2 else '있어야 되는') for i in range(0, 300)]
+
+    windows = stt_cues.repair_windows(cues, stt_cues.find_repeat_runs(cues), pad=0, max_window=120)
+
+    assert windows == [(0.0, 100.0), (100.0, 200.0), (200.0, 300.0)]
+
+
 def test_repair_windows_pad_clamp_and_merge():
     cues = [cue(0, 4, '앞'), *looped('루프', 4, 4), cue(30, 32, '중간'), *looped('또', 4, 40), cue(52, 53, '다음'), *looped('멀리', 4, 200)]
     runs = stt_cues.find_repeat_runs(cues)
