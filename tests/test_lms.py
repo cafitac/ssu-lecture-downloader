@@ -80,7 +80,8 @@ def test_learningx_lister_defaults_to_latest_unended_term_courses():
 
     courses = lister.list_current_courses(term_id_candidates=[43, 45, 46])
 
-    assert [course["name"] for course in courses] == ["현재 A", "현재 B"]
+    # Still-open non-credit courses of other (yearly) terms follow the current term's courses.
+    assert [course["name"] for course in courses] == ["현재 A", "현재 B", "비교과"]
     assert [call[2]["params"] for call in http.calls] == [
         {"term_ids[]": [43]},
         {"term_ids[]": [45]},

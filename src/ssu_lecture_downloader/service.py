@@ -33,6 +33,7 @@ from ssu_lecture_downloader.lms import (
     LearningXLister,
     _optional_int,
     latest_current_courses,
+    latest_current_term,
     learningx_api_headers,
 )
 from ssu_lecture_downloader.login_flow import LoginDiscoveryResult
@@ -778,7 +779,19 @@ class SsuLectureService:
         return latest_current_courses(scanned, self.current_term_candidates)
 
     def _term_courses(self, credential_key: str, term_ids: list[int], *, refresh: bool = False) -> list[dict[str, Any]]:
-        """Courses of explicit terms; one term shares the cache the terms scan filled."""
+        """Courses of explicit terms; one term shares the cache the terms scan filled.
+
+        The current term also lists still-open courses of other terms (see `latest_current_courses`).
+        """
+        if len(term_ids) == 1:
+            scanned = self._scan_term_courses(credential_key)
+            if term_ids[0] == latest_current_term(scanned, self.current_term_candidates):
+                if refresh:  # only terms with open courses can change what this list shows
+                    lister = LearningXLister(self.http)
+                    for term_id, courses in list(scanned.items()):
+                        if term_id == term_ids[0] or any(course.get("ended") is False for course in courses or []):
+                            scanned[term_id] = self._term_courses_cache.set((credential_key, term_id), lister.list_courses(term_ids=[term_id]))
+                return latest_current_courses(scanned, self.current_term_candidates)
         if len(term_ids) != 1:
             return LearningXLister(self.http).list_courses(term_ids=term_ids)
         key = (credential_key, term_ids[0])
