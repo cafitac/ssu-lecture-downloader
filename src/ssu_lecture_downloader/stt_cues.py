@@ -4,14 +4,17 @@ Whisper sometimes gets stuck and emits the same sentence over and over (or a fil
 as "음" dozens of times). The helpers here are pure functions over `TranscriptSegment`
 lists so the repair logic can be tested without any server or audio:
 
-1. `find_repeat_runs` finds runs of >= `MIN_REPEAT_RUN` identical consecutive cues.
-2. `repair_windows` turns runs into padded, merged time windows to re-transcribe.
+1. `find_repeat_runs` finds runs of >= `MIN_REPEAT_RUN` identical consecutive cues, and
+   loops that cycle through two or three cues ("영양이 / 있어야 되는 / 영양이 / ...").
+2. `repair_windows` turns runs into padded, merged time windows (at most
+   `REPAIR_MAX_WINDOW_SECONDS` long, so the server restarts often) to re-transcribe.
 3. `replace_window` splices re-transcribed cues (relative times) back into the cue list.
 4. `clean_cues` drops filler-only cues and collapses identical neighbours.
 """
 
 from __future__ import annotations
 
+import math
 import re
 from collections.abc import Iterable, Sequence
 from typing import Any
@@ -20,6 +23,8 @@ from pydantic import BaseModel
 
 MIN_REPEAT_RUN = 4
 REPAIR_PAD_SECONDS = 10.0
+REPAIR_MAX_WINDOW_SECONDS = 120.0
+MAX_LOOP_PERIOD = 3
 COLLAPSE_GAP_SECONDS = 2.0
 LONG_GAP_SECONDS = 45.0
 FILLER_TEXTS = frozenset({'음', '음.', '어', '어.', '그'})
@@ -120,18 +125,41 @@ def segments_from_verbose_json(payload: Any) -> list[TranscriptSegment]:
 
 
 def find_repeat_runs(cues: Sequence[TranscriptSegment], min_run: int = MIN_REPEAT_RUN) -> list[tuple[int, int]]:
-    """`(first, last)` inclusive index pairs of runs of >= `min_run` identical consecutive cues."""
+    """`(first, last)` inclusive index pairs of looped cues, sorted and merged when they overlap.
+
+    A loop is >= `min_run` identical consecutive cues, or a cycle of 2..`MAX_LOOP_PERIOD`
+    different cues repeated >= `min_run` times.
+    """
+    texts = [normalize_text(cue.text) for cue in cues]
     runs: list[tuple[int, int]] = []
     index = 0
-    while index < len(cues):
+    while index < len(texts):
         end = index
-        text = normalize_text(cues[index].text)
-        while end + 1 < len(cues) and normalize_text(cues[end + 1].text) == text:
+        while end + 1 < len(texts) and texts[end + 1] == texts[index]:
             end += 1
         if end - index + 1 >= min_run:
             runs.append((index, end))
         index = end + 1
-    return runs
+    for period in range(2, MAX_LOOP_PERIOD + 1):
+        index = period
+        while index < len(texts):
+            if texts[index] != texts[index - period]:
+                index += 1
+                continue
+            end = index
+            while end + 1 < len(texts) and texts[end + 1] == texts[end + 1 - period]:
+                end += 1
+            first = index - period
+            if end - first + 1 >= min_run * period and len(set(texts[first : end + 1])) > 1:
+                runs.append((first, end))
+            index = end + 1
+    merged: list[tuple[int, int]] = []
+    for first, last in sorted(runs):
+        if merged and first <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], last))
+        else:
+            merged.append((first, last))
+    return merged
 
 
 def repair_windows(
@@ -140,8 +168,13 @@ def repair_windows(
     *,
     pad: float = REPAIR_PAD_SECONDS,
     duration: float | None = None,
+    max_window: float = REPAIR_MAX_WINDOW_SECONDS,
 ) -> list[tuple[float, float]]:
-    """Time windows (start, end) covering each run plus `pad` on both sides; overlaps are merged."""
+    """Time windows (start, end) covering each run plus `pad` on both sides.
+
+    Overlaps are merged, then windows longer than `max_window` are split into equal parts:
+    re-transcribing a long loop in one request tends to loop again.
+    """
     windows: list[tuple[float, float]] = []
     for first, last in runs:
         start = max(0.0, cues[first].start - pad)
@@ -154,7 +187,12 @@ def repair_windows(
             windows[-1] = (windows[-1][0], max(windows[-1][1], end))
         else:
             windows.append((start, end))
-    return windows
+    split: list[tuple[float, float]] = []
+    for start, end in windows:
+        parts = max(1, math.ceil((end - start) / max_window))
+        step = (end - start) / parts
+        split.extend((start + step * part, end if part == parts - 1 else start + step * (part + 1)) for part in range(parts))
+    return split
 
 
 def shift_cues(cues: Iterable[TranscriptSegment], offset: float) -> list[TranscriptSegment]:
