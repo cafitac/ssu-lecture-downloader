@@ -25,16 +25,35 @@ def learningx_api_headers(cookies: Any, referer: str = LEARNINGX_DASHBOARD_URL) 
     }
 
 
-def latest_current_courses(courses_by_term: Mapping[int, list[dict[str, Any]] | None], term_order: Iterable[int]) -> list[dict[str, Any]]:
-    """Unended courses of the latest term (in `term_order`) that has any; failed terms are None."""
+def latest_current_term(courses_by_term: Mapping[int, list[dict[str, Any]] | None], term_order: Iterable[int]) -> int | None:
+    """The latest term (in `term_order`) that has an unended course; failed terms are None."""
     latest: int | None = None
     for term_id in term_order:
         courses = courses_by_term.get(term_id)
         if courses and any(course.get("ended") is False for course in courses):
             latest = term_id
+    return latest
+
+
+def latest_current_courses(courses_by_term: Mapping[int, list[dict[str, Any]] | None], term_order: Iterable[int]) -> list[dict[str, Any]]:
+    """Unended courses of the latest term, then unended courses of other terms.
+
+    Non-credit programs (비교과, 비정규 such as yearly mandatory trainings) sit in their own
+    yearly term, so "this term" alone would hide them while they are still open.
+    """
+    order = list(term_order)
+    latest = latest_current_term(courses_by_term, order)
     if latest is None:
         return []
-    return [course for course in courses_by_term[latest] or [] if course.get("ended") is False]
+    picked: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for term_id in [latest, *reversed([term for term in order if term != latest])]:
+        for course in courses_by_term.get(term_id) or []:
+            course_id = str(course.get("id") or course.get("course_id"))
+            if course.get("ended") is False and course_id not in seen:
+                seen.add(course_id)
+                picked.append(course)
+    return picked
 
 
 class LearningXLister:
