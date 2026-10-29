@@ -16,7 +16,15 @@ from dataclasses import dataclass
 from typing import Any
 
 MAX_JOB_PROGRESS_EVENTS = 400
-COALESCED_PROGRESS_STAGES = {"download_progress", "audio_progress", "transcript_progress", "transcript_repair"}
+COALESCED_PROGRESS_STAGES = {
+    "download_progress",
+    "audio_progress",
+    "transcript_progress",
+    "transcript_repair",
+    # Wait notes (queue position, "n requests ahead") replace each other per lecture.
+    "transcript_waiting",
+    "transcript_queued",
+}
 TERMINAL_STATUSES = frozenset({"succeeded", "failed", "cancelled"})
 # Finished jobs are kept so late polls still resolve, but not forever.
 DEFAULT_MAX_FINISHED_JOBS = 50

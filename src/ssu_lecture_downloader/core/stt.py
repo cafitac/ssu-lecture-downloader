@@ -6,8 +6,9 @@ import os
 import shutil
 import threading
 from collections.abc import Callable
+from contextlib import AbstractContextManager
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict
 
@@ -22,6 +23,17 @@ DEFAULT_STT_LANGUAGE = 'ko'
 DEFAULT_STT_MODEL = 'large-v3'
 DEFAULT_STT_BEAM_SIZE = 5
 DEFAULT_STT_INITIAL_PROMPT = '다음은 숭실대학교 온라인 강의의 한국어 음성입니다. 강의 내용, 전공 용어, 숫자와 고유명사를 가능한 한 정확하게 받아쓰기합니다.'
+
+
+class WorkGates(Protocol):
+    """Process-wide work limits handed in by the composition root (`service.pipeline_gates.StageGates`).
+
+    `hold(name)` blocks until a slot of that gate is free, raises a cancel exception
+    (`TranscriptionCancelled`/`MediaCancelled`) when `should_cancel` turns true while waiting,
+    and releases the slot when the `with` body ends.
+    """
+
+    def hold(self, name: str, *, should_cancel: Callable[[], bool] | None = None, on_wait: Callable[[], None] | None = None) -> AbstractContextManager[None]: ...
 
 
 class STTProviderStatus(BaseModel):
@@ -275,6 +287,7 @@ def transcribe_audio(
     remote: RemoteSTTService | None = None,
     *,
     stt_capability: Any,
+    gates: WorkGates | None = None,
 ) -> TranscriptionResult:
     audio_path = request.audio_path.expanduser()
     if not audio_path.exists():
@@ -285,7 +298,7 @@ def transcribe_audio(
         # A configured remote server wins over the local engine (which may not even run on this Mac).
         from ssu_lecture_downloader.core.stt_remote import transcribe_with_remote
 
-        return transcribe_with_remote(request.model_copy(update={'audio_path': audio_path}), remote, on_progress=on_progress, should_cancel=should_cancel)
+        return transcribe_with_remote(request.model_copy(update={'audio_path': audio_path}), remote, on_progress=on_progress, should_cancel=should_cancel, gates=gates)
     status = check_stt_provider(request.provider, stt_capability=stt_capability)
     if not status.available:
         return TranscriptionResult(ok=False, audio_path=audio_path, error_code='stt_provider_not_installed', message='STT 엔진이 설치되어 있지 않습니다.', install_hint=status.install_hint)

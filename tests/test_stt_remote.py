@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -15,6 +17,7 @@ from ssu_lecture_downloader.core.stt_remote import (
     RemoteSTTService,
     WhisperCppServerProvider,
     repair_repeated_cues,
+    response_budget_seconds,
 )
 from ssu_lecture_downloader.platforms.macos import MacOSPlatform
 from ssu_lecture_downloader.core.stt_remote_config import RemoteSTTSettingsStore
@@ -252,13 +255,13 @@ def test_pipeline_repairs_a_loop_cleans_cues_and_writes_all_transcript_files(tmp
 def test_pipeline_cancel_and_server_errors_map_to_codes(tmp_path, fake_ffmpeg):
     audio = tmp_path / 'lecture.mp3'
     audio.write_bytes(b'mp3')
-    with FakeSttServer(lambda request: (503, 'text/plain', 'busy')) as server:
+    with FakeSttServer(lambda request: (500, 'text/plain', 'broken')) as server:
         service = service_for(tmp_path, server.url)
         failed = transcribe_audio(TranscriptionRequest(audio_path=audio, output_dir=tmp_path), remote=service, stt_capability=SUPPORTS_LOCAL_STT)
         cancelled = transcribe_audio(TranscriptionRequest(audio_path=audio, output_dir=tmp_path), should_cancel=lambda: True, remote=service, stt_capability=SUPPORTS_LOCAL_STT)
 
     assert (failed.ok, failed.error_code) == (False, 'stt_remote_http_error')
-    assert service.status()['reachable'] is False and 'HTTP 503' in service.status()['last_error']
+    assert service.status()['reachable'] is False and 'HTTP 500' in service.status()['last_error']
     assert (cancelled.ok, cancelled.error_code) == (False, 'cancelled')
     assert not list(tmp_path.glob('lecture.*txt')) and not (tmp_path / 'lecture.srt').exists()
 
@@ -299,3 +302,270 @@ def test_check_reports_reachability_and_remembers_it(tmp_path):
 
     unconfigured = RemoteSTTService(RemoteSTTSettingsStore(tmp_path / 'none.json', writer=MacOSPlatform()))
     assert unconfigured.check()['error_code'] == 'stt_remote_not_configured'
+
+
+# ----------------------------------------------- queue-aware response budget (interim remote path)
+
+
+def test_response_budget_is_one_slot_per_request_ahead_and_capped():
+    assert response_budget_seconds(0) == 20 * 60
+    assert response_budget_seconds(1) == 40 * 60
+    assert response_budget_seconds(3) == 80 * 60
+    assert response_budget_seconds(11) == 4 * 60 * 60  # 12 slots would be 4 h exactly
+    assert response_budget_seconds(50) == 4 * 60 * 60  # never above the cap
+    assert response_budget_seconds(-2) == 20 * 60
+
+
+class SerialServer:
+    """A whisper-server stand-in that, like the real one, answers one request at a time in arrival order."""
+
+    def __init__(self, work_seconds: float) -> None:
+        self.work_seconds = work_seconds
+        self._turn = threading.Lock()
+        self.served = 0
+
+    def __call__(self, request: RecordedRequest):
+        with self._turn:
+            time.sleep(self.work_seconds)
+            self.served += 1
+        return 200, 'text/plain', srt((0, 2, f'답변 {self.served}'))
+
+
+def staggered_requests(server_url: str, tmp_path: Path, count: int, *, base_timeout: float, use_ahead: bool, gap: float = 0.06) -> list[object]:
+    """`count` requests sent `gap` apart, each with the `ahead` the service counted (or always 0)."""
+    service = RemoteSTTService(RemoteSTTSettingsStore(tmp_path / 'stt.json', writer=MacOSPlatform()))
+    provider = WhisperCppServerProvider(server_url, timeout=base_timeout, idle_timeout=5)
+    outcomes: list[object] = [None] * count
+
+    def one(n: int) -> None:
+        audio = tmp_path / f'audio-{n}.wav'
+        write_silent_wav(audio, 3)
+        with service.request_slot() as ahead:
+            try:
+                outcomes[n] = provider.transcribe(audio, ahead_requests=ahead if use_ahead else 0)
+            except RemoteSTTError as exc:
+                outcomes[n] = exc
+
+    threads = []
+    for n in range(count):
+        thread = threading.Thread(target=one, args=(n,))
+        thread.start()
+        threads.append(thread)
+        time.sleep(gap)
+    for thread in threads:
+        thread.join(20)
+    assert service.in_flight == 0
+    return outcomes
+
+
+def test_requests_queued_behind_each_other_outlive_the_single_request_timeout(tmp_path):
+    # Each request needs 0.3 s on the server but the base budget is 0.5 s: the 2nd, 3rd and 4th wait 0.55-1.05 s.
+    with FakeSttServer(SerialServer(0.3)) as server:
+        outcomes = staggered_requests(server.url, tmp_path, 4, base_timeout=0.5, use_ahead=True)
+
+    assert [type(outcome).__name__ for outcome in outcomes] == ['list'] * 4
+    assert all(outcome and outcome[0].text.startswith('답변') for outcome in outcomes)
+
+
+def test_without_the_queue_aware_budget_the_same_queue_times_out(tmp_path):
+    with FakeSttServer(SerialServer(0.3)) as server:
+        outcomes = staggered_requests(server.url, tmp_path, 4, base_timeout=0.5, use_ahead=False)
+
+    failures = [outcome for outcome in outcomes if isinstance(outcome, RemoteSTTError)]
+    assert failures and all(failure.code == 'stt_remote_timeout' for failure in failures)
+
+
+def test_a_server_that_never_answers_times_out_after_the_budget_not_before(tmp_path):
+    started = time.monotonic()
+    with FakeSttServer(sleepy(4, lambda request: (200, 'text/plain', srt((0, 1, 'late'))))) as server:
+        provider = WhisperCppServerProvider(server.url, timeout=0.4, idle_timeout=5)
+        with pytest.raises(RemoteSTTError) as caught:
+            provider.transcribe(wav(tmp_path), ahead_requests=2)  # budget 3 x 0.4 s
+    elapsed = time.monotonic() - started
+
+    assert caught.value.code == 'stt_remote_timeout' and '초 기다렸어요' in caught.value.message
+    assert 1.1 < elapsed < 3.0
+
+
+def test_the_budget_never_exceeds_the_cap(tmp_path):
+    started = time.monotonic()
+    with FakeSttServer(sleepy(4, lambda request: (200, 'text/plain', srt((0, 1, 'late'))))) as server:
+        provider = WhisperCppServerProvider(server.url, timeout=0.4, idle_timeout=5, budget_cap=0.6)
+        with pytest.raises(RemoteSTTError) as caught:
+            provider.transcribe(wav(tmp_path), ahead_requests=50)
+
+    assert caught.value.code == 'stt_remote_timeout'
+    assert time.monotonic() - started < 2.0
+
+
+def test_upload_to_an_unresponsive_peer_still_uses_the_short_idle_timeout(tmp_path):
+    # Connecting works but nothing ever reads the body: the idle timeout (not the long response budget) ends it.
+    import socket
+
+    listener = socket.socket()
+    listener.bind(('127.0.0.1', 0))
+    listener.listen(1)  # accepted by the kernel, never read by anyone
+    audio = tmp_path / 'big.wav'
+    write_silent_wav(audio, 60, rate=48000)  # ~5.7 MB: more than the socket buffers hold
+    started = time.monotonic()
+    try:
+        provider = WhisperCppServerProvider(f'http://127.0.0.1:{listener.getsockname()[1]}', timeout=30, idle_timeout=0.5)
+        with pytest.raises(RemoteSTTError) as caught:
+            provider.transcribe(audio, ahead_requests=5)
+    finally:
+        listener.close()
+
+    assert caught.value.code == 'stt_remote_timeout'
+    assert time.monotonic() - started < 5
+
+
+def test_cancel_interrupts_a_long_response_wait_at_once(tmp_path):
+    started = time.monotonic()
+    with FakeSttServer(sleepy(5, lambda request: (200, 'text/plain', srt((0, 1, 'late'))))) as server:
+        provider = WhisperCppServerProvider(server.url)
+        calls = {'n': 0}
+
+        def should_cancel() -> bool:
+            calls['n'] += 1
+            return calls['n'] > 3
+
+        with pytest.raises(TranscriptionCancelled):
+            provider.transcribe(wav(tmp_path), ahead_requests=3, should_cancel=should_cancel)
+    assert time.monotonic() - started < 3
+
+
+@pytest.mark.parametrize('status', [429, 503])
+def test_a_server_that_rejects_concurrent_requests_gets_the_request_again_after_a_backoff(tmp_path, status):
+    answers = iter([status, status, 200])
+
+    def respond(request: RecordedRequest):
+        code = next(answers)
+        return (code, 'text/plain', 'busy') if code != 200 else (200, 'text/plain', srt((0, 2, '재시도 성공')))
+
+    events: list[dict] = []
+    with FakeSttServer(respond) as server:
+        provider = WhisperCppServerProvider(server.url, backoff_seconds=(0.05, 0.1))
+        cues = provider.transcribe(wav(tmp_path), on_event=events.append)
+
+    assert [c.text for c in cues] == ['재시도 성공']
+    assert len(server.requests) == 3
+    assert [(e['reason'], e['retry_after_seconds']) for e in events] == [('server_deferred', 0.05), ('server_deferred', 0.1)]
+
+
+def test_a_server_that_keeps_rejecting_ends_in_the_http_error_once_the_budget_is_spent(tmp_path):
+    with FakeSttServer(lambda request: (503, 'text/plain', 'busy')) as server:
+        provider = WhisperCppServerProvider(server.url, timeout=0.5, backoff_seconds=(0.2,))
+        with pytest.raises(RemoteSTTError) as caught:
+            provider.transcribe(wav(tmp_path))
+
+    assert caught.value.code == 'stt_remote_http_error' and 'HTTP 503' in caught.value.message
+    assert 1 < len(server.requests) < 6
+
+
+def test_cancel_during_a_backoff_wait_ends_it(tmp_path):
+    started = time.monotonic()
+    with FakeSttServer(lambda request: (503, 'text/plain', 'busy')) as server:
+        provider = WhisperCppServerProvider(server.url, backoff_seconds=(30,))
+        calls = {'n': 0}
+
+        def should_cancel() -> bool:
+            calls['n'] += 1
+            return calls['n'] > 6
+
+        with pytest.raises(TranscriptionCancelled):
+            provider.transcribe(wav(tmp_path), should_cancel=should_cancel)
+    assert time.monotonic() - started < 5
+
+
+def test_openai_compatible_also_backs_off_and_resends(tmp_path):
+    answers = iter([429, 200])
+
+    def respond(request: RecordedRequest):
+        return (429, 'text/plain', 'slow down') if next(answers) == 429 else (200, 'text/plain', srt((0, 2, '두 번째 시도')))
+
+    with FakeSttServer(respond) as server:
+        provider = OpenAICompatibleProvider(server.url, backoff_seconds=(0.05,))
+        cues = provider.transcribe(wav(tmp_path))
+
+    assert [c.text for c in cues] == ['두 번째 시도'] and len(server.requests) == 2
+
+
+def test_pipeline_tells_how_many_requests_are_ahead_and_keeps_the_count_balanced(tmp_path, fake_ffmpeg):
+    audio = [tmp_path / f'lecture-{n}.mp3' for n in (1, 2)]
+    for path in audio:
+        path.write_bytes(b'mp3')
+    both_sent = threading.Barrier(2)
+
+    def respond(request: RecordedRequest):
+        try:
+            both_sent.wait(3)  # answer only once both requests are at the server
+        except threading.BrokenBarrierError:
+            pass
+        return 200, 'text/plain', srt((0, 3, '안녕하세요'))
+
+    events: list[dict] = []
+    results = []
+    with FakeSttServer(respond) as server:
+        service = service_for(tmp_path, server.url)
+
+        def run(path: Path, delay: float) -> None:
+            time.sleep(delay)
+            results.append(transcribe_audio(TranscriptionRequest(audio_path=path, output_dir=tmp_path, overwrite=True), on_progress=events.append, remote=service, stt_capability=SUPPORTS_LOCAL_STT))
+
+        threads = [threading.Thread(target=run, args=(audio[0], 0)), threading.Thread(target=run, args=(audio[1], 0.3))]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(10)
+
+    assert all(result.ok for result in results)
+    waiting = [e for e in events if e['stage'] == 'transcript_waiting']
+    assert [(e['reason'], e['ahead_requests']) for e in waiting] == [('server_busy', 1)]
+    assert service.in_flight == 0
+
+
+def test_remote_failure_still_releases_the_in_flight_count(tmp_path, fake_ffmpeg):
+    audio = tmp_path / 'lecture.mp3'
+    audio.write_bytes(b'mp3')
+    with FakeSttServer(lambda request: (500, 'text/plain', 'broken')) as server:
+        service = service_for(tmp_path, server.url)
+        result = transcribe_audio(TranscriptionRequest(audio_path=audio, output_dir=tmp_path), remote=service, stt_capability=SUPPORTS_LOCAL_STT)
+
+    assert result.error_code == 'stt_remote_http_error' and service.in_flight == 0
+
+
+class RecordingGates:
+    """A WorkGates stand-in that records which limits were taken and whether an HTTP call ran while one was held."""
+
+    def __init__(self, server) -> None:
+        self.server = server
+        self.names: list[str] = []
+        self.held = 0
+        self.requests_while_held = 0
+
+    @contextmanager
+    def hold(self, name, *, should_cancel=None, on_wait=None):
+        self.names.append(name)
+        self.held += 1
+        before = len(self.server.requests)
+        try:
+            yield
+        finally:
+            self.requests_while_held += len(self.server.requests) - before
+            self.held -= 1
+
+
+def test_remote_pipeline_takes_the_media_limit_only_around_ffmpeg_work(tmp_path, fake_ffmpeg):
+    audio = tmp_path / 'lecture.mp3'
+    audio.write_bytes(b'mp3')
+    first_pass = srt((0, 4, '안녕하세요'), *[(20 + i, 21 + i, '같은 문장') for i in range(10)], (59.9, 60, '마무리'))
+    repair = srt((2, 4, '복구된 문장'))
+    with FakeSttServer(lambda request: (200, 'text/plain', repair if request.fields['temperature'] == '0.2' else first_pass)) as server:
+        service = service_for(tmp_path, server.url)
+        gates = RecordingGates(server)
+        result = transcribe_audio(TranscriptionRequest(audio_path=audio, output_dir=tmp_path, overwrite=True), remote=service, stt_capability=SUPPORTS_LOCAL_STT, gates=gates)
+
+    assert result.ok, result.message
+    assert gates.names == ['media', 'media']  # WAV conversion + one repair cut
+    assert gates.requests_while_held == 0 and gates.held == 0
+    assert len(server.requests) == 2

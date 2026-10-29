@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import dataclasses
+import logging
 import threading
 from datetime import datetime, timezone
 from collections.abc import Callable, Iterable, Iterator
@@ -1278,9 +1279,27 @@ class SsuLectureService:
         should_cancel: Callable[[], bool] | None = None,
         conflict_strategy: str = 'rename',
         max_parallel_downloads: int = 4,
+        on_item_ready: Callable[[BatchDownloadItemResult], None] | None = None,
     ) -> BatchDownloadResult:
+        """Plan (dry run) or download the selected lectures.
+
+        `on_item_ready(item)` (real downloads only) is called once per item as soon as that item is
+        settled: skipped or unresolvable items right after planning, downloaded or failed items the
+        moment their own download ends, without waiting for the other downloads. Items dropped
+        because the batch was cancelled are not reported. The callback must be quick and must not
+        raise; an exception from it is ignored so one consumer error cannot stop the batch.
+        """
+
         def emit(event: dict[str, Any]) -> None:
             emit_progress(on_progress, event)
+
+        def item_ready(item: BatchDownloadItemResult) -> None:
+            if on_item_ready is None or dry_run:
+                return
+            try:
+                on_item_ready(item)
+            except Exception:  # noqa: BLE001 - a consumer bug must not abort the downloads
+                logging.getLogger(__name__).exception('on_item_ready callback failed')
 
         def cancelled() -> bool:
             return bool(should_cancel and should_cancel())
@@ -1345,6 +1364,8 @@ class SsuLectureService:
                 download_tasks.append(outcome)
 
         completed_results = dict(immediate_results)
+        for index in sorted(immediate_results):
+            item_ready(immediate_results[index])
         emit({
             "stage": "batch_prepare_done",
             "total": total,
@@ -1364,6 +1385,7 @@ class SsuLectureService:
                     max_parallel_downloads=max_parallel_downloads,
                     emit=emit,
                     should_cancel=should_cancel,
+                    on_item_ready=item_ready,
                 )
             )
 
@@ -1428,7 +1450,13 @@ class SsuLectureService:
         max_parallel_downloads: int,
         emit: Callable[[dict[str, Any]], None],
         should_cancel: Callable[[], bool] | None,
+        on_item_ready: Callable[[BatchDownloadItemResult], None] | None = None,
     ) -> dict[int, BatchDownloadItemResult]:
+        def settle(index: int, item: BatchDownloadItemResult) -> None:
+            results[index] = item
+            if on_item_ready is not None:
+                on_item_ready(item)
+
         def download_planned(planned: dict[str, Any]) -> BatchDownloadItemResult:
             index = planned["index"]
             module_item_id = planned["module_item_id"]
@@ -1484,11 +1512,11 @@ class SsuLectureService:
                 if should_cancel and should_cancel():
                     continue
                 try:
-                    results[index] = future.result()
+                    downloaded = future.result()
                 except Exception as exc:
                     title = planned.get("title") or lecture.title
                     emit({"stage": "failed", "index": index, "total": total, "module_item_id": planned["module_item_id"], "title": title, "error_code": type(exc).__name__})
-                    results[index] = _batch_item_result(
+                    settle(index, _batch_item_result(
                         course_id=course_id,
                         module_item_id=planned["module_item_id"],
                         lecture=lecture,
@@ -1497,7 +1525,9 @@ class SsuLectureService:
                         title=title,
                         ok=False,
                         error_code=type(exc).__name__,
-                    )
+                    ))
+                else:
+                    settle(index, downloaded)
         return results
 
     # ------------------------------------------------------- resolution (locked)
