@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import type { GradesController } from '../hooks/useGrades';
 import type { MediaDependencies } from '../hooks/useMediaDependencies';
 import type { RemoteStt } from '../hooks/useRemoteStt';
 import { useReminders } from '../hooks/useReminders';
@@ -17,6 +18,7 @@ interface Props {
   busy: boolean;
   media: MediaDependencies;
   debugEvents: WatchDebugEvent[];
+  grades: GradesController;
   /** The mode a started queue plays in, whether Chrome is installed (null: not known yet) and whether a queue runs now. */
   watchMode: WatchMode;
   chromeAvailable: boolean | null;
@@ -214,6 +216,47 @@ function WatchDiagnostics({ events }: { events: WatchDebugEvent[] }) {
   );
 }
 
+function GradesSection({ grades }: { grades: GradesController }) {
+  const { consent, refreshStatus, revoke } = grades;
+  const [turningOff, setTurningOff] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  // Asks only whether the user agreed; nothing is read from u-SAINT here.
+  useEffect(() => {
+    void refreshStatus();
+  }, [refreshStatus]);
+
+  async function turnOff() {
+    setTurningOff(true);
+    setError(null);
+    const problem = await revoke();
+    setError(problem);
+    setTurningOff(false);
+  }
+
+  return (
+    <section className="setting">
+      <h3>성적 보기</h3>
+      {consent === 'on' ? (
+        <>
+          <p className="muted small">u-SAINT에서 성적을 읽어 와요</p>
+          <div className="setting-actions">
+            <button type="button" className="btn btn-sm" disabled={turningOff} onClick={() => void turnOff()}>
+              {turningOff ? '끄는 중…' : '끄기'}
+            </button>
+          </div>
+        </>
+      ) : consent === 'off' ? (
+        <p className="muted small">꺼져 있어요. 상단 ‘성적’에서 켤 수 있어요.</p>
+      ) : consent === 'error' ? (
+        <p className="muted small">성적 보기 상태를 확인하지 못했어요.</p>
+      ) : (
+        <p className="muted small" role="status">확인하는 중이에요…</p>
+      )}
+      {error && <p className="notice notice-danger" role="alert">{error}</p>}
+    </section>
+  );
+}
+
 function RemindersSection() {
   const reminders = useReminders(true);
   const { status } = reminders;
@@ -244,7 +287,7 @@ function RemindersSection() {
   );
 }
 
-export function SettingsDialog({ downloadDir, busy, media, debugEvents, watchMode, chromeAvailable, queueActive, onWatchModeChange, onPickFolder, onOpenFolder, onSignOut, onClose }: Props) {
+export function SettingsDialog({ downloadDir, busy, media, debugEvents, grades, watchMode, chromeAvailable, queueActive, onWatchModeChange, onPickFolder, onOpenFolder, onSignOut, onClose }: Props) {
   const [signingOut, setSigningOut] = useState(false);
   const [signOutError, setSignOutError] = useState<string | null>(null);
   const desktop = isTauriRuntime();
@@ -325,6 +368,8 @@ export function SettingsDialog({ downloadDir, busy, media, debugEvents, watchMod
         </div>
         {signOutError && <p className="notice notice-danger" role="alert">{signOutError}</p>}
       </section>
+
+      <GradesSection grades={grades} />
 
       {desktop && <RemindersSection />}
 

@@ -579,3 +579,81 @@ export interface CanvasFileDownloadResponse {
   skipped: boolean;
   written: boolean;
 }
+
+// Grades view (u-SAINT, read only). Shapes follow the API contract of the grades feature;
+// every number may be null when u-SAINT leaves it empty. Values are shown, never logged or stored.
+export type GradesSemesterKind = 'ONE' | 'SUMMER' | 'TWO' | 'WINTER';
+
+export interface GradesConsentInfo {
+  granted: boolean;
+  consent_version: number | null;
+  granted_at: string | null;
+}
+
+/** Response of the status, consent-grant and consent-revoke calls. */
+export interface GradesStatusResponse {
+  ok: boolean;
+  consent: GradesConsentInfo;
+  /** False when this build cannot read u-SAINT at all (native part missing). */
+  available: boolean;
+  current_consent_version: number;
+  fetched_at: string | null;
+}
+
+export interface GradesSummaryDto {
+  attempted_credits: number | null;
+  earned_credits: number | null;
+  pf_earned_credits: number | null;
+  grade_points_sum: number | null;
+  grade_points_average: number | null;
+  arithmetic_mean: number | null;
+}
+
+export interface GradesRankDto {
+  rank: number;
+  total: number;
+}
+
+export interface GradesSemesterDto {
+  year: number;
+  semester: GradesSemesterKind;
+  attempted_credits: number | null;
+  earned_credits: number | null;
+  pf_earned_credits: number | null;
+  grade_points_average: number | null;
+  grade_points_sum: number | null;
+  arithmetic_mean: number | null;
+  semester_rank: GradesRankDto | null;
+  general_rank: GradesRankDto | null;
+  academic_probation: boolean | null;
+  consult: boolean | null;
+  flunked: boolean | null;
+}
+
+export interface GradesOverviewResponse {
+  ok: boolean;
+  fetched_at: string;
+  recorded_summary: GradesSummaryDto | null;
+  certificated_summary: GradesSummaryDto | null;
+  semesters: GradesSemesterDto[];
+}
+
+export interface GradesClassDto {
+  year: number;
+  semester: GradesSemesterKind;
+  code: string;
+  class_name: string;
+  credits: number | null;
+  /** A number as text, or P / F. */
+  score: string | null;
+  /** Letter grade such as A+. */
+  grade: string | null;
+  professor: string | null;
+}
+
+export interface GradesClassesResponse {
+  ok: boolean;
+  year: number;
+  semester: GradesSemesterKind;
+  classes: GradesClassDto[];
+}
