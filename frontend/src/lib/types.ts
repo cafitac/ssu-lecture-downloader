@@ -167,6 +167,38 @@ export interface ProgressEvent {
   remote?: boolean;
   repair_index?: number;
   repair_total?: number;
+  /** Seconds since the epoch; present on pipeline events of a backend that has the per-lecture pipeline. */
+  at?: number;
+  /** `transcript_waiting`: why the transcript is not running yet (unknown values are treated as a plain wait). */
+  reason?: 'local_engine' | 'server_busy' | 'server_deferred' | 'server_queue' | 'media' | (string & {});
+  /** `audio_waiting`: what the lecture waits for, the MP4 check/repair or the audio step itself (missing means audio). */
+  step?: 'mp4' | 'audio' | (string & {});
+  /** `transcript_waiting`: requests this app already sent to the subtitle server before this one. */
+  ahead_requests?: number;
+  retry_after_seconds?: number;
+  /** `transcript_queued`: place in the subtitle server queue, starting at 1. */
+  queue_position?: number;
+  job_id?: string;
+  /** `transcript_progress`: the percent is a guess, not measured by the server. */
+  progress_estimated?: boolean;
+  /** `artifact_item_failed`: the step that failed (for logs; the user sees `error_code`). */
+  failed_stage?: string;
+}
+
+/** `result.summary` of a per-lecture pipeline job (additive; absent on older backends). */
+export interface PipelineSummary {
+  total: number;
+  succeeded: number;
+  failed: number;
+  cancelled: number;
+}
+
+/** One entry of `result.items_status`: the final state of a lecture, kept even if progress events were compacted away. */
+export interface PipelineItemStatus {
+  module_item_id: string | number;
+  state: string;
+  error_code?: string | null;
+  failed_stage?: string | null;
 }
 
 export interface DownloadResult {
@@ -243,6 +275,8 @@ export interface DownloadArtifactResult {
   download: DownloadResult | BatchDownloadResult;
   artifacts: Array<Record<string, unknown> & { kind: string; ok?: boolean; output_path?: string | null; text_path?: string | null }>;
   progress: ProgressEvent[];
+  summary?: PipelineSummary;
+  items_status?: PipelineItemStatus[];
 }
 
 export type DownloadOutputFormat = 'mp4' | 'mp3' | 'txt';
