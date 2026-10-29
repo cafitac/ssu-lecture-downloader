@@ -718,8 +718,9 @@ const progress = await import('../src/lib/progress.ts');
     assert.ok(hookSource.includes('holdFurthestRows(job?.job_id'), 'the hook keeps the furthest row per job');
   }
 
-  // Event order is the backend's clock (`at`), not list order. Recorded from pl-py-pipeline f367be8 after
-  // compaction: the waiting event sits at the end and the 99% tick replaced an older one in place.
+  // SYNTHETIC ordering case (not a current backend log): the out-of-order shape pl-py-pipeline f367be8 stored, with
+  // the waiting event at the end and the 99% tick replacing an older one in place. Since 35a3352 the list is chronological;
+  // sorting by `at` stays as a guard for older builds. Real logs are the fixtures in the next block.
   {
     const recorded = [
     {"module_item_id": "1", "stage": "download_done", "file_size": 10, "output_path": "/a/L1.mp4", "at": 1},
@@ -742,6 +743,81 @@ const progress = await import('../src/lib/progress.ts');
     assert.equal(row.phase, 'waiting_transcript', 'the untimed event keeps its place between the timed ones');
     row = one(txtPlan, [ev('transcribing', { at: 3 }), ev('transcript_waiting', { reason: 'media', at: 3 })]);
     assert.equal(row.phase, 'waiting_transcript', 'equal `at` keeps list order');
+  }
+
+  // Real logs from pl-py-pipeline 35a3352 (scripts/fixtures/*.json, captured through its test rig; the files name the command).
+  {
+    const loadFixture = (name) => {
+      const fixture = JSON.parse(readFileSync(new URL(`./fixtures/${name}`, import.meta.url), 'utf8'));
+      assert.ok(fixture.source.includes('35a3352') && fixture.command, `${name} names its source revision and command`);
+      return fixture.progress;
+    };
+    const tier = { waiting: 0, preparing: 1, downloading: 2, verifying: 3, waiting_audio: 3, extracting: 4, waiting_transcript: 5, transcribing: 5, done: 6, failed: 6, cancelled: 6, skipped: 6 };
+
+    // Normal remote run: loop repair and server-busy waits. Replaying every prefix of the log (a poll after each event) a lecture never goes back.
+    const remote = loadFixture('backend-35a3352-remote-run.json');
+    const remotePlan = { courseId: 1, courseName: 'c', kind: 'video', outputs: ['txt'], items: [1, 2, 3, 4].map(item) };
+    const furthest = [0, 0, 0, 0];
+    for (let length = 1; length <= remote.length; length += 1) {
+      buildJobRows(remotePlan, job('running', remote.slice(0, length), { job_id: 'artifact-r' })).forEach((entry, index) => {
+        assert.ok(tier[entry.phase] >= furthest[index], `lecture ${index + 1} went back to ${entry.phase} after event ${length} (${remote[length - 1].stage})`);
+        furthest[index] = tier[entry.phase];
+      });
+    }
+    const firstDone = remote.findIndex((event) => event.stage === 'transcript_done');
+    rows = buildJobRows(remotePlan, job('running', remote.slice(0, firstDone), { job_id: 'artifact-r' }));
+    assert.deepEqual([rows[0].phase, rows[0].label, rows[0].percent], ['transcribing', '자막 만드는 중 (원격)', 99], 'a lecture at 99% is not shown as waiting');
+    assert.deepEqual([rows[3].phase, rows[3].label], ['waiting_transcript', '자막 서버 응답 기다리는 중'], 'a lecture whose last event is the busy wait waits');
+    assert.ok(rows.every((entry) => !entry.final && entry.overall <= 99));
+    assert.deepEqual(buildJobRows(remotePlan, job('succeeded', remote, { job_id: 'artifact-r' })).map((entry) => [entry.phase, entry.overall, entry.final]), [1, 2, 3, 4].map(() => ['done', 100, true]));
+
+    // Over the 400-event cap: 28 of 30 lectures wait for audio; the two that hold a slot have no stage event of their own in this build.
+    const capped = loadFixture('backend-35a3352-over-cap.json');
+    assert.equal(capped.length, 400);
+    const mp3Many = { courseId: 1, courseName: 'c', kind: 'video', outputs: ['mp3'], items: Array.from({ length: 30 }, (_, index) => item(index + 1)) };
+    rows = buildJobRows(mp3Many, job('running', capped, { job_id: 'artifact-c' }));
+    assert.equal(rows.filter((entry) => entry.phase === 'waiting_audio' && entry.label === '음성 추출 대기 중').length, 28);
+    assert.equal(rows.filter((entry) => entry.phase === 'waiting').length, 2);
+    assert.ok(rows.every((entry) => entry.phase !== 'failed' && entry.overall <= 99 && !entry.final));
+  }
+
+  // A bare `failed` (the batch download's own result for an item) is final even after the cap drops it; `download_failed` is not.
+  {
+    const { holdFurthestRows } = await import('../src/lib/jobItems.ts');
+    const marks = new Map();
+    const poll = (events) => holdFurthestRows('artifact-1', buildJobRows(txtPlan, job('running', events)), marks);
+    let shown = poll([ev('failed', { error_code: 'network_error', at: 1 })]);
+    assert.deepEqual([shown[0].phase, shown[0].final], ['failed', true]);
+    shown = poll([{ stage: 'download_progress', module_item_id: 2, at: 2 }]);
+    assert.deepEqual([shown[0].phase, shown[0].label, shown[0].final], ['failed', '실패', true], 'the evicted failed event does not send the row back to 대기');
+    shown = poll([ev('download_progress', { bytes_written: 5, total_bytes: 10, at: 3 })]);
+    assert.equal(shown[0].phase, 'failed', 'later events cannot revive it');
+    assert.equal(one(txtPlan, [ev('failed', { at: 1 }), ev('download_progress', { bytes_written: 5, total_bytes: 10, at: 2 })]).phase, 'failed');
+    marks.clear();
+    shown = poll([ev('download_failed', { error_code: 'network_error', at: 1 })]);
+    assert.deepEqual([shown[0].phase, shown[0].final], ['failed', false]);
+  }
+
+  // A wait guessed from audio_done (no transcript_waiting event) must not pull a transcribing row back after eviction.
+  {
+    const { holdFurthestRows } = await import('../src/lib/jobItems.ts');
+    const marks = new Map();
+    const poll = (events) => holdFurthestRows('artifact-1', buildJobRows(txtPlan, job('running', events)), marks);
+    let shown = poll([ev('audio_done', { at: 1 }), ev('transcribing', { at: 2 }), ev('transcript_progress', { progress_percent: 62, at: 3 })]);
+    assert.deepEqual([shown[0].phase, shown[0].percent, shown[0].derivedWait], ['transcribing', 62, false]);
+    shown = poll([ev('audio_done', { at: 1 })]);
+    assert.deepEqual([shown[0].phase, shown[0].percent, shown[0].label], ['transcribing', 62, '자막 만드는 중'], 'only audio_done is left');
+    assert.equal(buildJobRows(txtPlan, job('running', [ev('audio_done', { at: 1 })]))[0].derivedWait, true);
+    assert.equal(buildJobRows(txtPlan, job('running', [ev('audio_done', { at: 1 }), ev('transcript_waiting', { reason: 'media', at: 2 })]))[0].derivedWait, false);
+    // An explicit wait that follows still shows (a media wait during repair cuts), and a derived wait alone is shown when nothing was held.
+    shown = poll([ev('transcript_waiting', { reason: 'media', at: 5 })]);
+    assert.deepEqual([shown[0].phase, shown[0].label], ['waiting_transcript', '자막 준비 대기 중']);
+    marks.clear();
+    assert.equal(poll([ev('audio_done', { at: 1 })])[0].phase, 'waiting_transcript');
+    // The same for the wait after download_done: the video check that began is kept.
+    marks.clear();
+    poll([ev('download_done', { at: 1 }), ev('video_playable_check_started', { at: 2 })]);
+    assert.equal(poll([ev('download_done', { at: 1 })])[0].phase, 'verifying');
   }
 
   // A failure of a running job can still be retried by the backend (signed-URL expiry): it is not pinned.

@@ -59,6 +59,8 @@ export interface JobRow {
    * running job is not final: the backend retries after `download_failed` (signed-URL expiry).
    */
   final: boolean;
+  /** The row waits only because an earlier step finished (`download_done`, `audio_done`); no waiting event said so. It never overrides a row that already got further. */
+  derivedWait: boolean;
   /** Plain-Korean failure reason for `failed` rows. */
   reason?: string;
   /** Raw failure code behind `reason`, for retry decisions (never shown). */
@@ -129,7 +131,9 @@ interface Accumulated {
   audioWaitStep?: string;
   waitAhead?: number;
   waitPosition?: number;
-  /** Set by `artifact_item_*` events: later events of this lecture cannot change a final state. */
+  /** The current `waiting_audio` / `waiting_transcript` was guessed from `download_done` / `audio_done`, not reported by a waiting event. */
+  derived?: boolean;
+  /** Set by `artifact_item_*` events and the bare `failed` result: later events of this lecture cannot change a final state. */
   locked: boolean;
   seen: Set<string>;
 }
@@ -193,7 +197,8 @@ function applyEvent(state: Accumulated, event: ProgressEvent, ctx: StepContext):
     state.phase = 'failed';
     state.percent = null;
     state.failure = event.error_code ?? state.failure;
-    if (stage === 'artifact_item_failed') state.locked = true;
+    // `artifact_item_failed` and the batch download's bare `failed` result are final; `download_failed` and other `*_failed` may be retried.
+    if (stage === 'artifact_item_failed' || stage === 'failed') state.locked = true;
     return;
   }
   if (stage === 'download_cancelled') {
@@ -207,6 +212,7 @@ function applyEvent(state: Accumulated, event: ProgressEvent, ctx: StepContext):
     state.phase = 'waiting_audio';
     state.percent = null;
     state.audioWaitStep = event.step === 'mp4' ? 'mp4' : undefined;
+    state.derived = false;
     return;
   }
   if (stage === 'transcript_waiting' || stage === 'transcript_queued') {
@@ -214,6 +220,7 @@ function applyEvent(state: Accumulated, event: ProgressEvent, ctx: StepContext):
     state.percent = null;
     state.note = undefined;
     state.estimated = false;
+    state.derived = false;
     if (stage === 'transcript_queued') {
       state.waitPosition = positiveInt(event.queue_position);
     } else {
@@ -232,6 +239,7 @@ function applyEvent(state: Accumulated, event: ProgressEvent, ctx: StepContext):
     state.phase = ctx.wantsAudio ? 'waiting_audio' : 'downloading';
     state.percent = ctx.wantsAudio ? null : 100;
     state.audioWaitStep = undefined;
+    state.derived = ctx.wantsAudio;
     return;
   }
   if (stage.startsWith('download_')) {
@@ -246,6 +254,7 @@ function applyEvent(state: Accumulated, event: ProgressEvent, ctx: StepContext):
     state.phase = checked && ctx.wantsAudio ? 'waiting_audio' : 'verifying';
     state.percent = null;
     state.audioWaitStep = undefined;
+    state.derived = checked && ctx.wantsAudio;
     return;
   }
   if (stage === 'extracting_audio' || stage === 'audio_probe_done') {
@@ -261,6 +270,7 @@ function applyEvent(state: Accumulated, event: ProgressEvent, ctx: StepContext):
   if (stage === 'audio_done' || stage === 'audio_skipped') {
     state.phase = ctx.wantsTranscript ? 'waiting_transcript' : 'extracting';
     state.percent = ctx.wantsTranscript ? null : 100;
+    state.derived = ctx.wantsTranscript;
     return;
   }
   if (TRANSCRIBE_STAGES.has(stage)) {
@@ -377,8 +387,9 @@ const PHASE_RANK: Record<RowPhase, number> = {
 };
 
 /**
- * Events of one lecture in the order they happened. The backend moves waiting events to the end of
- * the list and replaces progress ticks in place, so list order can lie; `at` is the clock.
+ * Events of one lecture in the order they happened, by `at`. Since backend 35a3352 the stored list is
+ * already chronological (a coalesced stage is removed and appended at the end), so this only matters
+ * for older backend builds (f367be8 moved waits to the end but replaced ticks in place) and as a guard.
  * Events without `at` keep their slot; ties keep list order.
  */
 function inEventOrder(events: ProgressEvent[]): ProgressEvent[] {
@@ -462,6 +473,7 @@ export function buildJobRows(plan: JobPlan, job: DownloadJobStatus | null): JobR
       label: waiting ? waiting.label : phase === 'waiting_audio' && state.audioWaitStep === 'mp4' ? WAITING_MP4_LABEL : phase === 'transcribing' && state.remote ? REMOTE_TRANSCRIBING_LABEL : PHASE_LABEL[phase],
       percent,
       final: isFinal,
+      derivedWait: phase === state.phase && Boolean(state.derived) && (phase === 'waiting_audio' || phase === 'waiting_transcript'),
       // Only a final row reads 100: a finished download of an MP4-only job still has its check ahead.
       overall: isFinal ? weightedProgress(ctx, phase, percent) : phase === 'failed' ? 0 : Math.min(99, weightedProgress(ctx, phase, percent)),
       written: state.written,
@@ -496,6 +508,8 @@ export function holdFurthestRows(jobId: string | null | undefined, rows: JobRow[
       // A failure the backend may retry is not pinned: show what happens next, but keep the bar where it was.
       else if (row.phase === 'failed' || before.phase === 'failed') shown = { ...row, overall: Math.max(row.overall, before.overall) };
       else if (PHASE_RANK[row.phase] < PHASE_RANK[before.phase]) shown = before;
+      // A guessed wait (only audio_done is left after eviction) must not pull a transcribing row back.
+      else if (row.derivedWait && PHASE_RANK[row.phase] <= PHASE_RANK[before.phase]) shown = before;
       else if (row.overall < before.overall) shown = { ...row, overall: before.overall };
     }
     marks.set(key, shown);
