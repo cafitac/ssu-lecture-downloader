@@ -93,3 +93,27 @@ jobs:
           SIDECAR="$APP/Contents/Resources/resources/backend-sidecar/ssu-api"
           test -x "$SIDECAR/ssu-api" || { echo "missing executable $SIDECAR/ssu-api"; exit 1; }
           test -d "$SIDECAR/_internal" || { echo "missing $SIDECAR/_internal"; exit 1; }
+
+  # Compile-only guard for the Windows platform stubs (frontend/src-tauri/src/platform/windows.rs).
+  # No tests here: the existing Rust tests assume a unix shell. Windows adapters come in S2.
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: frontend/src-tauri
+
+      # tauri-build requires resources/backend-sidecar to exist; the real sidecar is not built
+      # here, an empty directory is enough to compile.
+      - name: Create empty sidecar placeholder
+        shell: bash
+        run: mkdir -p frontend/src-tauri/resources/backend-sidecar
+
+      - name: Cargo check
+        working-directory: frontend/src-tauri
+        run: cargo check --lib

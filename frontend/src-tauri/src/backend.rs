@@ -10,17 +10,24 @@ use serde::Serialize;
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream, ToSocketAddrs};
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+
+use crate::platform::{
+    configure_sidecar_command, generate_api_token, reap_stale_backend, sidecar_executable_name,
+    terminate_process_group,
+};
 
 pub(crate) const BACKEND_HOST: &str = "127.0.0.1";
 pub(crate) const DEFAULT_BACKEND_PORT: u16 = 8000;
 const BACKEND_HEALTH_PATH: &str = "/api/health";
 /// Env var that hands the per-launch API token to a managed backend.
 pub(crate) const BACKEND_TOKEN_ENV: &str = "SSU_API_TOKEN";
+/// Env var that hands the app data directory to a managed backend. The backend ignores it until
+/// the unit that reads it; the value is the directory it already computes itself on macOS.
+pub(crate) const BACKEND_APP_DATA_DIR_ENV: &str = "SSU_APP_DATA_DIR";
 /// Header the UI and native callers send so the backend accepts the request.
 pub(crate) const BACKEND_TOKEN_HEADER: &str = "X-SSU-Token";
 const BACKEND_STARTUP_TIMEOUT: Duration = Duration::from_secs(90);
@@ -314,9 +321,11 @@ impl BackendManager {
             .env(BACKEND_TOKEN_ENV, &token)
             .stdin(Stdio::null())
             .stdout(stdout)
-            .stderr(stderr)
-            // Own process group so the whole tree can be signalled at once.
-            .process_group(0);
+            .stderr(stderr);
+        if let Some(app_data_dir) = &self.state_dir {
+            command.env(BACKEND_APP_DATA_DIR_ENV, app_data_dir);
+        }
+        configure_sidecar_command(&mut command);
         let child = match command.spawn() {
             Ok(child) => child,
             Err(error) => {
@@ -429,47 +438,8 @@ impl Drop for BackendManager {
 }
 
 // ---------------------------------------------------------------------------
-// Process-group helpers
+// Pidfile
 // ---------------------------------------------------------------------------
-
-fn process_group_alive(pgid: libc::pid_t) -> bool {
-    // SAFETY: signal 0 only checks for existence/permission.
-    unsafe { libc::killpg(pgid, 0) == 0 }
-}
-
-/// SIGTERM the whole process group of `child` (which must have been spawned
-/// with `process_group(0)`), wait up to `grace`, then SIGKILL what is left and
-/// reap the direct child.
-pub(crate) fn terminate_process_group(child: &mut Child, grace: Duration) {
-    let pgid = child.id() as libc::pid_t;
-    // SAFETY: plain signal delivery to a process group we created.
-    unsafe {
-        libc::killpg(pgid, libc::SIGTERM);
-    }
-    let deadline = Instant::now() + grace;
-    loop {
-        let child_gone = !matches!(child.try_wait(), Ok(None));
-        if child_gone && !process_group_alive(pgid) {
-            return;
-        }
-        if Instant::now() >= deadline {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(25));
-    }
-    if process_group_alive(pgid) {
-        // SAFETY: as above.
-        unsafe {
-            libc::killpg(pgid, libc::SIGKILL);
-        }
-    }
-    let _ = child.wait();
-    // Give the kernel a moment to tear the group down so callers can rely on it.
-    let kill_deadline = Instant::now() + Duration::from_millis(500);
-    while process_group_alive(pgid) && Instant::now() < kill_deadline {
-        std::thread::sleep(Duration::from_millis(10));
-    }
-}
 
 fn write_pidfile(path: &Path, pid: u32) {
     if let Some(parent) = path.parent() {
@@ -478,75 +448,9 @@ fn write_pidfile(path: &Path, pid: u32) {
     let _ = fs::write(path, pid.to_string());
 }
 
-/// Whether a `ps` command line belongs to a backend this app would have launched.
-pub(crate) fn command_looks_like_our_backend(command_line: &str) -> bool {
-    command_line.contains("ssu_lecture_downloader.api:app") || command_line.contains("ssu-api")
-}
-
-fn process_command_line(pid: libc::pid_t) -> Option<String> {
-    let output = Command::new("ps")
-        .args(["-o", "command=", "-p", &pid.to_string()])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    (!text.is_empty()).then_some(text)
-}
-
-/// Kill a backend left behind by a previous app run that was force-quit.
-/// Only acts when the pidfile's process is a group leader whose command line
-/// matches our backend, so a recycled pid is never touched.
-fn reap_stale_backend(pidfile: &Path) {
-    let Some(pid) = fs::read_to_string(pidfile)
-        .ok()
-        .and_then(|text| text.trim().parse::<libc::pid_t>().ok())
-    else {
-        let _ = fs::remove_file(pidfile);
-        return;
-    };
-    let _ = fs::remove_file(pidfile);
-    if pid <= 1 {
-        return;
-    }
-    // SAFETY: read-only queries about another process.
-    let (alive, group_leader) = unsafe { (libc::kill(pid, 0) == 0, libc::getpgid(pid) == pid) };
-    if !alive || !group_leader {
-        return;
-    }
-    let Some(command_line) = process_command_line(pid) else {
-        return;
-    };
-    if !command_looks_like_our_backend(&command_line) {
-        return;
-    }
-    // SAFETY: the pid is a verified group leader running our backend.
-    unsafe {
-        libc::killpg(pid, libc::SIGTERM);
-    }
-    let deadline = Instant::now() + Duration::from_secs(2);
-    while process_group_alive(pid) && Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    if process_group_alive(pid) {
-        // SAFETY: as above.
-        unsafe {
-            libc::killpg(pid, libc::SIGKILL);
-        }
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Token, ports, logs
 // ---------------------------------------------------------------------------
-
-/// 32 random bytes from the OS, hex encoded.
-pub(crate) fn generate_api_token() -> std::io::Result<String> {
-    let mut bytes = [0_u8; 32];
-    File::open("/dev/urandom")?.read_exact(&mut bytes)?;
-    Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
-}
 
 fn choose_backend_port() -> std::io::Result<u16> {
     TcpListener::bind((BACKEND_HOST, 0))
@@ -794,7 +698,7 @@ pub(crate) fn backend_launch_command_with(
 /// (`ssu-api/ssu-api` next to `_internal/`) or the legacy single-file `ssu-api`.
 fn resolve_sidecar_executable(candidate: &Path) -> Option<PathBuf> {
     if candidate.is_dir() {
-        let inner = candidate.join("ssu-api");
+        let inner = candidate.join(sidecar_executable_name());
         return inner.is_file().then_some(inner);
     }
     candidate.is_file().then(|| candidate.to_path_buf())
@@ -858,6 +762,8 @@ pub(crate) fn backend_restart(state: tauri::State<'_, Arc<BackendManager>>) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::platform::command_looks_like_our_backend;
+    use std::os::unix::process::CommandExt;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn temp_root(name: &str) -> PathBuf {
@@ -1222,6 +1128,8 @@ port = int(sys.argv[sys.argv.index("--port") + 1])
 token = os.environ.get("SSU_API_TOKEN")
 with open(os.path.join(os.path.dirname(__file__), "starts.log"), "a") as handle:
     handle.write("start\n")
+with open(os.path.join(os.path.dirname(__file__), "app_data_dir.env"), "w") as handle:
+    handle.write(os.environ.get("SSU_APP_DATA_DIR", "<unset>"))
 MODE = open(os.path.join(os.path.dirname(__file__), "mode")).read().strip()
 if MODE == "exit":
     sys.exit(3)
@@ -1328,6 +1236,11 @@ HTTPServer(("127.0.0.1", port), Handler).serve_forever()
             Duration::from_secs(2)
         ));
         assert!(status.log_path.is_some());
+        // The shell hands its app data dir to the backend next to the token.
+        assert_eq!(
+            fs::read_to_string(dir.join("app_data_dir.env")).unwrap(),
+            dir.join("state").to_string_lossy()
+        );
 
         let grandchild: libc::pid_t = fs::read_to_string(dir.join("grandchild.pid"))
             .unwrap()
