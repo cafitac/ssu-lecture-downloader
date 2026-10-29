@@ -1,6 +1,8 @@
 #[cfg(test)]
 mod acl_tests;
 mod backend;
+#[cfg(all(test, target_os = "macos"))]
+mod invariant_tests;
 mod launch_agent;
 mod native_download;
 mod reminders;
