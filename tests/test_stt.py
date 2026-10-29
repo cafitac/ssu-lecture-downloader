@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from stt_fakes import SUPPORTS_LOCAL_STT
 from ssu_lecture_downloader.core.stt import (
     DEFAULT_STT_BEAM_SIZE,
     DEFAULT_STT_INITIAL_PROMPT,
@@ -21,7 +22,7 @@ def test_check_stt_provider_returns_install_help_when_whisper_missing(monkeypatc
     monkeypatch.setattr('ssu_lecture_downloader.core.stt._has_faster_whisper', lambda: False)
     monkeypatch.setattr('ssu_lecture_downloader.core.stt.shutil.which', lambda name: None)
 
-    status = check_stt_provider('faster_whisper')
+    status = check_stt_provider('faster_whisper', stt_capability=SUPPORTS_LOCAL_STT)
 
     assert status == STTProviderStatus(
         provider='faster_whisper',
@@ -76,7 +77,7 @@ def test_transcribe_audio_fake_provider_writes_transcript(tmp_path: Path):
     audio = tmp_path / 'lecture.wav'
     audio.write_bytes(b'audio')
 
-    result = transcribe_audio(TranscriptionRequest(audio_path=audio, provider='fake', overwrite=True))
+    result = transcribe_audio(TranscriptionRequest(audio_path=audio, provider='fake', overwrite=True), stt_capability=SUPPORTS_LOCAL_STT)
 
     assert result.ok is True
     assert result.text_path is not None
@@ -89,7 +90,7 @@ def test_transcribe_audio_fake_provider_emits_progress(tmp_path: Path):
     audio.write_bytes(b'audio')
     events = []
 
-    result = transcribe_audio(TranscriptionRequest(audio_path=audio, provider='fake', overwrite=True), on_progress=events.append)
+    result = transcribe_audio(TranscriptionRequest(audio_path=audio, provider='fake', overwrite=True), on_progress=events.append, stt_capability=SUPPORTS_LOCAL_STT)
 
     assert result.ok is True
     assert [event['stage'] for event in events] == ['transcript_started', 'transcript_progress']
@@ -102,7 +103,7 @@ def test_transcribe_audio_returns_install_help_for_missing_whisper(tmp_path: Pat
     audio.write_bytes(b'audio')
     monkeypatch.setattr('ssu_lecture_downloader.core.stt._has_faster_whisper', lambda: False)
 
-    result = transcribe_audio(TranscriptionRequest(audio_path=audio, provider='faster_whisper'))
+    result = transcribe_audio(TranscriptionRequest(audio_path=audio, provider='faster_whisper'), stt_capability=SUPPORTS_LOCAL_STT)
 
     assert result.ok is False
     assert result.error_code == 'stt_provider_not_installed'
@@ -148,10 +149,10 @@ def test_faster_whisper_model_is_loaded_once_per_size_device_and_compute_type(tm
     other.write_bytes(b'audio')
 
     try:
-        assert transcribe_audio(TranscriptionRequest(audio_path=audio, overwrite=True)).ok is True
-        assert transcribe_audio(TranscriptionRequest(audio_path=other, overwrite=True)).ok is True
+        assert transcribe_audio(TranscriptionRequest(audio_path=audio, overwrite=True), stt_capability=SUPPORTS_LOCAL_STT).ok is True
+        assert transcribe_audio(TranscriptionRequest(audio_path=other, overwrite=True), stt_capability=SUPPORTS_LOCAL_STT).ok is True
         assert constructed == [('large-v3', 'auto', 'auto')]
-        assert transcribe_audio(TranscriptionRequest(audio_path=audio, model='small', overwrite=True)).ok is True
+        assert transcribe_audio(TranscriptionRequest(audio_path=audio, model='small', overwrite=True), stt_capability=SUPPORTS_LOCAL_STT).ok is True
         assert constructed == [('large-v3', 'auto', 'auto'), ('small', 'auto', 'auto')]
     finally:
         stt.clear_whisper_model_cache()
@@ -171,7 +172,7 @@ def test_faster_whisper_segment_loop_stops_when_cancel_is_requested(tmp_path: Pa
         return checks['count'] > 2
 
     try:
-        result = transcribe_audio(TranscriptionRequest(audio_path=audio, overwrite=True), should_cancel=should_cancel)
+        result = transcribe_audio(TranscriptionRequest(audio_path=audio, overwrite=True), should_cancel=should_cancel, stt_capability=SUPPORTS_LOCAL_STT)
     finally:
         stt.clear_whisper_model_cache()
 

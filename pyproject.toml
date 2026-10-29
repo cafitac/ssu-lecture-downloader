@@ -59,6 +59,10 @@ forbidden_modules = [
     "ssu_lecture_downloader.cli",
 ]
 
+# Module-level guarantee: nothing but service/app_context.py (and cli.py, which is not listed as a
+# source) imports the platforms package. Re-exports are covered by tests/test_import_boundaries.py,
+# which also fails when any other module imports select_platform/Platform/MacOSPlatform/WindowsPlatform
+# by name (for example through app_context).
 [[tool.importlinter.contracts]]
 name = "only app_context and cli import platforms"
 type = "forbidden"

@@ -9,13 +9,12 @@ import signal
 import subprocess
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
 from ssu_lecture_downloader.core.credentials import CredentialPair
 from ssu_lecture_downloader.platforms.base import (
-    APP_DATA_DIR_ENV,
     APP_DOWNLOAD_FOLDER_NAME,
     APP_IDENTIFIER,
     PROFILE_DIR_ENV,
@@ -101,6 +100,7 @@ class MacOSPlatform:
         self,
         *,
         app_data_dir: Path | None = None,
+        environ: Mapping[str, str] | None = None,
         candidates: list[Path] | None = None,
         popen: Callable[..., Any] | None = None,
         killpg: Callable[[int, int], None] | None = None,
@@ -110,6 +110,7 @@ class MacOSPlatform:
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         self._app_data_dir = app_data_dir
+        self._environ = environ  # None: the live process environment
         self._candidates = candidates
         self._popen = popen or subprocess.Popen
         self._killpg = killpg or default_killpg
@@ -117,6 +118,9 @@ class MacOSPlatform:
         self._list_processes = list_processes or default_list_processes
         self._clock = clock
         self._sleep = sleep
+
+    def _env(self) -> Mapping[str, str]:
+        return os.environ if self._environ is None else self._environ
 
     # ------------------------------------------------------------------ AppPaths
 
@@ -126,13 +130,13 @@ class MacOSPlatform:
         return Path.home() / "Library" / "Application Support" / APP_IDENTIFIER
 
     def chrome_profile_dir(self) -> Path:
-        override = os.environ.get(PROFILE_DIR_ENV, "").strip()
+        override = self._env().get(PROFILE_DIR_ENV, "").strip()
         if override:
             return Path(override).expanduser()
         return self.app_data_dir() / "chrome-watch-profile"
 
     def stt_config_path(self) -> Path:
-        override = os.environ.get(STT_CONFIG_PATH_ENV, "").strip()
+        override = self._env().get(STT_CONFIG_PATH_ENV, "").strip()
         if override:
             return Path(override).expanduser()
         return self.app_data_dir() / "stt.json"

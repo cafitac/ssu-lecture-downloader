@@ -118,7 +118,7 @@ def build_router(ctx: AppContext) -> APIRouter:
 
         def work(job: Job) -> JobOutcome:
             job.append_progress({"stage": "dependency_install_checking", "components": components})
-            result = dependency_installer.install_missing_media_components(components, on_progress=job.append_progress, should_cancel=job.should_cancel)
+            result = dependency_installer.install_missing_media_components(components, on_progress=job.append_progress, should_cancel=job.should_cancel, stt_capability=ctx.platform)
             if not result.get("ok"):
                 return JobOutcome.failed(str(result.get("error_code") or "dependency_install_failed"), result=result)
             return JobOutcome.succeeded(result)

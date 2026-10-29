@@ -79,16 +79,16 @@ def _has_faster_whisper() -> bool:
     return importlib.util.find_spec('faster_whisper') is not None
 
 
-def check_stt_provider(provider: str = 'faster_whisper', *, stt_capability: Any | None = None) -> STTProviderStatus:
-    """`stt_capability` (an SttCapability from the composition root) says whether this OS can run the local engine.
+def check_stt_provider(provider: str = 'faster_whisper', *, stt_capability: Any) -> STTProviderStatus:
+    """`stt_capability` (an SttCapability handed in by the composition root) says whether this OS can run the local engine.
 
-    Without one the OS is unknown to core and the local engine is presumed supported.
+    Required: core has no knowledge of the OS, so there is deliberately no default.
     """
     if provider == 'fake':
         return STTProviderStatus(provider='fake', installed=True, available=True, recommended_model='test-only')
     if provider == 'faster_whisper':
         installed = _has_faster_whisper()
-        supported = installed or stt_capability is None or stt_capability.local_engine_supported()
+        supported = installed or stt_capability.local_engine_supported()
         return STTProviderStatus(
             provider='faster_whisper',
             installed=installed,
@@ -273,7 +273,8 @@ def transcribe_audio(
     on_progress: Callable[[dict[str, Any]], None] | None = None,
     should_cancel: Callable[[], bool] | None = None,
     remote: RemoteSTTService | None = None,
-    stt_capability: Any | None = None,
+    *,
+    stt_capability: Any,
 ) -> TranscriptionResult:
     audio_path = request.audio_path.expanduser()
     if not audio_path.exists():

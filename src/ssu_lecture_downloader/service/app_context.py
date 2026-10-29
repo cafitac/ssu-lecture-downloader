@@ -23,7 +23,9 @@ from ssu_lecture_downloader.service.security import MediaPathPolicy
 from ssu_lecture_downloader.core.stt_remote import RemoteSTTService
 from ssu_lecture_downloader.core.stt_remote_config import RemoteSTTSettingsStore
 
-__all__ = ["AppContext", "Platform", "build_remote_stt", "default_download_dir", "select_platform"]
+# The platform adapter is chosen here and nowhere else in `service`: other modules reach it as
+# `ctx.platform` and must not import `select_platform` / `Platform` (guarded in tests/test_import_boundaries.py).
+__all__ = ["AppContext", "build_app_context", "build_remote_stt", "default_download_dir"]
 
 T = TypeVar("T")
 
@@ -31,6 +33,31 @@ T = TypeVar("T")
 def default_download_dir(platform: Platform | None = None) -> Path:
     """Where downloads go when the request names no folder (the platform adapter decides)."""
     return (platform or select_platform()).default_download_dir()
+
+
+def build_app_context(
+    *,
+    service: Any,
+    credentials: CredentialStore,
+    runner: JobRunner,
+    platform: Platform | None = None,
+    default_output_dir: Path | None = None,
+    remote_stt: RemoteSTTService | None = None,
+    chrome_watch: ChromeWatchManager | None = None,
+) -> AppContext:
+    """An AppContext on `platform` (selected for this OS when None); downloads default to the platform's folder."""
+    platform = platform if platform is not None else select_platform()
+    output_dir = default_output_dir or platform.default_download_dir()
+    return AppContext(
+        service=service,
+        credentials=credentials,
+        default_output_dir=output_dir,
+        media_paths=MediaPathPolicy(output_dir),
+        runner=runner,
+        remote_stt=remote_stt,
+        chrome_watch=chrome_watch,
+        platform=platform,
+    )
 
 
 def build_remote_stt(platform: Platform) -> RemoteSTTService:

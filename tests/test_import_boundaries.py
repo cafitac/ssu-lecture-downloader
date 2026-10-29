@@ -113,16 +113,44 @@ def test_root_api_shim_resolves_like_the_desktop_shell_launch():
     assert import_from_string("ssu_lecture_downloader.api:app") is service_api.app
 
 
-def test_only_app_context_and_cli_import_platforms():
-    allowed = {PACKAGE_DIR / "service" / "app_context.py", PACKAGE_DIR / "cli.py"}
-    offenders = []
-    for path in sorted(PACKAGE_DIR.rglob("*.py")):
-        if path in allowed or "platforms" in path.relative_to(PACKAGE_DIR).parts:
+PLATFORM_NAMES = {"select_platform", "Platform", "MacOSPlatform", "WindowsPlatform"}
+
+
+def _platform_leaks(package_dir: Path, allowed: set[Path]) -> list[str]:
+    """Modules outside `platforms/` and `allowed` that import the package or any adapter name, from anywhere.
+
+    Catches `from ...platforms import X`, `import ...platforms.x` and also the names re-imported
+    through another module (`from ...service.app_context import select_platform`).
+    """
+    root = package_dir.name
+    leaks = []
+    for path in sorted(package_dir.rglob("*.py")):
+        if path in allowed or "platforms" in path.relative_to(package_dir).parts:
             continue
         for name in _imported_modules(path):
-            if name == "ssu_lecture_downloader.platforms" or name.startswith("ssu_lecture_downloader.platforms."):
-                offenders.append(f"{path.relative_to(PACKAGE_DIR)} imports {name}")
-    assert offenders == []
+            if name == f"{root}.platforms" or name.startswith(f"{root}.platforms."):
+                leaks.append(f"{path.relative_to(package_dir)} imports {name}")
+            elif name.startswith(f"{root}.") and name.rsplit(".", 1)[-1] in PLATFORM_NAMES:
+                leaks.append(f"{path.relative_to(package_dir)} imports {name}")
+    return leaks
+
+
+def test_only_app_context_and_cli_import_platforms_or_its_names():
+    allowed = {PACKAGE_DIR / "service" / "app_context.py", PACKAGE_DIR / "cli.py"}
+    assert _platform_leaks(PACKAGE_DIR, allowed) == []
+
+
+def test_the_platform_name_guard_catches_a_reexport_through_app_context(tmp_path):
+    package = tmp_path / "guard_fixture"
+    (package / "service").mkdir(parents=True)
+    for init in (package / "__init__.py", package / "service" / "__init__.py"):
+        init.write_text("")
+    (package / "service" / "app_context.py").write_text("from guard_fixture.platforms import select_platform\n")
+    (package / "service" / "api.py").write_text("from guard_fixture.service.app_context import select_platform\n")
+    allowed = {package / "service" / "app_context.py"}
+    assert _platform_leaks(package, allowed) == ["service/api.py imports guard_fixture.service.app_context.select_platform"]
+    (package / "service" / "api.py").write_text("from guard_fixture.service.app_context import AppContext\n")
+    assert _platform_leaks(package, allowed) == []
 
 
 def _contract_fixture(tmp_path: Path, contract: str, leak_file: str, leak_source: str) -> tuple[Path, Path]:

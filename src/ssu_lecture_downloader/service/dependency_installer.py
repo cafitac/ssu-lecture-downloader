@@ -7,6 +7,7 @@ import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Any
 
 from ssu_lecture_downloader.core.postprocess_media import ffmpeg_status
 from ssu_lecture_downloader.core.stt import check_stt_provider
@@ -44,12 +45,12 @@ def normalize_components(components: list[str] | None) -> list[str]:
     return normalized
 
 
-def missing_components(components: list[str] | None = None) -> list[str]:
+def missing_components(components: list[str] | None = None, *, stt_capability: Any) -> list[str]:
     missing: list[str] = []
     for component in normalize_components(components):
         if component == 'ffmpeg' and not bool(ffmpeg_status().get('available')):
             missing.append(component)
-        if component == 'faster_whisper' and not check_stt_provider('faster_whisper').available:
+        if component == 'faster_whisper' and not check_stt_provider('faster_whisper', stt_capability=stt_capability).available:
             missing.append(component)
     return missing
 
@@ -99,9 +100,11 @@ def install_missing_media_components(
     components: list[str] | None = None,
     on_progress: InstallProgress | None = None,
     should_cancel: Callable[[], bool] | None = None,
+    *,
+    stt_capability: Any,
 ) -> dict[str, object]:
     requested = normalize_components(components)
-    missing = missing_components(requested)
+    missing = missing_components(requested, stt_capability=stt_capability)
     supported, reason = install_supported()
     if not missing:
         payload: dict[str, object] = {'ok': True, 'installed_components': [], 'missing_components': [], 'message': '필요한 MP3/TXT 구성요소가 이미 준비되어 있습니다.'}
@@ -123,18 +126,18 @@ def install_missing_media_components(
         try:
             result = _run_install_command([*command.as_list(), package], timeout=INSTALL_TIMEOUT_SECONDS, should_cancel=should_cancel)
         except InstallCancelled:
-            return {'ok': False, 'error_code': 'cancelled', 'failed_component': component, 'missing_components': missing_components(requested), 'installed_components': installed, 'message': '설치가 취소되었습니다.'}
+            return {'ok': False, 'error_code': 'cancelled', 'failed_component': component, 'missing_components': missing_components(requested, stt_capability=stt_capability), 'installed_components': installed, 'message': '설치가 취소되었습니다.'}
         except subprocess.TimeoutExpired:
-            return {'ok': False, 'error_code': 'dependency_install_timeout', 'failed_component': component, 'missing_components': missing_components(requested), 'installed_components': installed, 'message': f'{package} 설치가 {INSTALL_TIMEOUT_SECONDS}초 안에 끝나지 않았습니다.'}
+            return {'ok': False, 'error_code': 'dependency_install_timeout', 'failed_component': component, 'missing_components': missing_components(requested, stt_capability=stt_capability), 'installed_components': installed, 'message': f'{package} 설치가 {INSTALL_TIMEOUT_SECONDS}초 안에 끝나지 않았습니다.'}
         except OSError as exc:
-            return {'ok': False, 'error_code': 'dependency_install_failed', 'failed_component': component, 'missing_components': missing_components(requested), 'installed_components': installed, 'message': str(exc)[:1000]}
+            return {'ok': False, 'error_code': 'dependency_install_failed', 'failed_component': component, 'missing_components': missing_components(requested, stt_capability=stt_capability), 'installed_components': installed, 'message': str(exc)[:1000]}
         if result.returncode != 0:
             stderr_tail = '\n'.join((result.stderr or result.stdout or '').strip().splitlines()[-8:])
             return {
                 'ok': False,
                 'error_code': 'dependency_install_failed',
                 'failed_component': component,
-                'missing_components': missing_components(requested),
+                'missing_components': missing_components(requested, stt_capability=stt_capability),
                 'installed_components': installed,
                 'message': stderr_tail[:1000] or f'{package} 설치에 실패했습니다.',
             }
@@ -142,7 +145,7 @@ def install_missing_media_components(
         if on_progress:
             on_progress({'stage': 'dependency_install_done', 'component': component, 'package': package})
 
-    still_missing = missing_components(requested)
+    still_missing = missing_components(requested, stt_capability=stt_capability)
     ok = len(still_missing) == 0
     return {
         'ok': ok,

@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from ssu_lecture_downloader import platforms as platforms_module
 from ssu_lecture_downloader.platforms import select_platform
 from ssu_lecture_downloader.platforms.base import (
     APP_DATA_DIR_ENV,
@@ -98,12 +99,38 @@ def test_ssu_app_data_dir_expands_a_home_prefix_and_ignores_blank(fake_home):
     assert blank.app_data_dir() == fake_home / "Library" / "Application Support" / APP_IDENTIFIER
 
 
-def test_specific_env_overrides_keep_precedence_over_the_app_data_root(tmp_path, monkeypatch, fake_home):
-    monkeypatch.setenv(PROFILE_DIR_ENV, str(tmp_path / "profile"))
-    monkeypatch.setenv(STT_CONFIG_PATH_ENV, str(tmp_path / "stt-elsewhere.json"))
-    platform = select_platform(platform_name="darwin", environ={APP_DATA_DIR_ENV: str(tmp_path / "root")})
+def test_specific_env_overrides_keep_precedence_over_the_app_data_root(tmp_path):
+    environ = {
+        APP_DATA_DIR_ENV: str(tmp_path / "root"),
+        PROFILE_DIR_ENV: str(tmp_path / "profile"),
+        STT_CONFIG_PATH_ENV: str(tmp_path / "stt-elsewhere.json"),
+    }
+    platform = select_platform(platform_name="darwin", environ=environ)
     assert platform.chrome_profile_dir() == tmp_path / "profile"
     assert platform.stt_config_path() == tmp_path / "stt-elsewhere.json"
+    assert platform.app_data_dir() == tmp_path / "root"
+
+
+def test_specific_overrides_come_from_the_environ_the_platform_was_selected_with(tmp_path, monkeypatch, fake_home):
+    monkeypatch.setenv(PROFILE_DIR_ENV, str(tmp_path / "process-profile"))
+    captured = select_platform(platform_name="darwin", environ={APP_DATA_DIR_ENV: str(tmp_path / "root")})
+    assert captured.chrome_profile_dir() == tmp_path / "root" / "chrome-watch-profile"  # process env is not consulted
+    live = select_platform(platform_name="darwin")  # default: the live process environment, read on every call
+    assert live.chrome_profile_dir() == tmp_path / "process-profile"
+    monkeypatch.setenv(PROFILE_DIR_ENV, str(tmp_path / "changed"))
+    assert live.chrome_profile_dir() == tmp_path / "changed"
+
+
+def test_a_relative_ssu_app_data_dir_is_ignored_with_a_single_warning(caplog, monkeypatch, fake_home):
+    monkeypatch.setattr(platforms_module, "_warned_relative_app_data_dir", False)
+    fallback = fake_home / "Library" / "Application Support" / APP_IDENTIFIER
+    with caplog.at_level("WARNING", logger="ssu_lecture_downloader.platforms"):
+        first = select_platform(platform_name="darwin", environ={APP_DATA_DIR_ENV: "relative/dir"})
+        second = select_platform(platform_name="darwin", environ={APP_DATA_DIR_ENV: "./other"})
+    assert first.app_data_dir() == fallback and second.app_data_dir() == fallback
+    warnings = [record for record in caplog.records if APP_DATA_DIR_ENV in record.getMessage()]
+    assert len(warnings) == 1
+    assert "relative/dir" in warnings[0].getMessage()
 
 
 def test_without_ssu_app_data_dir_the_paths_are_exactly_the_previous_macos_ones(fake_home):
@@ -155,3 +182,40 @@ def test_the_app_context_hands_the_selected_platform_to_the_remote_stt_store(tmp
     context.remote_stt.store.save(RemoteSTTConfig(api_key="k"))
     saved = tmp_path / "root" / "stt.json"
     assert saved.is_file() and stat.S_IMODE(os.stat(saved).st_mode) == 0o600
+
+
+class _FakePlatform(MacOSPlatform):
+    """A macOS-shaped adapter that says the local STT engine is unsupported (like an Intel Mac)."""
+
+    def local_engine_supported(self) -> bool:
+        return False
+
+
+def test_create_app_uses_the_given_platform_for_stt_provider_status(tmp_path, monkeypatch):
+    from starlette.testclient import TestClient
+
+    from ssu_lecture_downloader.core import stt
+    from ssu_lecture_downloader.service.api import create_app
+    from test_api import FakeCredentialStore, FakeService
+
+    monkeypatch.setattr(stt, "_has_faster_whisper", lambda: False)
+    app = create_app(service_factory=FakeService, default_output_dir=tmp_path, credential_store=FakeCredentialStore(), platform=_FakePlatform())
+    response = TestClient(app).get("/api/stt/providers/status")
+    assert response.status_code == 200
+    entry = next(item for item in response.json()["providers"] if item["provider"] == "faster_whisper")
+    assert entry["platform_supported"] is False
+    assert entry["install_hint"] == "이 Mac(Intel)에서는 자막 생성을 지원하지 않아요. Apple 실리콘 Mac에서 사용할 수 있어요."
+
+
+def test_build_app_context_selects_the_platform_and_defaults_downloads_to_its_folder(tmp_path, fake_home):
+    from ssu_lecture_downloader.core.jobs import JobRunner
+    from ssu_lecture_downloader.service.app_context import build_app_context
+
+    runner = JobRunner(error_code_for=lambda exc: "x")
+    context = build_app_context(service=object(), credentials=object(), runner=runner)
+    assert isinstance(context.platform, (MacOSPlatform, WindowsPlatform))
+    if isinstance(context.platform, MacOSPlatform):
+        assert context.default_output_dir == fake_home / "Downloads" / "SSU Lecture Downloader"
+    given = _FakePlatform(app_data_dir=tmp_path)
+    explicit = build_app_context(service=object(), credentials=object(), runner=runner, platform=given, default_output_dir=tmp_path / "dl")
+    assert explicit.platform is given and explicit.default_output_dir == tmp_path / "dl"
