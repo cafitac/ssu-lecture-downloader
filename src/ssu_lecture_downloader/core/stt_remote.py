@@ -27,13 +27,13 @@ from typing import Any, Protocol
 from urllib.parse import urlsplit
 from uuid import uuid4
 
-from ssu_lecture_downloader import postprocess_media, stt_cues
-from ssu_lecture_downloader.postprocess_media import MediaCancelled
-from ssu_lecture_downloader.progress import emit_progress
-from ssu_lecture_downloader.ssh_tunnel import SshTunnel, TunnelError
-from ssu_lecture_downloader.stt import TranscriptionCancelled, TranscriptionRequest, TranscriptionResult, write_transcript_files
-from ssu_lecture_downloader.stt_cues import TranscriptSegment
-from ssu_lecture_downloader.stt_remote_config import (
+from ssu_lecture_downloader.core import postprocess_media, stt_cues
+from ssu_lecture_downloader.core.postprocess_media import MediaCancelled
+from ssu_lecture_downloader.core.progress import emit_progress
+from ssu_lecture_downloader.core.ssh_tunnel import SshTunnel, TunnelError
+from ssu_lecture_downloader.core.stt import TranscriptionCancelled, TranscriptionRequest, TranscriptionResult, write_transcript_files
+from ssu_lecture_downloader.core.stt_cues import TranscriptSegment
+from ssu_lecture_downloader.core.stt_remote_config import (
     DEFAULT_OPENAI_MODEL,
     ConfigError,
     RemoteSTTConfig,

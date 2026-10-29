@@ -7,8 +7,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
-from ssu_lecture_downloader.errors import response_status
-from ssu_lecture_downloader.progress import emit_progress
+from ssu_lecture_downloader.core.errors import response_status
+from ssu_lecture_downloader.core.progress import emit_progress
 
 
 class DownloadCancelled(Exception):

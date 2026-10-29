@@ -4,11 +4,11 @@ from pathlib import Path
 
 import pytest
 
-from ssu_lecture_downloader.auth import SessionState
-from ssu_lecture_downloader.lms import LearningXLister
-from ssu_lecture_downloader.login_flow import LoginDiscoveryResult
-import ssu_lecture_downloader.service as service_mod
-from ssu_lecture_downloader.service import ResolvedMediaResult, SsuLectureService, _ResolvedMediaInternal
+from ssu_lecture_downloader.core.auth import SessionState
+from ssu_lecture_downloader.core.lms import LearningXLister
+from ssu_lecture_downloader.core.login_flow import LoginDiscoveryResult
+import ssu_lecture_downloader.core.lms_service as service_mod
+from ssu_lecture_downloader.core.lms_service import ResolvedMediaResult, SsuLectureService, _ResolvedMediaInternal
 
 
 class FakeResponse:
@@ -741,7 +741,7 @@ import types
 
 from curl_cffi.requests import exceptions as curl_exceptions
 
-from ssu_lecture_downloader.http_client import HttpClient
+from ssu_lecture_downloader.core.http_client import HttpClient
 
 
 def make_http_error(status, url):

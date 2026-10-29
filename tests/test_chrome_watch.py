@@ -6,8 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from ssu_lecture_downloader import chrome_watch as cw
-from ssu_lecture_downloader.chrome_cdp import CdpClient, CdpClosed, CdpError, WebSocketTransport
+from ssu_lecture_downloader.core import chrome_watch as cw
+from ssu_lecture_downloader.core.chrome_cdp import CdpClient, CdpClosed, CdpError, WebSocketTransport
 
 from chrome_fakes import (
     FRAME_SESSION,
@@ -572,14 +572,14 @@ def test_chrome_main_pid_is_the_browser_process_of_the_dedicated_profile():
 def test_audio_is_silenced_by_chrome_not_by_muting_the_video():
     args = cw.build_chrome_args("/x/Google Chrome", "/tmp/p")
     assert "--mute-audio" in args
-    from ssu_lecture_downloader import chrome_watch_helper
+    from ssu_lecture_downloader.core import chrome_watch_helper
     source = next(v for k, v in vars(chrome_watch_helper).items() if isinstance(v, str) and "ssuWatchSignal" in v or (isinstance(v, str) and "findVideo" in v))
     # Chrome pauses muted videos in a minimized window, so the helper must not mute them.
     assert ".muted = true" not in source
 
 
 def test_player_prompts_are_answered_like_a_person_would():
-    from ssu_lecture_downloader import chrome_watch_helper
+    from ssu_lecture_downloader.core import chrome_watch_helper
     source = "\n".join(v for v in vars(chrome_watch_helper).values() if isinstance(v, str))
     # Resume prompt -> 예, progress-tracking prompt -> 확인.
     assert "이어서 보시겠습니까" in source and "button: '예'" in source
@@ -597,7 +597,7 @@ def test_main_video_is_judged_by_the_lms_length_not_a_fixed_ten_seconds():
 
 
 def test_leave_site_prompts_are_answered_without_waiting():
-    from ssu_lecture_downloader.chrome_cdp import CdpClient
+    from ssu_lecture_downloader.core.chrome_cdp import CdpClient
 
     sent = []
 

@@ -8,8 +8,8 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from ssu_lecture_downloader.postprocess_media import ffmpeg_status
-from ssu_lecture_downloader.stt import check_stt_provider
+from ssu_lecture_downloader.core.postprocess_media import ffmpeg_status
+from ssu_lecture_downloader.core.stt import check_stt_provider
 
 InstallProgress = Callable[[dict[str, object]], None]
 INSTALL_TIMEOUT_SECONDS = 900

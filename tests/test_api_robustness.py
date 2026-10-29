@@ -9,13 +9,13 @@ import pytest
 from curl_cffi.requests import exceptions as curl_exceptions
 from fastapi.testclient import TestClient
 
-from ssu_lecture_downloader.api import create_app
-from ssu_lecture_downloader.credentials import CredentialPair
-from ssu_lecture_downloader.errors import LoginFlowError
-from ssu_lecture_downloader.login_flow import LoginDiscoveryResult
-from ssu_lecture_downloader.postprocess_media import AudioExtractionResult
-from ssu_lecture_downloader.service import BatchDownloadItemResult, BatchDownloadResult
-from ssu_lecture_downloader.stt import TranscriptionResult
+from ssu_lecture_downloader.service.api import create_app
+from ssu_lecture_downloader.service.credentials import CredentialPair
+from ssu_lecture_downloader.core.errors import LoginFlowError
+from ssu_lecture_downloader.core.login_flow import LoginDiscoveryResult
+from ssu_lecture_downloader.core.postprocess_media import AudioExtractionResult
+from ssu_lecture_downloader.core.lms_service import BatchDownloadItemResult, BatchDownloadResult
+from ssu_lecture_downloader.core.stt import TranscriptionResult
 from test_api import ClearableFakeService, FakeCredentialStore, FakeService
 
 
@@ -219,7 +219,7 @@ def test_audio_job_that_raises_is_failed_not_stuck_running(tmp_path, monkeypatch
     def explode(request, on_progress=None, should_cancel=None):
         raise zipfile.BadZipFile('corrupt package')
 
-    monkeypatch.setattr('ssu_lecture_downloader.postprocess_media.extract_audio', explode)
+    monkeypatch.setattr('ssu_lecture_downloader.core.postprocess_media.extract_audio', explode)
     client = make_client(FakeService, tmp_path)
 
     started = client.post('/api/media/audio/jobs', json={'input_path': str(video), 'format': 'mp3'}).json()
@@ -236,7 +236,7 @@ def test_stt_job_that_raises_is_failed_not_stuck_running(tmp_path, monkeypatch):
     def explode(request, on_progress=None, should_cancel=None):
         raise PermissionError('cannot write transcript')
 
-    monkeypatch.setattr('ssu_lecture_downloader.stt.transcribe_audio', explode)
+    monkeypatch.setattr('ssu_lecture_downloader.core.stt.transcribe_audio', explode)
     client = make_client(FakeService, tmp_path)
 
     started = client.post('/api/stt/jobs', json={'audio_path': str(audio), 'provider': 'fake'}).json()
@@ -250,7 +250,7 @@ def test_dependency_install_job_that_times_out_is_failed_not_stuck_running(tmp_p
     def explode(components, on_progress=None, should_cancel=None):
         raise subprocess.TimeoutExpired(['uv', 'pip', 'install'], 900)
 
-    monkeypatch.setattr('ssu_lecture_downloader.dependency_installer.install_missing_media_components', explode)
+    monkeypatch.setattr('ssu_lecture_downloader.service.dependency_installer.install_missing_media_components', explode)
     client = make_client(FakeService, tmp_path)
 
     started = client.post('/api/media/dependencies/install/jobs', json={'components': ['ffmpeg']}).json()
@@ -274,7 +274,7 @@ def test_audio_job_cancel_endpoint_reaches_the_running_extraction(tmp_path, monk
             time.sleep(0.005)
         return AudioExtractionResult(ok=True, input_path=request.input_path, output_path=tmp_path / 'late.mp3')
 
-    monkeypatch.setattr('ssu_lecture_downloader.postprocess_media.extract_audio', slow_extract)
+    monkeypatch.setattr('ssu_lecture_downloader.core.postprocess_media.extract_audio', slow_extract)
     client = make_client(FakeService, tmp_path)
 
     started = client.post('/api/media/audio/jobs', json={'input_path': str(video), 'format': 'mp3'}).json()
@@ -298,7 +298,7 @@ def test_stt_job_cancel_endpoint_reaches_the_running_transcription(tmp_path, mon
             time.sleep(0.005)
         return TranscriptionResult(ok=False, audio_path=request.audio_path, error_code='cancelled')
 
-    monkeypatch.setattr('ssu_lecture_downloader.stt.transcribe_audio', slow_transcribe)
+    monkeypatch.setattr('ssu_lecture_downloader.core.stt.transcribe_audio', slow_transcribe)
     client = make_client(FakeService, tmp_path)
 
     started = client.post('/api/stt/jobs', json={'audio_path': str(audio), 'provider': 'fake'}).json()
@@ -318,7 +318,7 @@ def test_dependency_install_job_can_be_cancelled(tmp_path, monkeypatch):
             time.sleep(0.005)
         return {'ok': False, 'error_code': 'cancelled', 'installed_components': [], 'missing_components': components}
 
-    monkeypatch.setattr('ssu_lecture_downloader.dependency_installer.install_missing_media_components', slow_install)
+    monkeypatch.setattr('ssu_lecture_downloader.service.dependency_installer.install_missing_media_components', slow_install)
     client = make_client(FakeService, tmp_path)
 
     started = client.post('/api/media/dependencies/install/jobs', json={'components': ['ffmpeg']}).json()
@@ -350,7 +350,7 @@ def test_download_job_honors_cancel_even_when_the_service_returns_normally(tmp_p
 
 
 def test_job_registry_prunes_old_finished_jobs(tmp_path):
-    from ssu_lecture_downloader import jobs
+    from ssu_lecture_downloader.core import jobs
 
     client = make_client(FakeService, tmp_path)
     ids = []
@@ -409,7 +409,7 @@ def test_artifact_job_failure_does_not_run_the_remaining_queued_items(tmp_path, 
         extracted.append(request.input_path.name)
         return AudioExtractionResult(ok=False, input_path=request.input_path, error_code='ffmpeg_failed', message='bad input')
 
-    monkeypatch.setattr('ssu_lecture_downloader.postprocess_media.extract_audio', fake_extract)
+    monkeypatch.setattr('ssu_lecture_downloader.core.postprocess_media.extract_audio', fake_extract)
     client = make_artifact_client(tmp_path, videos)
 
     started = client.post('/api/download/artifacts/jobs', json={'course_id': 1, 'module_item_ids': [1, 2], 'outputs': ['mp3'], 'max_parallel_downloads': 4}).json()
@@ -433,7 +433,7 @@ def test_artifact_job_cancel_ends_cancelled_not_failed(tmp_path, monkeypatch):
             time.sleep(0.005)
         return AudioExtractionResult(ok=False, input_path=request.input_path, error_code='cancelled', message='cancelled')
 
-    monkeypatch.setattr('ssu_lecture_downloader.postprocess_media.extract_audio', blocking_extract)
+    monkeypatch.setattr('ssu_lecture_downloader.core.postprocess_media.extract_audio', blocking_extract)
     client = make_artifact_client(tmp_path, videos)
 
     started = client.post('/api/download/artifacts/jobs', json={'course_id': 1, 'module_item_ids': [1, 2], 'outputs': ['mp3']}).json()
@@ -460,7 +460,7 @@ def test_artifact_transcript_is_only_reused_when_the_txt_commit_marker_exists(tm
         text.write_text('done')
         return TranscriptionResult(ok=True, audio_path=request.audio_path, text_path=text)
 
-    monkeypatch.setattr('ssu_lecture_downloader.stt.transcribe_audio', fake_transcribe)
+    monkeypatch.setattr('ssu_lecture_downloader.core.stt.transcribe_audio', fake_transcribe)
     client = make_artifact_client(tmp_path, videos[:1])
 
     started = client.post('/api/download/artifacts/jobs', json={'course_id': 1, 'module_item_ids': [1], 'outputs': ['txt'], 'audio_format': 'mp3'}).json()

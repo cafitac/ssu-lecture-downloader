@@ -22,7 +22,7 @@ def isolated_stt_settings(monkeypatch, tmp_path_factory):
 @pytest.fixture(autouse=True)
 def no_real_chrome(monkeypatch, tmp_path_factory):
     """Default Chrome lookups find nothing and the playback profile is a temp dir: no test launches Chrome."""
-    from ssu_lecture_downloader import chrome_watch
+    from ssu_lecture_downloader.core import chrome_watch
 
     monkeypatch.setattr(chrome_watch, "chrome_candidates", lambda: [])
     monkeypatch.setenv(chrome_watch.PROFILE_DIR_ENV, str(tmp_path_factory.mktemp("chrome-profile") / "chrome-watch-profile"))

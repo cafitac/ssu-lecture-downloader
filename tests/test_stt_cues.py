@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from ssu_lecture_downloader import stt_cues
-from ssu_lecture_downloader.stt_cues import TranscriptSegment
+from ssu_lecture_downloader.core import stt_cues
+from ssu_lecture_downloader.core.stt_cues import TranscriptSegment
 
 
 def cue(start: float, end: float, text: str) -> TranscriptSegment:

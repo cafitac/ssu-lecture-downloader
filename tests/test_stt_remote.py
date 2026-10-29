@@ -7,17 +7,17 @@ from pathlib import Path
 import pytest
 from stt_fakes import FakeSttServer, RecordedRequest, json_text, sleepy, srt, write_silent_wav
 
-from ssu_lecture_downloader import postprocess_media
-from ssu_lecture_downloader.stt import TranscriptionCancelled, TranscriptionRequest, transcribe_audio
-from ssu_lecture_downloader.stt_cues import TranscriptSegment
-from ssu_lecture_downloader.stt_remote import (
+from ssu_lecture_downloader.core import postprocess_media
+from ssu_lecture_downloader.core.stt import TranscriptionCancelled, TranscriptionRequest, transcribe_audio
+from ssu_lecture_downloader.core.stt_cues import TranscriptSegment
+from ssu_lecture_downloader.core.stt_remote import (
     OpenAICompatibleProvider,
     RemoteSTTError,
     RemoteSTTService,
     WhisperCppServerProvider,
     repair_repeated_cues,
 )
-from ssu_lecture_downloader.stt_remote_config import RemoteSTTSettingsStore
+from ssu_lecture_downloader.core.stt_remote_config import RemoteSTTSettingsStore
 
 
 def wav(tmp_path: Path, seconds: float = 3) -> Path:

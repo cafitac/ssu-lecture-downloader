@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from ssu_lecture_downloader.auth import (
+from ssu_lecture_downloader.core.auth import (
     SessionState,
     SsuHttpLoginClient,
     decrypt_canvas_token,
@@ -12,8 +12,8 @@ from ssu_lecture_downloader.auth import (
     extract_login_cryption,
     extract_sso_redirect,
 )
-from ssu_lecture_downloader.errors import LoginFlowError, classify_network_error
-from ssu_lecture_downloader.http_client import HttpClient
+from ssu_lecture_downloader.core.errors import LoginFlowError, classify_network_error
+from ssu_lecture_downloader.core.http_client import HttpClient
 
 
 @dataclass(frozen=True)

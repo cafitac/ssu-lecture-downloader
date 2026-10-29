@@ -7,7 +7,7 @@ from pathlib import Path
 from fastapi import HTTPException
 from pydantic import BaseModel
 
-from ssu_lecture_downloader.stt import DEFAULT_STT_MODEL
+from ssu_lecture_downloader.core.stt import DEFAULT_STT_MODEL
 
 BATCH_MODES = {"selected", "uncompleted", "all"}
 ARTIFACT_OUTPUTS = {"mp4", "mp3", "txt"}

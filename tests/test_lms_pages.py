@@ -6,18 +6,18 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from ssu_lecture_downloader.api import create_app
-from ssu_lecture_downloader.auth import SessionState
-from ssu_lecture_downloader.canvas_files import (
+from ssu_lecture_downloader.service.api import create_app
+from ssu_lecture_downloader.core.auth import SessionState
+from ssu_lecture_downloader.core.canvas_files import (
     extract_file_links,
     file_id_from_address,
     parse_canvas_json,
     wiki_page_ref,
 )
-from ssu_lecture_downloader.credentials import CredentialPair
-from ssu_lecture_downloader.lms import LearningXLister
-from ssu_lecture_downloader.login_flow import LoginDiscoveryResult
-from ssu_lecture_downloader.service import SsuLectureService
+from ssu_lecture_downloader.service.credentials import CredentialPair
+from ssu_lecture_downloader.core.lms import LearningXLister
+from ssu_lecture_downloader.core.login_flow import LoginDiscoveryResult
+from ssu_lecture_downloader.core.lms_service import SsuLectureService
 
 PAGE_BODY = """
 <p>이번 주 자료입니다.</p>

@@ -36,19 +36,19 @@ The implementation starts with pure `curl-cffi`/HTTP login and network discovery
 
 Implemented modules:
 
-- `src/ssu_lecture_downloader/redaction.py`
-- `src/ssu_lecture_downloader/trace.py`
-- `src/ssu_lecture_downloader/http_client.py`
-- `src/ssu_lecture_downloader/errors.py`
-- `src/ssu_lecture_downloader/auth.py`
-- `src/ssu_lecture_downloader/login_flow.py`
-- `src/ssu_lecture_downloader/lms.py`
-- `src/ssu_lecture_downloader/media.py`
-- `src/ssu_lecture_downloader/download.py`
-- `src/ssu_lecture_downloader/service.py`
-- `src/ssu_lecture_downloader/credentials.py`
-- `src/ssu_lecture_downloader/api.py`
-- `src/ssu_lecture_downloader/models.py`
+- `src/ssu_lecture_downloader/core/redaction.py`
+- `src/ssu_lecture_downloader/core/trace.py`
+- `src/ssu_lecture_downloader/core/http_client.py`
+- `src/ssu_lecture_downloader/core/errors.py`
+- `src/ssu_lecture_downloader/core/auth.py`
+- `src/ssu_lecture_downloader/core/login_flow.py`
+- `src/ssu_lecture_downloader/core/lms.py`
+- `src/ssu_lecture_downloader/core/media.py`
+- `src/ssu_lecture_downloader/core/download.py`
+- `src/ssu_lecture_downloader/core/lms_service.py`
+- `src/ssu_lecture_downloader/service/credentials.py`
+- `src/ssu_lecture_downloader/service/api.py` (plus the root `api.py` re-export that keeps `ssu_lecture_downloader.api:app` valid)
+- `src/ssu_lecture_downloader/core/models.py`
 - `src/ssu_lecture_downloader/cli.py`
 
 Implemented CLI:

@@ -1,4 +1,4 @@
-from ssu_lecture_downloader.login_flow import run_http_login_discovery
+from ssu_lecture_downloader.core.login_flow import run_http_login_discovery
 
 
 class ExplodingHttpClient:
@@ -25,7 +25,7 @@ import types
 import pytest
 from curl_cffi.requests import exceptions as curl_exceptions
 
-from ssu_lecture_downloader.api_errors import AUTHENTICATION_ERROR_CODES
+from ssu_lecture_downloader.service.api_errors import AUTHENTICATION_ERROR_CODES
 
 
 class FailingHttpClient:

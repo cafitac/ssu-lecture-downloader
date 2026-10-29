@@ -35,8 +35,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from ssu_lecture_downloader.chrome_cdp import CdpClient, CdpClosed, CdpError, CdpTimeout, Transport, WebSocketTransport
-from ssu_lecture_downloader.chrome_watch_helper import BINDING_NAME, HELPER_JS
+from ssu_lecture_downloader.core.chrome_cdp import CdpClient, CdpClosed, CdpError, CdpTimeout, Transport, WebSocketTransport
+from ssu_lecture_downloader.core.chrome_watch_helper import BINDING_NAME, HELPER_JS
 
 logger = logging.getLogger("ssu_lecture_downloader.chrome_watch")
 

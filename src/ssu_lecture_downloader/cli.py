@@ -11,12 +11,12 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from ssu_lecture_downloader.errors import LoginFlowError, classify_network_error
-from ssu_lecture_downloader.http_client import HttpClient
-from ssu_lecture_downloader.login_flow import run_http_login_discovery
-from ssu_lecture_downloader.payloads import batch_payload
-from ssu_lecture_downloader.redaction import redact_url
-from ssu_lecture_downloader.service import SsuLectureService
+from ssu_lecture_downloader.core.errors import LoginFlowError, classify_network_error
+from ssu_lecture_downloader.core.http_client import HttpClient
+from ssu_lecture_downloader.core.login_flow import run_http_login_discovery
+from ssu_lecture_downloader.service.payloads import batch_payload
+from ssu_lecture_downloader.core.redaction import redact_url
+from ssu_lecture_downloader.core.lms_service import SsuLectureService
 
 
 @dataclass(frozen=True)

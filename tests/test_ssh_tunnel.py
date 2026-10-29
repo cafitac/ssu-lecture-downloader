@@ -4,7 +4,7 @@ import subprocess
 
 import pytest
 
-from ssu_lecture_downloader.ssh_tunnel import SshTunnel, TunnelError, build_ssh_command, is_valid_ssh_host
+from ssu_lecture_downloader.core.ssh_tunnel import SshTunnel, TunnelError, build_ssh_command, is_valid_ssh_host
 
 
 class FakeProcess:

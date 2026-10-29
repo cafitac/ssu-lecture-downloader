@@ -3,8 +3,8 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from typing import Any
 
-from ssu_lecture_downloader.canvas_files import wiki_page_ref
-from ssu_lecture_downloader.models import CourseContentItem, LectureItem
+from ssu_lecture_downloader.core.canvas_files import wiki_page_ref
+from ssu_lecture_downloader.core.models import CourseContentItem, LectureItem
 
 COURSES_API_URL = "https://canvas.ssu.ac.kr/learningx/api/v1/learn_activities/courses"
 MODULES_API_URL_TEMPLATE = "https://canvas.ssu.ac.kr/learningx/api/v1/courses/{course_id}/modules"

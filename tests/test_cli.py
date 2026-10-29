@@ -154,7 +154,7 @@ def test_download_json_status_reports_missing_env_without_values(tmp_path):
 from curl_cffi.requests import exceptions as curl_exceptions
 
 from ssu_lecture_downloader import cli
-from ssu_lecture_downloader.errors import LoginFlowError
+from ssu_lecture_downloader.core.errors import LoginFlowError
 
 
 def run_main_with_failure(monkeypatch, error, argv):

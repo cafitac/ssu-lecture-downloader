@@ -16,7 +16,7 @@ from urllib.parse import urlsplit
 
 from pydantic import BaseModel
 
-from ssu_lecture_downloader.ssh_tunnel import is_valid_port, is_valid_ssh_host
+from ssu_lecture_downloader.core.ssh_tunnel import is_valid_port, is_valid_ssh_host
 
 STT_CONFIG_PATH_ENV = 'SSU_STT_CONFIG_PATH'
 APP_IDENTIFIER = 'com.local.ssu-lecture-downloader'

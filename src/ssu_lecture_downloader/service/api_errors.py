@@ -11,7 +11,7 @@ from urllib.parse import urlsplit
 from curl_cffi.requests import exceptions as curl_exceptions
 from fastapi import HTTPException
 
-from ssu_lecture_downloader.errors import (
+from ssu_lecture_downloader.core.errors import (
     NETWORK_ERROR,
     NETWORK_TIMEOUT,
     LoginFlowError,

@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Protocol
 from urllib.parse import urljoin, urlparse
 
-from ssu_lecture_downloader.errors import LoginFlowError
+from ssu_lecture_downloader.core.errors import LoginFlowError
 
 LMS_SSO_CALLBACK_URL = "https://lms.ssu.ac.kr/xn-sso/gw-cb.php"
 SMARTID_LOGIN_URL = "https://smartid.ssu.ac.kr/Symtra_sso/smln_pcs.asp"
