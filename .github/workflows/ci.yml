@@ -76,6 +76,15 @@ jobs:
           PYTHONPATH: ""
         run: npm run build:backend-sidecar
 
+      # AC6: the BUILT sidecar must import rusaint and load its native library. /api/grades/status
+      # reports `available: true` only then; the check starts no u-SAINT sign-in (no network, no
+      # credentials, throwaway app-data dir).
+      - name: Smoke-test the built sidecar (grades available)
+        run: |
+          find frontend/src-tauri/resources/backend-sidecar/ssu-api/_internal/rusaint -type f -exec ls -l {} \;
+          du -sk frontend/src-tauri/resources/backend-sidecar/ssu-api
+          python3 scripts/smoke_backend_sidecar.py
+
       - name: Rust tests
         working-directory: frontend/src-tauri
         run: cargo test
@@ -94,6 +103,7 @@ jobs:
           SIDECAR="$APP/Contents/Resources/resources/backend-sidecar/ssu-api"
           test -x "$SIDECAR/ssu-api" || { echo "missing executable $SIDECAR/ssu-api"; exit 1; }
           test -d "$SIDECAR/_internal" || { echo "missing $SIDECAR/_internal"; exit 1; }
+          test -f "$SIDECAR/_internal/rusaint/librusaint_ffi.dylib" || { echo "missing rusaint native library in $SIDECAR"; exit 1; }
 
   # Compile-only guard for the Windows platform stubs (frontend/src-tauri/src/platform/windows.rs).
   # No tests here: the existing Rust tests assume a unix shell. Windows adapters come in S2.
