@@ -45,6 +45,7 @@ def build_router(ctx: AppContext) -> APIRouter:
         if current is None or (current.username, current.password) != (username, password):
             # Same credentials keep their LMS session and caches instead of logging in again.
             clear_service_cache(service)
+            ctx.grades.clear()  # grade data and the u-SAINT session never outlive the account they belong to
         login_or_raise(username, password)
         credentials.save(CredentialPair(username=username, password=password))
         return {"ok": True, **credentials.status()}
@@ -53,6 +54,7 @@ def build_router(ctx: AppContext) -> APIRouter:
     def delete_credentials() -> dict[str, object]:
         credentials.delete()
         clear_service_cache(service)
+        ctx.grades.clear()
         return {"ok": True, **credentials.status()}
 
     @router.get("/api/terms")

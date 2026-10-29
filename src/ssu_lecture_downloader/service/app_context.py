@@ -17,6 +17,9 @@ from ssu_lecture_downloader.service.api_errors import (
     service_exception_error,
 )
 from ssu_lecture_downloader.core.chrome_watch import ChromeWatchManager
+from ssu_lecture_downloader.core.grades.consent import CONSENT_FILE_NAME, GradesConsentStore
+from ssu_lecture_downloader.core.grades.gateway import RusaintGateway
+from ssu_lecture_downloader.core.grades.service import GradesService
 from ssu_lecture_downloader.service.credentials import CredentialStore
 from ssu_lecture_downloader.core.jobs import Job, JobOutcome, JobRegistry, JobRunner
 from ssu_lecture_downloader.service.security import MediaPathPolicy
@@ -25,7 +28,7 @@ from ssu_lecture_downloader.core.stt_remote_config import RemoteSTTSettingsStore
 
 # The platform adapter is chosen here and nowhere else in `service`: other modules reach it as
 # `ctx.platform` and must not import `select_platform` / `Platform` (guarded in tests/test_import_boundaries.py).
-__all__ = ["AppContext", "build_app_context", "build_remote_stt", "default_download_dir"]
+__all__ = ["AppContext", "build_app_context", "build_grades", "build_remote_stt", "default_download_dir"]
 
 T = TypeVar("T")
 
@@ -44,6 +47,7 @@ def build_app_context(
     default_output_dir: Path | None = None,
     remote_stt: RemoteSTTService | None = None,
     chrome_watch: ChromeWatchManager | None = None,
+    grades: GradesService | None = None,
 ) -> AppContext:
     """An AppContext on `platform` (selected for this OS when None); downloads default to the platform's folder."""
     platform = platform if platform is not None else select_platform()
@@ -57,12 +61,28 @@ def build_app_context(
         remote_stt=remote_stt,
         chrome_watch=chrome_watch,
         platform=platform,
+        grades=grades,
     )
 
 
 def build_remote_stt(platform: Platform) -> RemoteSTTService:
     """The remote-STT service whose settings file lives where the platform says, written privately."""
     return RemoteSTTService(RemoteSTTSettingsStore(path_provider=platform.stt_config_path, writer=platform))
+
+
+def build_grades(platform: Platform, credentials: CredentialStore) -> GradesService:
+    """The grades service: consent file in the platform's app-data folder, LMS credentials read at fetch time.
+
+    The credentials arrive as a provider because `core` cannot import `service`; the pair is read on
+    every fetch and never kept by the grades code.
+    """
+
+    def credentials_provider() -> tuple[str, str] | None:
+        pair = credentials.get()
+        return (pair.username, pair.password) if pair is not None else None
+
+    consent = GradesConsentStore(lambda: platform.app_data_dir() / CONSENT_FILE_NAME)
+    return GradesService(consent, RusaintGateway(), credentials_provider)
 
 
 @dataclass
@@ -82,10 +102,14 @@ class AppContext:
     chrome_watch: ChromeWatchManager | None = None
     # The OS adapter handed to core objects (AppPaths, ChromeLocator, ProcessTree, SttCapability, SecretFileWriter).
     platform: Platform = field(default_factory=select_platform)
+    # u-SAINT grades (opt-in, read-only); built from the platform's app-data folder unless injected.
+    grades: GradesService | None = None
 
     def __post_init__(self) -> None:
         if self.remote_stt is None:
             self.remote_stt = build_remote_stt(self.platform)
+        if self.grades is None:
+            self.grades = build_grades(self.platform, self.credentials)
 
     def require_credentials(self) -> tuple[str, str]:
         pair = self.credentials.get()
