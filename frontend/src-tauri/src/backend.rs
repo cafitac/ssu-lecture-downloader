@@ -80,6 +80,10 @@ struct Inner {
     child: Option<Child>,
     worker_active: bool,
     shutting_down: bool,
+    /// An update is being installed: the sidecar was (or is about to be) stopped on purpose.
+    /// Nothing may start the backend, a download or a watch until the install succeeds (the
+    /// app is replaced) or `resume_after_failed_update` clears it.
+    update_in_progress: bool,
 }
 
 type Launcher = Box<dyn Fn(u16) -> BackendLaunchCommand + Send + Sync>;
@@ -137,6 +141,7 @@ impl BackendManager {
                 child: None,
                 worker_active: false,
                 shutting_down: false,
+                update_in_progress: false,
             }),
             launcher,
             log_dir,
@@ -199,7 +204,7 @@ impl BackendManager {
     /// never observes the previous `failed` state.
     fn begin_start(&self) -> bool {
         let mut inner = self.lock();
-        if inner.worker_active || inner.shutting_down {
+        if inner.worker_active || inner.shutting_down || inner.update_in_progress {
             return false;
         }
         inner.worker_active = true;
@@ -424,18 +429,59 @@ impl BackendManager {
         }
     }
 
-    /// Stop the managed sidecar before an update is installed, but stay restartable:
-    /// unlike `shutdown`, this does not set `shutting_down`, so `backend_restart` still
-    /// works when the install fails and the old app has to keep running.
-    ///
-    /// `Err` (nothing stopped) while a startup worker is running: it would respawn the child.
-    pub(crate) fn stop_for_update(&self) -> Result<(), String> {
-        if self.lock().worker_active {
+    /// True from `begin_update` until `resume_after_failed_update` (or the process exits).
+    pub(crate) fn update_in_progress(&self) -> bool {
+        self.lock().update_in_progress
+    }
+
+    /// Latch "an update is being installed". Atomic with the startup-worker check, so a
+    /// concurrent `begin_start`/`restart` either ran before (`Err(backend_starting)`, nothing
+    /// latched) or is refused after. Idempotent.
+    pub(crate) fn begin_update(&self) -> Result<(), String> {
+        let mut inner = self.lock();
+        if !inner.update_in_progress && inner.worker_active {
             return Err("backend_starting".to_string());
         }
-        self.terminate_child();
+        inner.update_in_progress = true;
+        Ok(())
+    }
+
+    /// Release the latch without having stopped anything (the guard refused).
+    pub(crate) fn cancel_update(&self) {
+        self.lock().update_in_progress = false;
+    }
+
+    /// Stop the managed sidecar before an update is installed, but stay restartable:
+    /// unlike `shutdown`, this does not set `shutting_down`, so the backend can be started
+    /// again by `resume_after_failed_update` when the install fails.
+    ///
+    /// The worker check, the update latch and taking the child happen under one lock hold, so
+    /// nothing can start a backend in between. `Err` (nothing stopped, nothing latched) while a
+    /// startup worker is running: it would respawn the child.
+    pub(crate) fn stop_for_update(&self) -> Result<(), String> {
+        let child = {
+            let mut inner = self.lock();
+            if !inner.update_in_progress && inner.worker_active {
+                return Err("backend_starting".to_string());
+            }
+            inner.update_in_progress = true;
+            inner.child.take()
+        };
+        if let Some(mut child) = child {
+            terminate_process_group(&mut child, BACKEND_TERMINATE_GRACE);
+        }
+        if let Some(state_dir) = &self.state_dir {
+            let _ = fs::remove_file(state_dir.join(BACKEND_PID_FILE));
+        }
         self.set_failed("업데이트를 설치하기 위해 중지했습니다.".to_string());
         Ok(())
+    }
+
+    /// The install failed (or was abandoned): clear the latch and start the backend again.
+    /// Returns `false` if a startup was already running.
+    pub(crate) fn resume_after_failed_update(self: &Arc<Self>) -> bool {
+        self.lock().update_in_progress = false;
+        self.restart()
     }
 
     /// App exit: stop supervising and kill the owned process tree. Idempotent.
@@ -768,6 +814,10 @@ pub(crate) fn backend_api_connection(
 
 #[tauri::command]
 pub(crate) fn backend_restart(state: tauri::State<'_, Arc<BackendManager>>) -> Result<(), String> {
+    if state.update_in_progress() {
+        // Only `resume_after_failed_update` may bring the backend back during an update.
+        return Err(crate::update::UPDATE_IN_PROGRESS.to_string());
+    }
     // Returns immediately; the kill-and-respawn runs on the supervisor thread.
     Arc::clone(&state).restart();
     Ok(())
@@ -1324,9 +1374,17 @@ HTTPServer(("127.0.0.1", port), Handler).serve_forever()
         );
         // Stopping again (a retried prepare) is harmless.
         assert_eq!(manager.stop_for_update(), Ok(()));
+        assert!(manager.update_in_progress());
 
-        // The install failed: the existing restart path brings the old app's backend back.
-        assert!(manager.restart(), "stop_for_update must not block restart");
+        // While the update is in progress nothing may start the backend ...
+        assert!(!manager.restart(), "restart is refused while updating");
+        assert!(!manager.start_in_background());
+        assert_eq!(manager.status().state, BackendState::Failed);
+
+        // ... until the failed install is explicitly resumed: that clears the latch and
+        // brings the old app's backend back.
+        assert!(manager.resume_after_failed_update());
+        assert!(!manager.update_in_progress());
         wait_while_starting(&manager, Duration::from_secs(30));
         assert_eq!(manager.status().state, BackendState::Ready);
         manager.shutdown();
@@ -1421,6 +1479,35 @@ HTTPServer(("127.0.0.1", port), Handler).serve_forever()
         manager.lock().worker_active = true;
         assert!(!manager.restart());
         assert!(!manager.start_in_background());
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn the_update_latch_blocks_starts_until_resumed_or_cancelled() {
+        let root = temp_root("update-latch");
+        let manager = Arc::new(BackendManager::new(
+            root.join("project"),
+            None,
+            root.join("logs"),
+            None,
+        ));
+        assert!(!manager.update_in_progress());
+        assert_eq!(manager.begin_update(), Ok(()));
+        assert_eq!(manager.begin_update(), Ok(()), "idempotent");
+        assert!(manager.update_in_progress());
+        assert!(!manager.begin_start());
+        assert!(!manager.restart());
+        assert!(!manager.start_in_background());
+
+        // The guard refused: the latch is released without touching the backend.
+        manager.cancel_update();
+        assert!(!manager.update_in_progress());
+        assert!(manager.begin_start(), "starting works again");
+        manager.lock().worker_active = false;
+
+        // A latched update cannot be taken over by a startup that begins after it.
+        assert_eq!(manager.begin_update(), Ok(()));
+        assert!(!manager.begin_start());
         fs::remove_dir_all(root).ok();
     }
 }

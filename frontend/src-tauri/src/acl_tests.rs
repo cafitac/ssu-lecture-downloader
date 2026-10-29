@@ -35,6 +35,10 @@ fn prepare_for_update() -> &'static str {
 
 fn app() -> App<MockRuntime> {
     mock_builder()
+        // The real update plugins (their commands are what the ACL has to keep away from the
+        // LMS pages). Building the updater only reads the config; it does no network.
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .invoke_handler(tauri::generate_handler![
             watch_signal,
             real_download_dir,
@@ -330,6 +334,29 @@ fn updating_is_for_the_main_window_only() {
             )
             .is_err(),
             "{cmd} must not be reachable from the LMS page"
+        );
+    }
+}
+
+#[test]
+fn the_lms_pages_cannot_reach_the_update_or_process_plugins() {
+    let app = app();
+    let watch = window(
+        &app,
+        &format!("{WATCH_LABEL_PREFIX}-3"),
+        remote("https://canvas.ssu.ac.kr/"),
+    );
+    for (cmd, body) in [
+        ("plugin:updater|check", serde_json::json!({})),
+        ("plugin:updater|download_and_install", serde_json::json!({})),
+        ("plugin:process|restart", serde_json::json!({})),
+        ("plugin:process|exit", serde_json::json!({})),
+    ] {
+        let error = call(&watch, "https://canvas.ssu.ac.kr/courses/1", cmd, body)
+            .expect_err(&format!("{cmd} must not be reachable from the LMS page"));
+        assert!(
+            error.contains("not allowed") || error.contains("Not allowed"),
+            "{cmd} must be refused by the ACL, not fail for another reason: {error}"
         );
     }
 }

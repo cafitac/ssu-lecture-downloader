@@ -99,6 +99,7 @@ const KNOWN: Record<string, string> = {
   native_download_job_not_found: JOB_LOST,
   chrome_not_found: 'Google Chrome을 찾지 못했어요. 설정의 자동 재생 방식에서 ‘앱 안의 작은 창’을 골라 주세요.',
   chrome_watch_busy: '이미 자동 재생이 진행 중이에요.',
+  update_in_progress: '업데이트를 설치하는 중이에요. 잠시 후 다시 시도해 주세요.',
   empty_watch_queue: '순서대로 시청할 영상이 없어요.',
   chrome_launch_failed: 'Chrome을 실행하지 못했어요.',
   chrome_launch_timeout: 'Chrome 창이 열리지 않았어요. 다시 시도해 주세요.',

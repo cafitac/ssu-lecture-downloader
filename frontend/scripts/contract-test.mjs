@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync, existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import vm from 'node:vm';
+import { spawnSync } from 'node:child_process';
 
 function readTree(dir, extensions) {
   return readdirSync(dir, { withFileTypes: true })
@@ -1596,7 +1597,7 @@ const assistSource = readFileSync('src-tauri/src/assets/watch_assist.js', 'utf8'
   const remoteCapability = read('src-tauri/capabilities/watch-remote.json');
   assert.ok(!/updater|process/.test(remoteCapability), 'the remote watch window never gets update or process permissions');
   const mainPermissions = read('src-tauri/permissions/main-window-commands.toml');
-  for (const command of ['update_install_guard', 'prepare_for_update']) {
+  for (const command of ['update_install_guard', 'prepare_for_update', 'resume_after_failed_update']) {
     assert.ok(mainPermissions.includes(`commands.allow = ["${command}"]`), `${command} permission`);
     assert.ok(mainPermissions.includes(`  "allow-${command.replaceAll('_', '-')}",`), `${command} in the main-window set`);
   }
@@ -1609,11 +1610,23 @@ const assistSource = readFileSync('src-tauri/src/assets/watch_assist.js', 'utf8'
   assert.ok(pkg.dependencies['@tauri-apps/plugin-updater'] && pkg.dependencies['@tauri-apps/plugin-process']);
   const libRs = read('src-tauri/src/lib.rs');
   assert.match(libRs, /#\[cfg\(desktop\)\]\s*let builder = builder\s*\.plugin\(tauri_plugin_updater::Builder::new\(\)\.build\(\)\)\s*\.plugin\(tauri_plugin_process::init\(\)\)/);
-  assert.ok(libRs.includes('update::update_install_guard') && libRs.includes('update::prepare_for_update'));
+  assert.ok(['update_install_guard', 'prepare_for_update', 'resume_after_failed_update'].every((name) => libRs.includes(`update::${name}`)));
 
-  // PR CI has no signing key, so its app build must turn updater artifacts off (the release workflow must not).
+  // Local and PR builds have no signing key: `tauri:build` opts out of updater artifacts through a
+  // config file (cross-platform, no shell quoting); only `tauri:build:release` signs, and it fails
+  // fast without the key. CI uses `tauri:build`.
+  assert.deepEqual(JSON.parse(read('src-tauri/no-updater.conf.json')), { bundle: { createUpdaterArtifacts: false } });
+  assert.equal(pkg.scripts['tauri:build'], 'tauri build --config src-tauri/no-updater.conf.json');
+  assert.equal(pkg.scripts['tauri:build:release'], 'node scripts/require-signing-key.mjs && tauri build');
+  assert.ok(existsSync('scripts/require-signing-key.mjs'));
+  const gate = (env) => spawnSync(process.execPath, ['scripts/require-signing-key.mjs'], { env, encoding: 'utf8' });
+  const withoutKey = gate({ PATH: process.env.PATH });
+  assert.equal(withoutKey.status, 1);
+  assert.match(withoutKey.stderr, /TAURI_SIGNING_PRIVATE_KEY/);
+  assert.equal(gate({ PATH: process.env.PATH, TAURI_SIGNING_PRIVATE_KEY: 'x' }).status, 0);
   const ci = read('../.github/workflows/ci.yml');
-  assert.ok(ci.includes(`tauri build -- --bundles app --config '{"bundle":{"createUpdaterArtifacts":false}}'`), 'ci.yml PR build overrides createUpdaterArtifacts');
+  assert.ok(ci.includes('run: npm run tauri:build -- --bundles app\n'), 'ci.yml PR build uses the unsigned tauri:build script');
+  assert.ok(!ci.includes('run: npm run tauri:build:release'), 'PR CI never runs the signed build');
 
   // Inert: nothing in the frontend source uses the update plugins yet (AU-UPDATE-UI adds that).
   const frontendSource = readTree('src', ['.ts', '.tsx']).map((file) => readFileSync(file, 'utf8')).join('\n');

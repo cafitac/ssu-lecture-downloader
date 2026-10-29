@@ -91,13 +91,14 @@ jobs:
 
       # tauri.conf.json sets bundle.createUpdaterArtifacts: true, and `tauri build` then fails
       # ("A public key has been found, but no private key") unless TAURI_SIGNING_PRIVATE_KEY is
-      # set. PR builds never get that secret, so this build turns updater artifacts off with a
-      # config override. Signed updater artifacts are built only by the release workflow.
+      # set. PR builds never get that secret, so `npm run tauri:build` (frontend/package.json)
+      # builds with src-tauri/no-updater.conf.json, which turns updater artifacts off. Signed
+      # updater artifacts are built only by the release workflow (`tauri:build:release`).
       - name: Build macOS app bundle (no dmg, no signing, no upload)
         working-directory: frontend
         env:
           PYTHONPATH: ""
-        run: npm run tauri build -- --bundles app --config '{"bundle":{"createUpdaterArtifacts":false}}'
+        run: npm run tauri:build -- --bundles app
 
       - name: Check the sidecar is inside the app bundle
         run: |
