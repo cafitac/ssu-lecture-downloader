@@ -2,7 +2,7 @@
 //! happen before the updater plugin swaps the app. Nothing here starts an update; the
 //! frontend decides when to check, download and install (design/05 install flow, 06 states).
 //!
-//! Two commands, both for the main window only:
+//! Two commands here, both for the main window only:
 //!
 //! - `update_install_guard`: may an update be installed now? Refused while a sequential watch
 //!   (the app's own queue or an external run) or a native download is running. Stops nothing.
@@ -10,9 +10,10 @@
 //!   backend sidecar so the new version can replace the app. While the latch is set the backend
 //!   cannot be (re)started, and native download jobs and watch queues refuse to start
 //!   (`UPDATE_IN_PROGRESS`), so nothing can slip in between the guard and the install.
-//! - `resume_after_failed_update`: the install failed (or was abandoned): clear the latch and
-//!   restart the backend. The frontend calls this, not `backend_restart` (which refuses while
-//!   the latch is set), in the Failed state of design/06.
+//!
+//! Recovery is the existing `backend_restart` (design 05/06/07): it clears the latch and
+//! restarts the backend, so the Failed state of an install brings the old app back. The
+//! frontend must not offer a restart while an install is in progress.
 //!
 //! Platform-neutral: only `BackendManager` (which calls `platform::terminate_process_group`)
 //! touches the OS, so the Windows `cargo check --lib` job compiles this unchanged.
@@ -64,9 +65,10 @@ pub(crate) enum PrepareError {
 pub(crate) trait UpdateHost {
     fn watch_active(&self) -> bool;
     fn download_running(&self) -> bool;
-    /// Latch "update in progress" (atomically refusing while a backend startup runs).
-    fn begin_update(&self) -> Result<(), PrepareError>;
-    /// Release the latch (the guard refused).
+    /// Latch "update in progress" (atomically refusing while a backend startup runs). `Ok(true)`
+    /// when this call acquired the latch, `Ok(false)` when it was already set.
+    fn begin_update(&self) -> Result<bool, PrepareError>;
+    /// Release the latch (only the call that acquired it, when the guard refuses).
     fn cancel_update(&self);
     fn stop_backend(&self) -> Result<(), PrepareError>;
 }
@@ -100,8 +102,15 @@ pub(crate) fn guard_for(host: &impl UpdateHost) -> InstallGuard {
 
 /// Latch first, so nothing new can start; then the guard; then the stop. The sidecar is stopped
 /// only after the guard allowed, and the latch is released again when the guard refuses.
+///
+/// Only the call that acquired the latch releases it. A prepare that finds the latch already set
+/// (an earlier prepare stopped the sidecar) returns Ok at once: it does not re-run the guard and
+/// never cancels the first one's latch.
 pub(crate) fn prepare_with(host: &impl UpdateHost) -> Result<(), PrepareError> {
-    host.begin_update()?;
+    if !host.begin_update()? {
+        eprintln!("updater: update already prepared; keeping the latch");
+        return Ok(());
+    }
     if let InstallGuard::Refused { reason } = guard_for(host) {
         host.cancel_update();
         return Err(PrepareError::Refused { reason });
@@ -150,7 +159,7 @@ impl<R: Runtime> UpdateHost for AppHost<'_, R> {
             .is_some_and(|jobs| jobs.has_running_job())
     }
 
-    fn begin_update(&self) -> Result<(), PrepareError> {
+    fn begin_update(&self) -> Result<bool, PrepareError> {
         self.manager()?
             .begin_update()
             .map_err(|_| PrepareError::BackendStarting)
@@ -182,18 +191,6 @@ pub(crate) async fn prepare_for_update(app: AppHandle) -> Result<(), PrepareErro
         .unwrap_or(Err(PrepareError::BackendUnavailable))
 }
 
-/// The install failed (or was abandoned): clear the update latch and restart the backend, so the
-/// old app keeps working. Returns immediately; the respawn runs on the supervisor thread.
-#[tauri::command]
-pub(crate) fn resume_after_failed_update(
-    state: tauri::State<'_, Arc<BackendManager>>,
-) -> Result<(), String> {
-    eprintln!("updater: resuming the backend after a failed install");
-    // `false` only when a startup is already running, which is the state we want anyway.
-    Arc::clone(&state).resume_after_failed_update();
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -204,7 +201,7 @@ mod tests {
         watch: bool,
         download: bool,
         stop_result: Result<(), PrepareError>,
-        begin_result: Result<(), PrepareError>,
+        begin_result: Result<bool, PrepareError>,
         calls: RefCell<Vec<&'static str>>,
     }
 
@@ -214,7 +211,7 @@ mod tests {
                 watch,
                 download,
                 stop_result: Ok(()),
-                begin_result: Ok(()),
+                begin_result: Ok(true),
                 calls: RefCell::new(Vec::new()),
             }
         }
@@ -229,7 +226,7 @@ mod tests {
             self.calls.borrow_mut().push("download_running");
             self.download
         }
-        fn begin_update(&self) -> Result<(), PrepareError> {
+        fn begin_update(&self) -> Result<bool, PrepareError> {
             self.calls.borrow_mut().push("begin_update");
             self.begin_result.clone()
         }
@@ -356,6 +353,23 @@ mod tests {
     }
 
     #[test]
+    fn a_second_prepare_keeps_the_first_latch() {
+        // The latch is already held (the first prepare stopped the sidecar). Even though the
+        // guard would refuse now, the second prepare neither re-checks nor cancels.
+        let mut host = FakeHost::new(true, false);
+        host.begin_result = Ok(false);
+        assert_eq!(prepare_with(&host), Ok(()));
+        assert_eq!(*host.calls.borrow(), ["begin_update"]);
+
+        // Same with the real manager: the first prepare latches and stops, the second keeps it.
+        let (app, manager) = mock_app_with_backend();
+        let real = AppHost { app: app.handle() };
+        assert_eq!(prepare_with(&real), Ok(()));
+        assert_eq!(prepare_with(&real), Ok(()));
+        assert!(manager.update_in_progress(), "the first latch survives");
+    }
+
+    #[test]
     fn a_failed_latch_checks_nothing_and_stops_nothing() {
         let mut host = FakeHost::new(false, false);
         host.begin_result = Err(PrepareError::BackendStarting);
@@ -409,7 +423,7 @@ mod tests {
     }
 
     #[test]
-    fn prepare_latches_the_real_backend_and_resume_clears_it() {
+    fn prepare_latches_the_real_backend_and_backend_restart_recovers() {
         let (app, manager) = mock_app_with_backend();
         let host = AppHost { app: app.handle() };
         assert!(!is_update_in_progress(app.handle()));
@@ -417,11 +431,13 @@ mod tests {
         assert!(is_update_in_progress(app.handle()));
         assert!(
             !manager.restart(),
-            "backend_restart is refused while updating"
+            "plain starts are refused while updating"
         );
 
-        manager.cancel_update();
+        // `backend_restart` (restart_clearing_update) is the recovery of a failed install.
+        let _ = manager.restart_clearing_update();
         assert!(!is_update_in_progress(app.handle()));
+        manager.shutdown();
     }
 
     /// The start commands take an `AppHandle`, so they cannot run in the mock app; this pins
@@ -459,8 +475,8 @@ mod tests {
         }
         let backend = include_str!("backend.rs");
         assert!(
-            backend.contains("if state.update_in_progress() {"),
-            "backend_restart"
+            backend.contains("Arc::clone(&state).restart_clearing_update();"),
+            "backend_restart recovers a failed install"
         );
     }
 }

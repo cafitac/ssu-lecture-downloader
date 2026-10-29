@@ -1597,7 +1597,7 @@ const assistSource = readFileSync('src-tauri/src/assets/watch_assist.js', 'utf8'
   const remoteCapability = read('src-tauri/capabilities/watch-remote.json');
   assert.ok(!/updater|process/.test(remoteCapability), 'the remote watch window never gets update or process permissions');
   const mainPermissions = read('src-tauri/permissions/main-window-commands.toml');
-  for (const command of ['update_install_guard', 'prepare_for_update', 'resume_after_failed_update']) {
+  for (const command of ['update_install_guard', 'prepare_for_update']) {
     assert.ok(mainPermissions.includes(`commands.allow = ["${command}"]`), `${command} permission`);
     assert.ok(mainPermissions.includes(`  "allow-${command.replaceAll('_', '-')}",`), `${command} in the main-window set`);
   }
@@ -1610,7 +1610,7 @@ const assistSource = readFileSync('src-tauri/src/assets/watch_assist.js', 'utf8'
   assert.ok(pkg.dependencies['@tauri-apps/plugin-updater'] && pkg.dependencies['@tauri-apps/plugin-process']);
   const libRs = read('src-tauri/src/lib.rs');
   assert.match(libRs, /#\[cfg\(desktop\)\]\s*let builder = builder\s*\.plugin\(tauri_plugin_updater::Builder::new\(\)\.build\(\)\)\s*\.plugin\(tauri_plugin_process::init\(\)\)/);
-  assert.ok(['update_install_guard', 'prepare_for_update', 'resume_after_failed_update'].every((name) => libRs.includes(`update::${name}`)));
+  assert.ok(['update_install_guard', 'prepare_for_update'].every((name) => libRs.includes(`update::${name}`)));
 
   // Local and PR builds have no signing key: `tauri:build` opts out of updater artifacts through a
   // config file (cross-platform, no shell quoting); only `tauri:build:release` signs, and it fails
@@ -1624,6 +1624,9 @@ const assistSource = readFileSync('src-tauri/src/assets/watch_assist.js', 'utf8'
   assert.equal(withoutKey.status, 1);
   assert.match(withoutKey.stderr, /TAURI_SIGNING_PRIVATE_KEY/);
   assert.equal(gate({ PATH: process.env.PATH, TAURI_SIGNING_PRIVATE_KEY: 'x' }).status, 0);
+  // tauri-cli 2.12 `tauri build` ignores _PATH, so it must not open the gate.
+  assert.equal(gate({ PATH: process.env.PATH, TAURI_SIGNING_PRIVATE_KEY_PATH: '/x' }).status, 1);
+  assert.equal(gate({ PATH: process.env.PATH, TAURI_SIGNING_PRIVATE_KEY: '' }).status, 1);
   const ci = read('../.github/workflows/ci.yml');
   assert.ok(ci.includes('run: npm run tauri:build -- --bundles app\n'), 'ci.yml PR build uses the unsigned tauri:build script');
   assert.ok(!ci.includes('run: npm run tauri:build:release'), 'PR CI never runs the signed build');

@@ -79,10 +79,12 @@ struct Inner {
     log_path: Option<PathBuf>,
     child: Option<Child>,
     worker_active: bool,
+    /// Bumped by every `begin_start`; lets a worker release only its own slot at the end.
+    worker_id: u64,
     shutting_down: bool,
     /// An update is being installed: the sidecar was (or is about to be) stopped on purpose.
     /// Nothing may start the backend, a download or a watch until the install succeeds (the
-    /// app is replaced) or `resume_after_failed_update` clears it.
+    /// app is replaced) or `restart_clearing_update` (the `backend_restart` command) clears it.
     update_in_progress: bool,
 }
 
@@ -140,6 +142,7 @@ impl BackendManager {
                 log_path: None,
                 child: None,
                 worker_active: false,
+                worker_id: 0,
                 shutting_down: false,
                 update_in_progress: false,
             }),
@@ -178,8 +181,12 @@ impl BackendManager {
         }
     }
 
+    /// Publishing the final state also releases the startup slot in the same lock hold, so a
+    /// reader that sees `ready`/`failed` never sees a still-active worker (the update latch would
+    /// otherwise refuse with `backend_starting` right after the UI showed the backend ready).
     fn set_ready(&self, mode: &str, port: u16, token: Option<String>) {
         let mut inner = self.lock();
+        inner.worker_active = false;
         inner.state = BackendState::Ready;
         inner.mode = mode.to_string();
         inner.port = port;
@@ -189,6 +196,7 @@ impl BackendManager {
 
     fn set_failed(&self, message: String) {
         let mut inner = self.lock();
+        inner.worker_active = false;
         inner.state = BackendState::Failed;
         inner.mode = "failed".to_string();
         inner.token = None;
@@ -208,6 +216,7 @@ impl BackendManager {
             return false;
         }
         inner.worker_active = true;
+        inner.worker_id += 1;
         inner.state = BackendState::Starting;
         inner.mode = "starting".to_string();
         inner.error = None;
@@ -217,6 +226,7 @@ impl BackendManager {
 
     fn spawn_worker(self: &Arc<Self>, terminate_previous: bool) {
         let manager = Arc::clone(self);
+        let worker_id = self.lock().worker_id;
         let spawned = std::thread::Builder::new()
             .name("ssu-backend-supervisor".to_string())
             .spawn(move || {
@@ -230,11 +240,15 @@ impl BackendManager {
                     manager.terminate_child();
                     manager.set_failed("백엔드 시작 중 내부 오류가 발생했습니다.".to_string());
                 }
-                manager.lock().worker_active = false;
+                // Normally the final state already released the slot; this covers a worker that
+                // published nothing (aborted by shutdown). Never clear a newer worker's slot.
+                let mut inner = manager.lock();
+                if inner.worker_id == worker_id {
+                    inner.worker_active = false;
+                }
             });
         if let Err(error) = spawned {
             self.set_failed(format!("백엔드 시작 스레드를 만들 수 없습니다: {error}"));
-            self.lock().worker_active = false;
         }
     }
 
@@ -429,21 +443,25 @@ impl BackendManager {
         }
     }
 
-    /// True from `begin_update` until `resume_after_failed_update` (or the process exits).
+    /// True from `begin_update` until `restart_clearing_update` (or the process exits).
     pub(crate) fn update_in_progress(&self) -> bool {
         self.lock().update_in_progress
     }
 
     /// Latch "an update is being installed". Atomic with the startup-worker check, so a
     /// concurrent `begin_start`/`restart` either ran before (`Err(backend_starting)`, nothing
-    /// latched) or is refused after. Idempotent.
-    pub(crate) fn begin_update(&self) -> Result<(), String> {
+    /// latched) or is refused after. Returns whether THIS call acquired the latch (`Ok(false)`:
+    /// it was already set), so only the owner releases it.
+    pub(crate) fn begin_update(&self) -> Result<bool, String> {
         let mut inner = self.lock();
-        if !inner.update_in_progress && inner.worker_active {
+        if inner.update_in_progress {
+            return Ok(false);
+        }
+        if inner.worker_active {
             return Err("backend_starting".to_string());
         }
         inner.update_in_progress = true;
-        Ok(())
+        Ok(true)
     }
 
     /// Release the latch without having stopped anything (the guard refused).
@@ -452,8 +470,8 @@ impl BackendManager {
     }
 
     /// Stop the managed sidecar before an update is installed, but stay restartable:
-    /// unlike `shutdown`, this does not set `shutting_down`, so the backend can be started
-    /// again by `resume_after_failed_update` when the install fails.
+    /// unlike `shutdown`, this does not set `shutting_down`, so `backend_restart` can start the
+    /// backend again when the install fails.
     ///
     /// The worker check, the update latch and taking the child happen under one lock hold, so
     /// nothing can start a backend in between. `Err` (nothing stopped, nothing latched) while a
@@ -477,9 +495,9 @@ impl BackendManager {
         Ok(())
     }
 
-    /// The install failed (or was abandoned): clear the latch and start the backend again.
-    /// Returns `false` if a startup was already running.
-    pub(crate) fn resume_after_failed_update(self: &Arc<Self>) -> bool {
+    /// `backend_restart`: clear the update latch (a failed install leaves it set, design 06
+    /// Failed state) and restart. Returns `false` if a startup was already running.
+    pub(crate) fn restart_clearing_update(self: &Arc<Self>) -> bool {
         self.lock().update_in_progress = false;
         self.restart()
     }
@@ -814,12 +832,9 @@ pub(crate) fn backend_api_connection(
 
 #[tauri::command]
 pub(crate) fn backend_restart(state: tauri::State<'_, Arc<BackendManager>>) -> Result<(), String> {
-    if state.update_in_progress() {
-        // Only `resume_after_failed_update` may bring the backend back during an update.
-        return Err(crate::update::UPDATE_IN_PROGRESS.to_string());
-    }
-    // Returns immediately; the kill-and-respawn runs on the supervisor thread.
-    Arc::clone(&state).restart();
+    // Also the recovery of a failed update install: it clears the update latch. Returns
+    // immediately; the kill-and-respawn runs on the supervisor thread.
+    Arc::clone(&state).restart_clearing_update();
     Ok(())
 }
 
@@ -1330,19 +1345,6 @@ HTTPServer(("127.0.0.1", port), Handler).serve_forever()
         fs::remove_dir_all(dir).ok();
     }
 
-    /// Retry `stop_for_update` while the startup worker thread is still winding down.
-    fn stop_for_update_when_idle(manager: &BackendManager) -> Result<(), String> {
-        let deadline = Instant::now() + Duration::from_secs(5);
-        loop {
-            match manager.stop_for_update() {
-                Err(error) if error == "backend_starting" && Instant::now() < deadline => {
-                    std::thread::sleep(Duration::from_millis(25));
-                }
-                other => return other,
-            }
-        }
-    }
-
     #[test]
     fn stop_for_update_kills_the_tree_and_the_backend_can_be_restarted_afterwards() {
         let dir = temp_root("e2e-stop-for-update");
@@ -1350,6 +1352,10 @@ HTTPServer(("127.0.0.1", port), Handler).serve_forever()
         assert!(manager.start_in_background());
         wait_while_starting(&manager, Duration::from_secs(30));
         assert_eq!(manager.status().state, BackendState::Ready);
+        assert!(
+            !manager.lock().worker_active,
+            "Ready and the released startup slot are published together"
+        );
         let grandchild: libc::pid_t = fs::read_to_string(dir.join("grandchild.pid"))
             .unwrap()
             .trim()
@@ -1357,12 +1363,10 @@ HTTPServer(("127.0.0.1", port), Handler).serve_forever()
             .unwrap();
         let child_pid = manager.lock().child.as_ref().unwrap().id() as libc::pid_t;
 
-        assert_eq!(stop_for_update_when_idle(&manager), Ok(()));
+        // Right after Ready: the final state and the released startup slot are one step.
+        assert_eq!(manager.stop_for_update(), Ok(()));
 
-        let deadline = Instant::now() + Duration::from_secs(3);
-        while (pid_alive(grandchild) || pid_alive(child_pid)) && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(25));
-        }
+        // `stop_for_update` returns only after the group is gone (SIGTERM, then SIGKILL).
         assert!(!pid_alive(child_pid), "backend leader survived the stop");
         assert!(!pid_alive(grandchild), "backend grandchild orphaned");
         assert!(!dir.join("state").join(BACKEND_PID_FILE).exists());
@@ -1376,14 +1380,14 @@ HTTPServer(("127.0.0.1", port), Handler).serve_forever()
         assert_eq!(manager.stop_for_update(), Ok(()));
         assert!(manager.update_in_progress());
 
-        // While the update is in progress nothing may start the backend ...
+        // While the update is in progress nothing else may start the backend ...
         assert!(!manager.restart(), "restart is refused while updating");
         assert!(!manager.start_in_background());
         assert_eq!(manager.status().state, BackendState::Failed);
 
-        // ... until the failed install is explicitly resumed: that clears the latch and
-        // brings the old app's backend back.
-        assert!(manager.resume_after_failed_update());
+        // ... until `backend_restart` (restart_clearing_update) recovers the failed install:
+        // it clears the latch and brings the old app's backend back.
+        assert!(manager.restart_clearing_update());
         assert!(!manager.update_in_progress());
         wait_while_starting(&manager, Duration::from_secs(30));
         assert_eq!(manager.status().state, BackendState::Ready);
@@ -1492,8 +1496,12 @@ HTTPServer(("127.0.0.1", port), Handler).serve_forever()
             None,
         ));
         assert!(!manager.update_in_progress());
-        assert_eq!(manager.begin_update(), Ok(()));
-        assert_eq!(manager.begin_update(), Ok(()), "idempotent");
+        assert_eq!(manager.begin_update(), Ok(true), "acquired by this call");
+        assert_eq!(
+            manager.begin_update(),
+            Ok(false),
+            "already held: not the owner"
+        );
         assert!(manager.update_in_progress());
         assert!(!manager.begin_start());
         assert!(!manager.restart());
@@ -1506,7 +1514,7 @@ HTTPServer(("127.0.0.1", port), Handler).serve_forever()
         manager.lock().worker_active = false;
 
         // A latched update cannot be taken over by a startup that begins after it.
-        assert_eq!(manager.begin_update(), Ok(()));
+        assert_eq!(manager.begin_update(), Ok(true));
         assert!(!manager.begin_start());
         fs::remove_dir_all(root).ok();
     }

@@ -223,8 +223,7 @@ pub fn run() {
             native_download::native_download_job_status,
             native_download::native_cancel_download_job,
             update::update_install_guard,
-            update::prepare_for_update,
-            update::resume_after_failed_update
+            update::prepare_for_update
         ])
         .build(app_context());
     match built {
