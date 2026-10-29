@@ -1,4 +1,5 @@
 import type { ListState } from '../hooks/useLmsSession';
+import { GRADES_LABEL } from '../lib/grades';
 import type { TermSummary } from '../lib/types';
 import { watchAllHint, watchAllLabel } from '../lib/watch';
 import { RefreshIcon, SettingsIcon } from './Icons';
@@ -20,18 +21,20 @@ interface Props {
   /** Items due today or within three days. */
   dueSoonCount: number;
   deadlinesOpen: boolean;
+  gradesOpen: boolean;
   /** Open, unwatched videos of every course that the all-course auto playback would play. */
   watchAllCount: number;
   watchAllLoading: boolean;
   queueActive: boolean;
   onWatchAll: () => void;
   onToggleDeadlines: () => void;
+  onToggleGrades: () => void;
   onTermChange: (termId: number) => void;
   onRefresh: () => void;
   onOpenSettings: () => void;
 }
 
-export function TopBar({ terms, termId, listState, busy, dueSoonCount, deadlinesOpen, watchAllCount, watchAllLoading, queueActive, onWatchAll, onToggleDeadlines, onTermChange, onRefresh, onOpenSettings }: Props) {
+export function TopBar({ terms, termId, listState, busy, dueSoonCount, deadlinesOpen, gradesOpen, watchAllCount, watchAllLoading, queueActive, onWatchAll, onToggleDeadlines, onToggleGrades, onTermChange, onRefresh, onOpenSettings }: Props) {
   const currentTermId = terms.find((term) => term.is_current)?.term_id ?? null;
   const loading = listState === 'loading';
   return (
@@ -68,6 +71,15 @@ export function TopBar({ terms, termId, listState, busy, dueSoonCount, deadlines
         onClick={onToggleDeadlines}
       >
         기한{dueSoonCount > 0 && <span className="count-badge">{dueSoonCount}</span>}
+      </button>
+      <button
+        type="button"
+        className={`btn btn-ghost view-toggle${gradesOpen ? ' is-active' : ''}`}
+        aria-pressed={gradesOpen}
+        title="u-SAINT 성적 (동의 후 읽기 전용)"
+        onClick={onToggleGrades}
+      >
+        {GRADES_LABEL}
       </button>
       <span className="signed-in"><i aria-hidden="true" />로그인됨</span>
       <button

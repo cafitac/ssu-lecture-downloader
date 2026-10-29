@@ -1,4 +1,5 @@
 import type { AudioExtractionResult, ChromeWatchItemInput, ChromeWatchStatus, BatchDownloadItemResult, BatchDownloadResult, CanvasFileDownloadResponse, ConflictStrategy, CourseDetailResponse, CoursesResponse, CredentialStatus, DeadlinesResponse, DownloadJobStatus, DownloadOutputFormat, DownloadResult, LmsSessionBridgeResponse, MediaDependencyInstallResult, MediaDependencyStatusResponse, NativeDownloadPlanResult, OfficialViewerPlanResult, OfficialViewerSessionBridgeResult, PageFilesResponse, PostprocessJobStatus, ProgressEvent, RemoteSttConfigPatch, RemoteSttStatus, STTProviderStatusResponse, TermsResponse, TranscriptionResult } from './types';
+import type { GradesClassesResponse, GradesOverviewResponse, GradesSemesterKind, GradesStatusResponse } from './types';
 import { buildRequestHeaders } from './http';
 import { reportWithPostprocess } from './postprocess';
 import type { PostprocessEntry } from './postprocess';
@@ -112,6 +113,32 @@ export function fetchDeadlines(termId?: number | null, refresh = false): Promise
   if (refresh) params.set('refresh', 'true');
   const suffix = params.toString() ? `?${params.toString()}` : '';
   return requestJson<DeadlinesResponse>(`/api/deadlines${suffix}`);
+}
+
+// Grades (u-SAINT, read only). These calls are made only after the user opened the grades tab;
+// their failures are the grades tab's own and never end the LMS login (see lib/grades.ts).
+export function fetchGradesStatus(): Promise<GradesStatusResponse> {
+  return requestJson<GradesStatusResponse>('/api/grades/status');
+}
+
+export function grantGradesConsent(consentVersion: number): Promise<GradesStatusResponse> {
+  return requestJson<GradesStatusResponse>('/api/grades/consent', {
+    method: 'PUT',
+    body: JSON.stringify({ consent_version: consentVersion }),
+  });
+}
+
+export function revokeGradesConsent(): Promise<GradesStatusResponse> {
+  return requestJson<GradesStatusResponse>('/api/grades/consent', { method: 'DELETE' });
+}
+
+export function fetchGrades(refresh = false): Promise<GradesOverviewResponse> {
+  return requestJson<GradesOverviewResponse>(`/api/grades?refresh=${refresh ? 'true' : 'false'}`);
+}
+
+export function fetchGradeClasses(year: number, semester: GradesSemesterKind, refresh = false): Promise<GradesClassesResponse> {
+  const params = new URLSearchParams({ year: String(year), semester, refresh: refresh ? 'true' : 'false' });
+  return requestJson<GradesClassesResponse>(`/api/grades/classes?${params.toString()}`);
 }
 
 export function fetchCourseDetail(courseId: string | number, courseName: string, options: { refresh?: boolean; outputDir?: string } = {}): Promise<CourseDetailResponse> {

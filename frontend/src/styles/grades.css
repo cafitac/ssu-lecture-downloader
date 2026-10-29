@@ -1,0 +1,56 @@
+/* Grades tab. Same pane pattern as the deadlines overview; existing tokens only. */
+.grades-pane { grid-template-rows: auto minmax(0, 1fr); }
+.grades-pane.has-note { grid-template-rows: auto auto minmax(0, 1fr); }
+.grades-pane.is-consent { grid-template-rows: minmax(0, 1fr); }
+.grades-pane :is(h1, h2)[tabindex="-1"]:focus, .setting p[tabindex="-1"]:focus { outline: none; }
+
+/* Consent step: one plain card in the middle of the pane. */
+.grades-consent { display: grid; place-items: center; min-height: 0; padding: var(--sp-6); overflow-y: auto; }
+.grades-consent-card { width: min(440px, 100%); }
+.grades-consent-points { display: grid; gap: var(--sp-2); padding-left: var(--sp-4); list-style: disc; color: var(--text-muted); font-size: var(--fs-13); }
+.grades-consent-actions { display: flex; flex-wrap: wrap; gap: var(--sp-2); }
+
+/* Summary: a plain line of text, no boxes. */
+.grades-summary { display: grid; gap: var(--sp-2); padding: var(--sp-4) var(--sp-5); border-bottom: 1px solid var(--border); }
+.grades-summary-label { color: var(--text-muted); font-size: var(--fs-12); font-weight: var(--fw-semibold); }
+.grades-summary-list { display: flex; flex-wrap: wrap; gap: var(--sp-1) var(--sp-6); margin: 0; }
+.grades-summary-list > div { display: flex; align-items: baseline; gap: var(--sp-2); }
+.grades-summary-list dt { color: var(--text-muted); font-size: var(--fs-12); }
+.grades-summary-list dd { margin: 0; font-size: var(--fs-16); font-weight: var(--fw-semibold); font-variant-numeric: tabular-nums; }
+.grades-certificated { display: grid; gap: var(--sp-2); }
+.grades-certificated summary { width: fit-content; color: var(--text-muted); font-size: var(--fs-12); cursor: pointer; }
+.grades-certificated[open] summary { margin-bottom: var(--sp-2); }
+
+/* Semester groups: the deadline group header, made into one disclosure button. */
+.grades-group-title { padding: 0; }
+.grades-group-toggle {
+  display: flex; align-items: center; gap: var(--sp-2); width: 100%; height: 100%; min-width: 0; padding: 0 var(--sp-5);
+  border: 0; background: transparent; text-align: left; font: inherit; cursor: pointer;
+}
+.grades-group-toggle:hover { background: var(--bg-hover); }
+.grades-group-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.grades-group-toggle svg { flex: none; color: var(--text-muted); }
+.grades-group-name { flex: none; }
+.grades-group-stats { margin-left: auto; min-width: 0; overflow: hidden; color: var(--text-muted); font-size: var(--fs-12); font-weight: var(--fw-regular); font-variant-numeric: tabular-nums; text-overflow: ellipsis; white-space: nowrap; }
+.grades-classes { border-bottom: 1px solid var(--border); }
+.grades-classes-note { display: flex; align-items: center; gap: var(--sp-2); min-height: 44px; padding: 0 var(--sp-5); color: var(--text-muted); font-size: var(--fs-12); }
+.grades-classes-note.is-error { color: var(--danger-fg); }
+
+/* Class table */
+.grades-table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+.grades-table th, .grades-table td { height: 36px; padding: 0 var(--sp-2); border-top: 1px solid var(--border); text-align: left; font-weight: var(--fw-regular); }
+.grades-table thead th { height: 28px; border-top: 0; color: var(--text-muted); font-size: var(--fs-12); font-weight: var(--fw-semibold); }
+.grades-table tbody tr:first-child > * { border-top: 0; }
+.grades-table tr > :first-child { padding-left: var(--sp-5); }
+.grades-table tr > :last-child { padding-right: var(--sp-5); }
+.grades-table .is-num { width: 64px; text-align: right; font-variant-numeric: tabular-nums; }
+.grades-table .col-professor { width: 120px; overflow: hidden; color: var(--text-muted); font-size: var(--fs-12); text-overflow: ellipsis; white-space: nowrap; }
+.grades-class-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.grades-grade { font-weight: var(--fw-semibold); }
+@container (max-width: 520px) {
+  .grades-table .col-professor { display: none; }
+}
+
+.grades-error-title { color: var(--text); font-size: var(--fs-16); font-weight: var(--fw-semibold); }
+.grades-inline-action { padding: 0; border: 0; background: transparent; color: var(--accent-text); font: inherit; font-weight: var(--fw-semibold); cursor: pointer; }
+.grades-inline-action:hover { text-decoration: underline; }

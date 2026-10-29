@@ -45,6 +45,10 @@ const requiredFiles = [
   'src/components/DeadlinesPane.tsx',
   'src/lib/deadline.ts',
   'src/hooks/useDeadlines.ts',
+  'src/components/GradesPane.tsx',
+  'src/hooks/useGrades.ts',
+  'src/lib/grades.ts',
+  'src/styles/grades.css',
   'src/hooks/useReminders.ts',
   'src/hooks/useRemoteStt.ts',
   'src/lib/remoteStt.ts',
@@ -144,8 +148,13 @@ if (!main.includes('indeterminate')) throw new Error('Select-all must be tri-sta
 if ((readFileSync('src/components/ActionBar.tsx', 'utf8').match(/btn-primary/g) ?? []).length !== 1) {
   throw new Error('The action bar must contain exactly one accent-filled button (다운로드)');
 }
-for (const file of readTree('src/components', ['.tsx']).filter((name) => !name.endsWith('ActionBar.tsx') && !name.endsWith('Screens.tsx'))) {
+// Screens.tsx (login) and GradesPane.tsx (the one consent step, shown instead of the course view) may carry one accent button each.
+// While a download runs the ActionBar's 다운로드 button can show next to the consent button; that coexistence is accepted.
+for (const file of readTree('src/components', ['.tsx']).filter((name) => !name.endsWith('ActionBar.tsx') && !name.endsWith('Screens.tsx') && !name.endsWith('GradesPane.tsx'))) {
   if (readFileSync(file, 'utf8').includes('btn-primary')) throw new Error(`${file}: no other accent-filled button may compete with the download button`);
+}
+if ((readFileSync('src/components/GradesPane.tsx', 'utf8').match(/btn-primary/g) ?? []).length !== 1) {
+  throw new Error('The grades pane may contain exactly one accent-filled button (동의하고 성적 보기)');
 }
 
 // Session / data flow.
@@ -1437,4 +1446,127 @@ const assistSource = readFileSync('src-tauri/src/assets/watch_assist.js', 'utf8'
   assert.ok(app.includes('AUTO_REFRESH_EVERY_MS = 30 * 60 * 1000') && app.includes("addEventListener('focus'"), 'periodic and on-focus refresh');
   const session = readFileSync(new URL('../src/hooks/useLmsSession.ts', import.meta.url), 'utf8');
   assert.ok(session.includes('refreshQuietly') && session.includes('loadCourses(termId, true, true)'), 'background refresh bypasses LMS caches quietly');
+}
+
+// Grades tab (u-SAINT, read only): consent first, errors stay inside the tab, nothing about grades is stored.
+{
+  const read = (path) => readFileSync(new URL(`../${path}`, import.meta.url), 'utf8');
+  const grades = await import('../src/lib/grades.ts');
+  const errors = await import('../src/lib/errors.ts');
+
+  // AC1 / AC2: the button, the exact consent sentence, the choices and the way to turn it off.
+  assert.equal(grades.GRADES_LABEL, '성적');
+  assert.equal(grades.GRADES_CONSENT_SENTENCE, 'u-SAINT에 같은 계정으로 로그인해서 성적을 읽어 와요');
+  assert.equal(grades.GRADES_CONSENT_ACCEPT, '동의하고 성적 보기');
+  assert.equal(grades.GRADES_CONSENT_LATER, '나중에');
+  assert.ok(grades.GRADES_CONSENT_POINTS.some((point) => point.includes('읽기만 해요')) && grades.GRADES_CONSENT_POINTS.some((point) => point.includes('설정에서 언제든 끌 수 있어요')));
+  const topbar = read('src/components/TopBar.tsx');
+  assert.ok(topbar.includes('GRADES_LABEL') && topbar.includes('onToggleGrades') && topbar.includes('aria-pressed={gradesOpen}') && topbar.includes('view-toggle'), 'top bar needs the 성적 toggle from the start');
+  const pane = read('src/components/GradesPane.tsx');
+  assert.ok(pane.includes('GRADES_CONSENT_SENTENCE') && pane.includes('GRADES_CONSENT_ACCEPT') && pane.includes('GRADES_CONSENT_LATER'));
+  assert.ok(pane.includes('GRADES_ERROR_TITLE') && pane.includes('role="alert"') && pane.includes('GRADES_EMPTY_TEXT') && pane.includes('aria-expanded'));
+  assert.equal(grades.GRADES_ERROR_TITLE, '지금 가져올 수 없어요');
+  const settings = read('src/components/SettingsDialog.tsx');
+  assert.ok(settings.includes('성적 보기') && settings.includes('끄기') && settings.includes('꺼져 있어요'), 'settings need 성적 보기 > 끄기');
+  const app = read('src/App.tsx');
+  assert.ok(app.includes("'course' | 'deadlines' | 'grades'") && app.includes('<GradesPane'), 'App switches between course, deadlines and grades');
+  // AC1: the grades tab asks nothing of the backend until it is opened. The only caller of open() is
+  // this effect, and it runs only while the grades view is shown and nothing was asked yet.
+  assert.ok(app.includes("if (view === 'grades' && grades.phase === 'idle') openGrades();"), 'App opens the grades tab only when its view is shown and the hook is idle');
+  assert.equal((app.match(/openGrades\(/g) ?? []).length, 1, 'openGrades is called in exactly one place');
+  const hook = read('src/hooks/useGrades.ts');
+  const hookCode = hook.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+  // No effect of the hook may start, open or fetch anything (effects run on mount).
+  const effects = hookCode.split('useEffect(').slice(1).map((part) => part.slice(0, part.search(/\n  \}, \[|\n  \}\);/)));
+  assert.ok(effects.length >= 1);
+  for (const body of effects) {
+    assert.ok(!/\b(start|open|retry|grant|refresh|loadOverview|loadClasses|refreshStatus)\(|fetchGrade|fetchGrades/.test(body), 'a useGrades effect must not call the backend');
+  }
+
+  // The app identity stays the same (an installed app keeps its data and permissions).
+  const tauriJson = JSON.parse(readFileSync(new URL('../src-tauri/tauri.conf.json', import.meta.url), 'utf8'));
+  assert.equal(tauriJson.identifier, 'com.local.ssu-lecture-downloader');
+  assert.equal(tauriJson.productName, 'SSU Lecture Downloader');
+
+  // AC5: u-SAINT failures stay in the tab; the hook has no way to sign the user out.
+  assert.ok(!hookCode.includes('onAuthError') && !hookCode.includes('isAuthenticationError') && !hookCode.includes('expire'), 'useGrades never ends the LMS session');
+  const gradesFailures = { login: { code: 'grades_login_rejected' }, consent: { code: 'grades_consent_required' }, down: { code: 'grades_unavailable' } };
+  assert.equal(grades.classifyGradesError(gradesFailures.login), 'login_rejected');
+  assert.equal(grades.classifyGradesError(gradesFailures.consent), 'consent_required');
+  assert.equal(grades.classifyGradesError(gradesFailures.down), 'unavailable');
+  for (const code of ['HTTP 404', 'HTTP 403', 'HTTP 401', 'HTTP 503', 'session_expired', 'authentication_failed', 'something_new']) {
+    assert.equal(grades.classifyGradesError({ code }), 'unavailable', `${code} must stay a grades-tab error`);
+  }
+  assert.equal(grades.classifyGradesError(new Error('boom')), 'unavailable');
+  assert.equal(grades.classifyGradesError({ code: 'missing_credentials' }), 'credentials_missing');
+  assert.ok(grades.gradesFailureText('login_rejected').includes('u-SAINT 웹에서 직접 로그인되는지 확인해 주세요'));
+  assert.equal(grades.GRADES_LECTURES_OK, '강의 기능은 그대로 쓸 수 있어요.');
+  for (const kind of ['unavailable', 'login_rejected']) {
+    assert.ok(grades.gradesFailureText(kind).endsWith(grades.GRADES_LECTURES_OK), `${kind} must carry the reassurance that lecture features keep working`);
+  }
+  // Missing LMS credentials also hit the lecture features, so that reassurance would be untrue there.
+  assert.ok(!grades.gradesFailureText('credentials_missing').includes(grades.GRADES_LECTURES_OK));
+  assert.ok(grades.gradesFailureText('credentials_missing').includes('앱에 다시 로그인한 뒤 시도해 주세요'));
+  assert.equal(grades.isInvalidConsentVersion({ code: 'invalid_consent_version' }), true);
+  assert.equal(grades.isInvalidConsentVersion({ code: 'HTTP 400' }), false);
+  assert.ok(hookCode.includes('isInvalidConsentVersion') && hookCode.includes('fetchGradesStatus()'), 'a stale consent version is re-read once');
+  assert.ok(pane.includes("'[aria-modal=\"true\"]'") && pane.includes('GRADES_CERTIFICATED_NOTE') && pane.includes('과목</span>'), 'pane: modal-safe focus, certificated note, class count with unit');
+  assert.equal(grades.GRADES_CERTIFICATED_NOTE, '졸업증명서 등 공식 서류에 쓰는 평점이에요.');
+
+  // Refresh: the newest request per semester wins; class tables of closed semesters are dropped.
+  {
+    const sequence = grades.createRequestSequence();
+    const first = sequence.begin('2025-ONE');
+    const second = sequence.begin('2025-ONE');
+    assert.equal(sequence.isLatest('2025-ONE', first), false);
+    assert.equal(sequence.isLatest('2025-ONE', second), true);
+    const other = sequence.begin('2025-TWO');
+    sequence.invalidate(['2025-TWO']);
+    assert.equal(sequence.isLatest('2025-TWO', other), false);
+    assert.equal(sequence.isLatest('2025-ONE', second), true);
+    sequence.clear();
+    assert.equal(sequence.isLatest('2025-ONE', second), false);
+    const kept = grades.keepKeys({ a: 1, b: 2, c: 3 }, new Set(['b']));
+    assert.deepEqual(kept, { b: 2 });
+  }
+  assert.ok(hookCode.includes("mode === 'refresh'") && hookCode.includes('keepKeys') && hookCode.includes('setRefreshFailed(true)'), 'refresh keeps open tables and only marks the refresh failed');
+  for (const code of ['grades_consent_required', 'grades_login_rejected', 'grades_unavailable', 'invalid_consent_version', 'invalid_semester']) {
+    assert.ok(/[가-힣]/.test(errors.knownErrorText(code) ?? ''), `${code} needs Korean text`);
+  }
+
+  // API client: the frozen contract, and nothing stored or logged.
+  const apiSource = read('src/lib/api.ts');
+  for (const marker of ["'/api/grades/status'", "'/api/grades/consent'", "method: 'PUT'", 'consent_version: consentVersion', "{ method: 'DELETE' }", '/api/grades?refresh=', '/api/grades/classes?']) {
+    assert.ok(apiSource.includes(marker), `api.ts needs ${marker}`);
+  }
+  for (const path of ['src/hooks/useGrades.ts', 'src/lib/grades.ts', 'src/components/GradesPane.tsx']) {
+    const source = read(path);
+    assert.ok(!/console\./.test(source), `${path} must not log`);
+    assert.ok(!/localStorage|sessionStorage|indexedDB/.test(source), `${path} must not store grades or consent`);
+  }
+
+  // Formatting.
+  assert.equal(grades.semesterLabel(2025, 'ONE'), '2025년 1학기');
+  assert.equal(grades.semesterLabel(2025, 'TWO'), '2025년 2학기');
+  assert.equal(grades.semesterLabel(2025, 'SUMMER'), '2025년 하계 계절학기');
+  assert.equal(grades.semesterLabel(2025, 'WINTER'), '2025년 동계 계절학기');
+  assert.equal(grades.formatGpa(3.854), '3.85');
+  assert.equal(grades.formatGpa(null), '-');
+  assert.equal(grades.formatCredits(18), '18');
+  assert.equal(grades.formatCredits(17.5), '17.5');
+  assert.equal(grades.formatCredits(undefined), '-');
+  assert.equal(grades.formatRank({ rank: 12, total: 340 }), '12/340');
+  assert.equal(grades.formatRank({ rank: 1, total: 0 }), null);
+  assert.equal(grades.formatRank({ rank: null, total: 340 }), null);
+  assert.equal(grades.semesterStatsText({ grade_points_average: 3.9, earned_credits: 18, semester_rank: { rank: 12, total: 340 } }), '평점 3.90 · 취득 18학점 · 석차 12/340');
+  assert.equal(grades.semesterStatsText({ grade_points_average: null, earned_credits: null, semester_rank: null }), '');
+  assert.equal(grades.classScoreText({ score: 'P' }), 'P');
+  assert.equal(grades.classScoreText({ score: null }), '-');
+  const fetched = '2026-10-29T03:00:00Z';
+  assert.equal(grades.updatedAgoText(fetched, new Date('2026-10-29T03:00:20Z')), '방금 업데이트');
+  assert.equal(grades.updatedAgoText(fetched, new Date('2026-10-29T03:03:10Z')), '3분 전 업데이트');
+  assert.equal(grades.updatedAgoText(fetched, new Date('2026-10-29T05:10:00Z')), '2시간 전 업데이트');
+  assert.equal(grades.updatedAgoText(fetched, new Date('2026-10-31T05:10:00Z')), '2일 전 업데이트');
+  assert.equal(grades.updatedAgoText(null, new Date()), '');
+  assert.equal(grades.updatedAgoText('not a date', new Date()), '');
 }
