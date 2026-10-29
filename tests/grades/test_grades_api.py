@@ -322,22 +322,38 @@ def test_a_malformed_consent_body_is_400_invalid_consent_version(tmp_path, conte
 
 
 def test_health_answers_promptly_while_the_gateway_blocks_its_thread(tmp_path):
+    import threading
+
     env = make_grades_app(tmp_path, consented=True, overview_timeout=5.0)
     env.gateway.blocking = 1.0  # time.sleep inside the gateway coroutine
 
     async def go():
         transport = httpx.ASGITransport(app=env.app)
         async with httpx.AsyncClient(transport=transport, base_url=BASE) as http:
+            ticks: list[float] = []
+
+            async def ticker():
+                while True:
+                    await asyncio.sleep(0.02)
+                    ticks.append(time.monotonic())
+
+            tick = asyncio.create_task(ticker())
+            t0 = time.monotonic()
             slow = asyncio.create_task(http.get("/api/grades"))
             await asyncio.sleep(0.3)  # the worker thread is now stuck in time.sleep
-            timings = []
+            finished = {}
             for path in ("/api/health", "/api/terms", "/api/credentials/status"):
-                started = time.monotonic()
                 response = await http.get(path)
-                timings.append((path, response.status_code, time.monotonic() - started))
-            return timings, await slow
+                finished[path] = (response.status_code, time.monotonic() - t0)
+            slow_response = await slow
+            tick.cancel()
+            return finished, slow_response, ticks
 
-    timings, slow_response = asyncio.run(go())
+    finished, slow_response, ticks = asyncio.run(go())
     assert slow_response.status_code == 200
-    for path, status, elapsed in timings:
-        assert status == 200 and elapsed < 0.5, (path, elapsed)
+    for path, (status, done_at) in finished.items():
+        assert status == 200
+        assert done_at < 0.8, (path, done_at)  # with a loop-blocking gateway nothing could finish before ~1.0 s
+    gaps = [b - a for a, b in zip(ticks, ticks[1:], strict=False)]
+    assert gaps and max(gaps) < 0.3, max(gaps)
+    assert env.gateway.threads and threading.get_ident() not in env.gateway.threads  # not the test's loop thread

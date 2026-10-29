@@ -57,9 +57,21 @@ class GatewayWorker:
                 thread.join(timeout=2)
 
 
+async def _shutdown(loop: asyncio.AbstractEventLoop) -> None:
+    """Cancel what is still pending and finish async generators, so nothing is left un-awaited."""
+    current = asyncio.current_task()
+    pending = [task for task in asyncio.all_tasks(loop) if task is not current]
+    for task in pending:
+        task.cancel()
+    await asyncio.gather(*pending, return_exceptions=True)
+    await loop.shutdown_asyncgens()
+    loop.stop()
+
+
 def _stop(loop: asyncio.AbstractEventLoop) -> None:
-    if not loop.is_closed():
-        try:
-            loop.call_soon_threadsafe(loop.stop)
-        except RuntimeError:  # closed between the check and the call
-            pass
+    if loop.is_closed():
+        return
+    try:
+        asyncio.run_coroutine_threadsafe(_shutdown(loop), loop)
+    except RuntimeError:  # the loop closed between the check and the call
+        pass

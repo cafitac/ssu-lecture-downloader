@@ -11,6 +11,9 @@ Safety model
   if the generation is unchanged, and a request that queued behind another one re-reads consent and
   credentials once it holds the flight lock and gives up (no gateway call) if the generation moved.
 - Concurrent equal requests share one flight, success or failure (one login per burst).
+- Login-step failures are never retried (a failed fresh login cannot be told from a rejection) and
+  two in a row pause all logins for the account for `LOGIN_BACKOFF` (or until `clear()`): a wrong
+  password costs at most two SSO logins per window.
 - A u-SAINT login rejection is remembered per (account, generation) until credentials change or
   `clear()`, so "retry" never re-sends a known-rejected password.
 - All gateway coroutines run on a dedicated worker thread (worker.py) so a call that blocks cannot
@@ -50,6 +53,8 @@ T = TypeVar("T")
 DEFAULT_TTL = timedelta(minutes=30)
 OVERVIEW_TIMEOUT_SECONDS = 25.0
 CLASSES_TIMEOUT_SECONDS = 20.0
+LOGIN_FAILURES_BEFORE_BACKOFF = 2
+LOGIN_BACKOFF = timedelta(minutes=5)
 
 CredentialsProvider = Callable[[], "tuple[str, str] | None"]
 
@@ -106,6 +111,8 @@ class GradesService:
         self._snapshot: _Snapshot | None = None
         self._session: tuple[str, Any] | None = None
         self._rejected: tuple[str, int] | None = None  # (account_key, generation) of a rejected login
+        # (account_key, generation) -> consecutive failed logins and when the pause ends
+        self._login_failures: dict[tuple[str, int], tuple[int, datetime | None]] = {}
         self._generation = 0
 
     # ---- consent -------------------------------------------------------------------------------
@@ -150,6 +157,7 @@ class GradesService:
             self._snapshot = None
             self._session = None
             self._rejected = None
+            self._login_failures.clear()
             self._generation += 1
 
     def close(self) -> None:
@@ -268,6 +276,28 @@ class GradesService:
                 return self._session[1]
             return None
 
+    def _login_paused(self, username: str, generation: int) -> bool:
+        with self._state:
+            failures, until = self._login_failures.get((username, generation), (0, None))
+            if until is None:
+                return False
+            if self._now() < until:
+                return True
+            del self._login_failures[(username, generation)]  # the pause is over: a fresh budget of attempts
+            return False
+
+    def _record_login(self, username: str, generation: int, *, ok: bool) -> None:
+        with self._state:
+            if self._generation != generation:
+                return
+            key = (username, generation)
+            if ok:
+                self._login_failures.pop(key, None)
+                return
+            failures = self._login_failures.get(key, (0, None))[0] + 1
+            until = self._now() + LOGIN_BACKOFF if failures >= LOGIN_FAILURES_BEFORE_BACKOFF else None
+            self._login_failures[key] = (failures, until)
+
     def _drop_session(self) -> None:
         with self._state:
             self._session = None
@@ -318,18 +348,21 @@ class GradesService:
         timeout: float,
         generation: int,
     ) -> T:
-        """Run `operation` on a session. A transient failure gets one retry on a fresh login; a login
-        rejection is never retried and is remembered until the credentials change."""
+        """Run `operation` on a session. Only an operation that failed on a *reused* session gets one
+        retry on a fresh login (the session may simply be stale). A failed login is never retried."""
         started = time.monotonic()
         result = "ok"
         try:
             try:
                 return await self._attempt(username, password, operation, timeout, generation)
-            except GradesError as error:
-                if error.code != GRADES_UNAVAILABLE or self._current_generation() != generation:
-                    raise
+            except _AttemptFailed as failed:
+                if not failed.retry or self._current_generation() != generation:
+                    raise failed.error from None
             self._drop_session()
-            return await self._attempt(username, password, operation, timeout, generation)
+            try:
+                return await self._attempt(username, password, operation, timeout, generation)
+            except _AttemptFailed as failed:
+                raise failed.error from None
         except GradesError as error:
             result = error.code
             raise
@@ -347,30 +380,54 @@ class GradesService:
         timeout: float,
         generation: int,
     ) -> T:
+        reused = self._session_for(username) is not None
+        step = "operation" if reused else "login"
+        login_recorded = False
+
         async def run() -> T:
+            nonlocal step, login_recorded
             session = self._session_for(username)
             if session is None:
-                session = await self._worker.run(self._gateway.login(username, password))
+                if self._login_paused(username, generation):
+                    raise GradesError(GRADES_UNAVAILABLE)  # backing off: no gateway call
+                step = "login"
+                try:
+                    session = await self._worker.run(self._gateway.login(username, password))
+                except Exception:
+                    login_recorded = True
+                    self._record_login(username, generation, ok=False)
+                    raise
+                self._record_login(username, generation, ok=True)
                 with self._state:
                     if self._generation == generation:
                         self._session = (username, session)
+            step = "operation"
             return await operation(session)
 
         try:
             return await asyncio.wait_for(run(), timeout)
-        except GradesError as error:
-            self._drop_session()  # any failure: the next attempt logs in fresh
+        except asyncio.CancelledError:
+            self._drop_session()
+            raise
+        except Exception as raised:  # GradesError, a timeout or an unexpected gateway error
+            self._drop_session()
+            error = raised if isinstance(raised, GradesError) else GradesError(GRADES_UNAVAILABLE)
+            if isinstance(raised, TimeoutError) and step == "login" and not login_recorded:
+                self._record_login(username, generation, ok=False)  # a login that timed out counts as a failed login
             if error.code == GRADES_LOGIN_REJECTED:
                 with self._state:
                     if self._generation == generation:
                         self._rejected = (username, generation)
-            raise
-        except asyncio.CancelledError:
-            self._drop_session()
-            raise
-        except Exception:  # noqa: BLE001 - timeout or an unexpected gateway error; the cause is never kept
-            self._drop_session()
-            raise GradesError(GRADES_UNAVAILABLE) from None
+            raise _AttemptFailed(error, retry=error.code == GRADES_UNAVAILABLE and step == "operation" and reused) from None
+
+
+class _AttemptFailed(Exception):
+    """One attempt's failure: the `GradesError` to surface, and whether a fresh-login retry makes sense."""
+
+    def __init__(self, error: GradesError, *, retry: bool) -> None:
+        super().__init__(error.code)
+        self.error = error
+        self.retry = retry
 
 
 def _stamp(overview: GradesOverview, fetched_at: str) -> GradesOverview:

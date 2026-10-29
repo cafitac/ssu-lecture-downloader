@@ -235,18 +235,18 @@ def test_a_failure_on_a_reused_session_retries_once_with_a_fresh_login(tmp_path)
     assert env.gateway.overview_sessions[1] is not env.gateway.overview_sessions[2]
 
 
-def test_a_transient_failure_on_a_fresh_login_is_retried_once_with_another_login(tmp_path):
+def test_an_operation_failure_on_a_fresh_login_is_not_retried(tmp_path):
     env = Env(tmp_path)
     env.gateway.overview_errors = [GradesError("grades_unavailable")]
-    run(env.service.overview())
-    assert env.gateway.logins == ["alice", "alice"] and env.gateway.overview_calls == 2
-
-
-def test_two_transient_failures_in_a_row_give_up(tmp_path):
-    env = Env(tmp_path)
-    env.gateway.overview_errors = [GradesError("grades_unavailable")] * 2
     assert code_of(env.service.overview()) == "grades_unavailable"
-    assert env.gateway.logins == ["alice", "alice"] and env.gateway.overview_calls == 2
+    assert env.gateway.logins == ["alice"] and env.gateway.overview_calls == 1
+
+
+def test_a_failed_login_is_never_retried_within_one_request(tmp_path):
+    env = Env(tmp_path)
+    env.gateway.login_error = GradesError("grades_unavailable")
+    assert code_of(env.service.overview()) == "grades_unavailable"
+    assert env.gateway.logins == ["alice"]
 
 
 def test_the_retry_gives_up_after_one_attempt(tmp_path):
@@ -269,10 +269,10 @@ def test_a_slow_u_saint_times_out_as_unavailable_and_drops_the_session(tmp_path)
     env = Env(tmp_path)
     env.gateway.delay = 2.0
     assert code_of(env.service.overview()) == "grades_unavailable"
-    assert env.gateway.logins == ["alice", "alice"]  # the attempt and its one retry both timed out
+    assert env.gateway.logins == ["alice"]  # the login timed out; a failed login is not retried
     env.gateway.delay = 0
     run(env.service.overview())
-    assert env.gateway.logins == ["alice", "alice", "alice"]
+    assert env.gateway.logins == ["alice", "alice"]
 
 
 def test_an_unexpected_gateway_exception_becomes_a_code_without_its_message(tmp_path, caplog):
@@ -392,12 +392,14 @@ def test_a_waiter_queued_across_a_consent_revoke_makes_no_gateway_call(tmp_path)
 
 def test_no_retry_login_after_a_clear_during_the_failed_attempt(tmp_path):
     env = Env(tmp_path)
-    env.gateway.delay = 0.05
+    run(env.service.overview())  # a reusable session: the only case that would retry
+    env.clock.advance(seconds=5)
+    env.gateway.delay = 0.1
     env.gateway.overview_errors = [GradesError("grades_unavailable")]
 
     async def go():
-        task = asyncio.create_task(env.service.overview())
-        await asyncio.sleep(0.07)  # inside the (failing) overview call, after the login
+        task = asyncio.create_task(env.service.overview(refresh=True))
+        await asyncio.sleep(0.04)  # inside the (failing) overview call, after the login
         env.service.clear()
         with pytest.raises(GradesError) as raised:
             await task
@@ -470,7 +472,7 @@ def test_followers_receive_a_transient_failure_too(tmp_path):
 
     results = run(go())
     assert [r.code for r in results] == ["grades_unavailable"] * 3
-    assert env.gateway.logins == ["alice", "alice"]  # one attempt + one retry, shared by all three
+    assert env.gateway.logins == ["alice"]  # one attempt, shared by all three
 
 
 def test_a_cancelled_leader_does_not_strand_its_followers(tmp_path):
@@ -535,3 +537,96 @@ def test_a_blocking_gateway_does_not_block_the_caller_loop_and_the_timeout_still
     gaps = [b - a for a, b in zip(ticks, ticks[1:], strict=False)]
     assert max(gaps) < 0.3
     env.service.close()
+
+
+# ---- login-failure backoff (review cycle 2) ------------------------------------------------------------
+
+
+def clicking(env, times):
+    """Sequential "다시 시도" clicks (refresh, so a cached snapshot never answers); returns the codes."""
+    codes = []
+    for _ in range(times):
+        with pytest.raises(GradesError) as raised:
+            run(env.service.overview(refresh=True))
+        codes.append(raised.value.code)
+    return codes
+
+
+def test_a_wrong_password_costs_at_most_two_logins_per_window_and_one_per_click(tmp_path):
+    env = Env(tmp_path)
+    env.gateway.login_error = GradesError("grades_unavailable")  # what the real gateway raises for any login failure
+    seen = []
+    for _ in range(5):
+        before = len(env.gateway.logins)
+        clicking(env, 1)
+        seen.append(len(env.gateway.logins) - before)
+    assert seen == [1, 1, 0, 0, 0]
+    assert len(env.gateway.logins) == 2
+
+
+def test_the_backoff_ends_after_five_minutes(tmp_path):
+    env = Env(tmp_path)
+    env.gateway.login_error = GradesError("grades_unavailable")
+    clicking(env, 3)
+    env.clock.advance(minutes=4, seconds=59)
+    clicking(env, 1)
+    assert len(env.gateway.logins) == 2
+    env.clock.advance(seconds=2)
+    clicking(env, 1)
+    assert len(env.gateway.logins) == 3  # a fresh budget after the pause
+    clicking(env, 1)
+    assert len(env.gateway.logins) == 4
+    clicking(env, 1)
+    assert len(env.gateway.logins) == 4
+
+
+def test_clear_lifts_the_backoff(tmp_path):
+    env = Env(tmp_path)
+    env.gateway.login_error = GradesError("grades_unavailable")
+    clicking(env, 3)
+    assert len(env.gateway.logins) == 2
+    env.service.clear()  # changed credentials, logout or revoke
+    clicking(env, 1)
+    assert len(env.gateway.logins) == 3
+
+
+def test_a_successful_login_resets_the_failure_count(tmp_path):
+    env = Env(tmp_path)
+    env.gateway.login_error = GradesError("grades_unavailable")
+    clicking(env, 1)  # failure 1 -> logins 1
+    env.gateway.login_error = None
+    env.service._session = None
+    run(env.service.overview(refresh=True))  # success resets the count -> logins 2
+    env.clock.advance(seconds=5)
+    env.service._session = None
+    env.gateway.login_error = GradesError("grades_unavailable")
+    clicking(env, 2)  # failure 1 again, then failure 2: both reach the gateway
+    assert len(env.gateway.logins) == 4
+    clicking(env, 1)  # now paused
+    assert len(env.gateway.logins) == 4
+
+
+def test_a_login_timeout_counts_as_a_failed_login(tmp_path):
+    env = Env(tmp_path)
+    env.gateway.delay = 2.0  # the 0.5 s timeout hits while logging in
+    clicking(env, 3)
+    assert len(env.gateway.logins) == 2
+
+
+def test_the_backoff_is_per_account(tmp_path):
+    env = Env(tmp_path)
+    env.gateway.login_error = GradesError("grades_unavailable")
+    clicking(env, 3)
+    env.pair = ("bob", "pw-b")
+    env.service.clear()
+    clicking(env, 1)
+    assert env.gateway.logins == ["alice", "alice", "bob"]
+
+
+def test_an_operation_failure_does_not_count_as_a_login_failure(tmp_path):
+    env = Env(tmp_path)
+    for _ in range(4):
+        env.gateway.overview_errors = [GradesError("grades_unavailable")]
+        env.service._session = None
+        clicking(env, 1)
+    assert len(env.gateway.logins) == 4  # successful logins every time, never paused
