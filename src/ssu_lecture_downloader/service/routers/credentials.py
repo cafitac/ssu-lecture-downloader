@@ -42,12 +42,15 @@ def build_router(ctx: AppContext) -> APIRouter:
         if not username or not password:
             raise HTTPException(status_code=400, detail={"ok": False, "error_code": "invalid_credentials_payload"})
         current = credentials.get()
-        if current is None or (current.username, current.password) != (username, password):
+        changed = current is None or (current.username, current.password) != (username, password)
+        if changed:
             # Same credentials keep their LMS session and caches instead of logging in again.
             clear_service_cache(service)
             ctx.grades.clear()  # grade data and the u-SAINT session never outlive the account they belong to
         login_or_raise(username, password)
         credentials.save(CredentialPair(username=username, password=password))
+        if changed:
+            ctx.grades.clear()  # again after the save: a grades request that read the old pair meanwhile must not be kept
         return {"ok": True, **credentials.status()}
 
     @router.delete("/api/credentials")

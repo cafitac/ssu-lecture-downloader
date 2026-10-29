@@ -128,24 +128,31 @@ def test_the_library_is_loaded_lazily_and_once():
     assert loads == [1]
 
 
-@pytest.mark.parametrize(
-    ("message", "code"),
-    [
-        ("login failed: session ID not assigned, got ''", "grades_login_rejected"),
-        ("Login Failed", "grades_login_rejected"),
-        ("NetworkError: failed to lookup address information", "grades_unavailable"),
-        ("failed to parse update document", "grades_unavailable"),
-        ("", "grades_unavailable"),
-    ],
-)
-def test_login_errors_map_to_a_code_and_never_carry_the_message(message, code, caplog):
+# Exact strings found in rusaint 0.16.3's librusaint_ffi (`strings`), none of which identifies a wrong password:
+# "login failed: session ID not assigned, got " and "OZ login failed: " belong to the OZ report engine,
+# "Failed to login with ssu sso: " wraps every SSO failure, the rest are transport/parse errors.
+LIBRARY_LOGIN_STRINGS = [
+    "login failed: session ID not assigned, got ",
+    "OZ login failed: ",
+    "Failed to login with ssu sso: ",
+    "Failed to login with ssu sso: Token is not included in response: ",
+    "Failed to login with ssu sso: Request error: ",
+    "WAF cookie not found in portal response",
+    "failed to lookup address information: ",
+    "failed to parse update document",
+    "",
+]
+
+
+@pytest.mark.parametrize("message", LIBRARY_LOGIN_STRINGS)
+def test_every_login_failure_is_unavailable_and_never_carries_the_message(message, caplog):
     caplog.set_level(logging.DEBUG)
-    module, _ = fake_rusaint([], login_error=RusaintError(f"{message} {SENTINEL_EXCEPTION}"))
+    module, _ = fake_rusaint([], login_error=RusaintError(f"{message}{SENTINEL_EXCEPTION}"))
     gateway = RusaintGateway(lambda: module)
     with pytest.raises(GradesError) as raised:
         run(gateway.login(SENTINEL_USER, SENTINEL_PASSWORD))
     error = raised.value
-    assert error.code == code
+    assert error.code == "grades_unavailable"  # no confirmed wrong-password signal exists (O7)
     assert error.__cause__ is None and error.__suppress_context__ is True
     assert SENTINEL_EXCEPTION not in str(error) + repr(error) + caplog.text
 

@@ -7,8 +7,9 @@
   `CourseGradesApplicationBuilder.build`, `CourseType.BACHELOR`, `SemesterType`, and the application's
   `semesters / recorded_summary / certificated_summary / classes(include_details=False)`.
   `tests/grades/test_read_only_guard.py` enforces this list.
-- Every rusaint exception is converted to `GradesError(code) from None`: its message is read only to
-  pick a code (see `_is_login_rejection`) and is never logged, returned, or chained.
+- Every rusaint exception is converted to `GradesError(code) from None`; its message is never read,
+  logged, returned, or chained.
+- The service runs these coroutines on a dedicated worker thread (see worker.py), never on the API loop.
 """
 
 from __future__ import annotations
@@ -20,7 +21,6 @@ from typing import Any, Protocol
 
 from ssu_lecture_downloader.core.grades import mapper
 from ssu_lecture_downloader.core.grades.models import (
-    GRADES_LOGIN_REJECTED,
     GRADES_UNAVAILABLE,
     SEMESTER_NAMES,
     ClassList,
@@ -29,12 +29,6 @@ from ssu_lecture_downloader.core.grades.models import (
 )
 
 logger = logging.getLogger("ssu_lecture_downloader.grades")
-
-# rusaint reports a refused u-SAINT password login as "login failed: session ID not assigned, ...".
-# This marker comes from the library's strings, not from a live wrong-password probe (not run on
-# purpose: it could lock the account). Anything not matching is "unavailable", never "rejected".
-_LOGIN_REJECTED_MARKERS = ("login failed", "session id not assigned")
-
 
 class UsaintGateway(Protocol):
     """The port GradesService depends on (a fake implements it in tests)."""
@@ -52,11 +46,6 @@ def _load_rusaint() -> ModuleType:
     import rusaint  # lazy: native library; the only rusaint import in the package
 
     return rusaint
-
-
-def _is_login_rejection(exc: BaseException) -> bool:
-    text = str(exc).lower()  # read here to choose a code only
-    return any(marker in text for marker in _LOGIN_REJECTED_MARKERS)
 
 
 class _Session:
@@ -101,9 +90,11 @@ class RusaintGateway:
         rusaint = self._rusaint()
         try:
             session = await rusaint.USaintSessionBuilder().with_password(username, password)
-        except Exception as exc:  # noqa: BLE001
-            code = GRADES_LOGIN_REJECTED if _is_login_rejection(exc) else GRADES_UNAVAILABLE
-            raise GradesError(code) from None
+        except Exception:  # noqa: BLE001
+            # Every login failure is "unavailable": rusaint 0.16.3 has one error type (`RusaintError.General`)
+            # and no string in the library identifies a wrong-password response (see GR-PY-USAINT record, O7).
+            # `grades_login_rejected` stays part of the contract for when a confirmed signal exists.
+            raise GradesError(GRADES_UNAVAILABLE) from None
         return _Session(session)
 
     async def _app(self, handle: _Session) -> Any:

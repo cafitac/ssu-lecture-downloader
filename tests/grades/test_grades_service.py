@@ -133,6 +133,30 @@ def test_a_refresh_that_waited_behind_a_fetch_is_served_by_that_fetch(tmp_path):
     assert first is second and env.gateway.overview_calls == 1
 
 
+def test_classes_live_and_die_with_the_overview_snapshot(tmp_path):
+    env = Env(tmp_path)
+    run(env.service.classes(2025, "ONE"))  # creates the snapshot at t0
+    env.clock.advance(minutes=20)
+    run(env.service.overview())  # joins the same snapshot (it has no overview yet)
+    env.clock.advance(minutes=9)
+    run(env.service.classes(2025, "ONE"))
+    assert len(env.gateway.classes_calls) == 1 and env.gateway.overview_calls == 1
+    env.clock.advance(minutes=2)  # 31 minutes after the snapshot began: everything in it expires together
+    assert env.service.status().fetched_at is None
+    run(env.service.classes(2025, "ONE"))
+    assert len(env.gateway.classes_calls) == 2
+
+
+def test_an_overview_refresh_replaces_the_snapshot_and_its_classes(tmp_path):
+    env = Env(tmp_path)
+    run(env.service.overview())
+    run(env.service.classes(2025, "ONE"))
+    env.clock.advance(seconds=5)
+    run(env.service.overview(refresh=True))
+    run(env.service.classes(2025, "ONE"))
+    assert len(env.gateway.classes_calls) == 2
+
+
 def test_classes_are_cached_per_semester(tmp_path):
     env = Env(tmp_path)
 
@@ -211,11 +235,18 @@ def test_a_failure_on_a_reused_session_retries_once_with_a_fresh_login(tmp_path)
     assert env.gateway.overview_sessions[1] is not env.gateway.overview_sessions[2]
 
 
-def test_a_failure_on_a_fresh_login_is_not_retried(tmp_path):
+def test_a_transient_failure_on_a_fresh_login_is_retried_once_with_another_login(tmp_path):
     env = Env(tmp_path)
-    env.gateway.overview_errors = [GradesError("grades_unavailable"), GradesError("grades_unavailable")]
+    env.gateway.overview_errors = [GradesError("grades_unavailable")]
+    run(env.service.overview())
+    assert env.gateway.logins == ["alice", "alice"] and env.gateway.overview_calls == 2
+
+
+def test_two_transient_failures_in_a_row_give_up(tmp_path):
+    env = Env(tmp_path)
+    env.gateway.overview_errors = [GradesError("grades_unavailable")] * 2
     assert code_of(env.service.overview()) == "grades_unavailable"
-    assert env.gateway.logins == ["alice"] and env.gateway.overview_calls == 1
+    assert env.gateway.logins == ["alice", "alice"] and env.gateway.overview_calls == 2
 
 
 def test_the_retry_gives_up_after_one_attempt(tmp_path):
@@ -238,9 +269,10 @@ def test_a_slow_u_saint_times_out_as_unavailable_and_drops_the_session(tmp_path)
     env = Env(tmp_path)
     env.gateway.delay = 2.0
     assert code_of(env.service.overview()) == "grades_unavailable"
+    assert env.gateway.logins == ["alice", "alice"]  # the attempt and its one retry both timed out
     env.gateway.delay = 0
     run(env.service.overview())
-    assert env.gateway.logins == ["alice", "alice"]
+    assert env.gateway.logins == ["alice", "alice", "alice"]
 
 
 def test_an_unexpected_gateway_exception_becomes_a_code_without_its_message(tmp_path, caplog):
@@ -293,3 +325,213 @@ def test_the_ttl_is_configurable(tmp_path):
     env.clock.advance(seconds=11)
     run(short.overview())
     assert env.gateway.overview_calls == 2
+
+
+# ---- clear / account switch / revoke while a request is queued (review P2) -----------------------
+
+
+def queued_behind_a_slow_fetch(env, then):
+    """A starts a slow fetch; B queues behind it (captured the current account); `then()` runs; both finish."""
+    env.gateway.delay = 0.05
+
+    async def go():
+        a = asyncio.create_task(env.service.overview())
+        await asyncio.sleep(0.01)
+        b = asyncio.create_task(env.service.overview(refresh=True))  # a different flight than A's
+        await asyncio.sleep(0.01)
+        then()
+        return await asyncio.gather(a, b, return_exceptions=True)
+
+    return run(go())
+
+
+def assert_no_state(env):
+    assert env.service._snapshot is None and env.service._session is None
+
+
+def test_a_waiter_queued_across_an_account_switch_never_logs_in_with_the_old_account(tmp_path):
+    env = Env(tmp_path)
+
+    def switch():
+        env.service.clear()  # what routers/credentials.py does ...
+        env.pair = ("bob", "pw-b")  # ... around saving the new pair
+        env.service.clear()
+
+    a, b = queued_behind_a_slow_fetch(env, switch)
+    assert isinstance(a, GradesError) and isinstance(b, GradesError)
+    assert a.code == b.code == "grades_unavailable"
+    assert env.gateway.logins == ["alice"]  # only A's login, which started before the switch
+    assert_no_state(env)
+    run(env.service.overview())  # the next request is a clean start under the new account
+    assert env.gateway.logins == ["alice", "bob"]
+
+
+def test_a_waiter_queued_across_a_logout_makes_no_gateway_call(tmp_path):
+    env = Env(tmp_path)
+
+    def logout():
+        env.pair = None
+        env.service.clear()
+
+    a, b = queued_behind_a_slow_fetch(env, logout)
+    assert isinstance(a, GradesError) and isinstance(b, GradesError)
+    assert b.code == "missing_credentials"
+    assert env.gateway.logins == ["alice"] and env.gateway.overview_calls <= 1
+    assert_no_state(env)
+
+
+def test_a_waiter_queued_across_a_consent_revoke_makes_no_gateway_call(tmp_path):
+    env = Env(tmp_path)
+    a, b = queued_behind_a_slow_fetch(env, env.service.revoke_consent)
+    assert isinstance(b, GradesError) and b.code == "grades_consent_required"
+    assert isinstance(a, GradesError)
+    assert env.gateway.logins == ["alice"]
+    assert_no_state(env)
+    assert not env.consent.path.exists()
+
+
+def test_no_retry_login_after_a_clear_during_the_failed_attempt(tmp_path):
+    env = Env(tmp_path)
+    env.gateway.delay = 0.05
+    env.gateway.overview_errors = [GradesError("grades_unavailable")]
+
+    async def go():
+        task = asyncio.create_task(env.service.overview())
+        await asyncio.sleep(0.07)  # inside the (failing) overview call, after the login
+        env.service.clear()
+        with pytest.raises(GradesError) as raised:
+            await task
+        return raised.value.code
+
+    assert run(go()) == "grades_unavailable"
+    assert env.gateway.logins == ["alice"]  # no second login for the retry
+    assert_no_state(env)
+
+
+# ---- shared single-flight outcomes and the rejection memory (review P3) ---------------------------
+
+
+def rejecting(env):
+    env.gateway.login_error = GradesError("grades_login_rejected")
+    env.gateway.delay = 0.05
+
+
+def test_concurrent_requests_during_a_rejected_login_cause_one_login(tmp_path):
+    env = Env(tmp_path)
+    rejecting(env)
+
+    async def go():
+        return await asyncio.gather(*[env.service.overview() for _ in range(4)], return_exceptions=True)
+
+    results = run(go())
+    assert [r.code for r in results] == ["grades_login_rejected"] * 4
+    assert env.gateway.logins == ["alice"]
+
+
+def test_a_rejection_is_remembered_until_the_credentials_change(tmp_path):
+    env = Env(tmp_path)
+    rejecting(env)
+    assert code_of(env.service.overview()) == "grades_login_rejected"
+    for _ in range(3):  # "다시 시도", refresh, and the classes of a semester
+        assert code_of(env.service.overview(refresh=True)) == "grades_login_rejected"
+        assert code_of(env.service.classes(2025, "ONE")) == "grades_login_rejected"
+    assert env.gateway.logins == ["alice"]
+    env.service.clear()  # changed credentials / logout / revoke
+    env.gateway.login_error = None
+    run(env.service.overview())
+    assert env.gateway.logins == ["alice", "alice"]
+
+
+def test_a_rejection_does_not_stick_to_another_account(tmp_path):
+    env = Env(tmp_path)
+    rejecting(env)
+    code_of(env.service.overview())
+    env.pair = ("bob", "pw-b")
+    env.service.clear()
+    env.gateway.login_error = None
+    run(env.service.overview())
+    assert env.gateway.logins == ["alice", "bob"]
+
+
+def test_a_rejected_login_is_never_retried_within_one_request(tmp_path):
+    env = Env(tmp_path)
+    env.gateway.login_error = GradesError("grades_login_rejected")
+    assert code_of(env.service.overview()) == "grades_login_rejected"
+    assert env.gateway.logins == ["alice"]
+
+
+def test_followers_receive_a_transient_failure_too(tmp_path):
+    env = Env(tmp_path)
+    env.gateway.delay = 0.05
+    env.gateway.overview_errors = [GradesError("grades_unavailable")] * 2
+
+    async def go():
+        return await asyncio.gather(*[env.service.overview() for _ in range(3)], return_exceptions=True)
+
+    results = run(go())
+    assert [r.code for r in results] == ["grades_unavailable"] * 3
+    assert env.gateway.logins == ["alice", "alice"]  # one attempt + one retry, shared by all three
+
+
+def test_a_cancelled_leader_does_not_strand_its_followers(tmp_path):
+    env = Env(tmp_path)
+    env.gateway.delay = 0.2
+
+    async def go():
+        leader = asyncio.create_task(env.service.overview())
+        await asyncio.sleep(0.02)
+        follower = asyncio.create_task(env.service.overview())
+        await asyncio.sleep(0.02)
+        leader.cancel()
+        outcome = await asyncio.gather(follower, return_exceptions=True)
+        return outcome[0]
+
+    outcome = run(go())
+    assert isinstance(outcome, GradesError) and outcome.code == "grades_unavailable"
+
+
+# ---- the gateway runs off the API loop (O4 fallback, review P3) ------------------------------------
+
+
+def test_gateway_coroutines_run_on_a_worker_thread_not_the_caller(tmp_path):
+    import threading
+
+    env = Env(tmp_path)
+    caller = {}
+
+    async def go():
+        caller["id"] = threading.get_ident()
+        await env.service.overview()
+
+    run(go())
+    assert env.gateway.threads and caller["id"] not in env.gateway.threads
+    assert len(env.gateway.threads) == 1  # one dedicated thread for everything
+
+
+def test_a_blocking_gateway_does_not_block_the_caller_loop_and_the_timeout_still_applies(tmp_path):
+    import time
+
+    env = Env(tmp_path)
+    env.gateway.blocking = 1.0
+
+    async def go():
+        ticks = []
+
+        async def ticker():
+            for _ in range(8):
+                await asyncio.sleep(0.05)
+                ticks.append(time.monotonic())
+
+        started = time.monotonic()
+        tick = asyncio.create_task(ticker())
+        with pytest.raises(GradesError) as raised:
+            await env.service.overview()
+        await tick
+        return raised.value.code, time.monotonic() - started, ticks
+
+    code, elapsed, ticks = run(go())
+    assert code == "grades_unavailable"
+    assert len(ticks) == 8  # the loop kept turning while the worker was stuck
+    gaps = [b - a for a, b in zip(ticks, ticks[1:], strict=False)]
+    assert max(gaps) < 0.3
+    env.service.close()

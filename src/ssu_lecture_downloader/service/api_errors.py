@@ -54,6 +54,7 @@ GRADES_ERROR_CODES = frozenset(
         "grades_unavailable",  # 503
         "invalid_consent_version",  # 400
         "invalid_semester",  # 400
+        "invalid_year",  # 400
     }
 )
 

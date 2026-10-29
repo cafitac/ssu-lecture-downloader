@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import threading
+import time
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
@@ -117,12 +119,15 @@ class FakeGateway:
         self.classes_errors: list[Exception] = []
         self.sessions: list[Any] = []
         self.overview_sessions: list[Any] = []
+        self.blocking = 0.0  # a synchronous sleep inside overview(): a gateway that blocks its thread
+        self.threads: set[int] = set()  # thread ids the gateway coroutines ran on
 
     def available(self) -> bool:
         return self._available
 
     async def login(self, username: str, password: str) -> Any:
         self.logins.append(username)
+        self.threads.add(threading.get_ident())
         if self.delay:
             await asyncio.sleep(self.delay)
         if self.login_error is not None:
@@ -133,6 +138,9 @@ class FakeGateway:
 
     async def overview(self, session: Any) -> GradesOverview:
         self.overview_calls += 1
+        self.threads.add(threading.get_ident())
+        if self.blocking:
+            time.sleep(self.blocking)
         self.overview_sessions.append(session)
         if self.delay:
             await asyncio.sleep(self.delay)

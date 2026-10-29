@@ -72,6 +72,8 @@ def create_app(
         yield
         # Backend exit: no Chrome playback window may outlive it.
         for context in contexts:
+            if context.grades is not None:
+                context.grades.close()
             if context.chrome_watch is not None:
                 await run_in_threadpool(context.chrome_watch.shutdown)
 

@@ -10,8 +10,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+from fastapi import APIRouter, HTTPException, Request
+from starlette.concurrency import run_in_threadpool
 
 from ssu_lecture_downloader.core.grades.consent import CURRENT_CONSENT_VERSION
 from ssu_lecture_downloader.core.grades.models import SEMESTER_NAMES, GradesError
@@ -21,8 +21,13 @@ from ssu_lecture_downloader.service.app_context import AppContext
 GRADES_PATH_PREFIX = "/api/grades"
 NO_STORE = "no-store"
 
-class ConsentRequest(BaseModel):
-    consent_version: Any = None
+MIN_YEAR, MAX_YEAR = 1900, 2200
+
+
+def _parse_year(value: str | None) -> int:
+    if value is None or not value.isascii() or not value.isdigit() or not MIN_YEAR <= int(value) <= MAX_YEAR:
+        raise _bad_request("invalid_year")
+    return int(value)
 
 
 def _bad_request(code: str) -> HTTPException:
@@ -60,12 +65,17 @@ def build_router(ctx: AppContext) -> APIRouter:
         return {"ok": True, **grades.status().to_dict()}
 
     @router.put("/api/grades/consent")
-    def grant_consent(request: ConsentRequest | None = None) -> dict[str, Any]:
-        version = request.consent_version if request is not None else None
+    async def grant_consent(request: Request) -> dict[str, Any]:
+        # Parsed by hand so a malformed body gets the standard error shape instead of FastAPI's 422.
+        try:
+            payload = await request.json()
+        except ValueError:
+            payload = None
+        version = payload.get("consent_version") if isinstance(payload, dict) else None
         if isinstance(version, bool) or version != CURRENT_CONSENT_VERSION:
             raise _bad_request("invalid_consent_version")
         try:
-            status = grades.grant_consent(version)
+            status = await run_in_threadpool(grades.grant_consent, version)
         except GradesError as error:
             raise grades_error(error) from None
         return {"ok": True, **status.to_dict()}
@@ -89,11 +99,12 @@ def build_router(ctx: AppContext) -> APIRouter:
         return {"ok": True, **overview.to_dict()}
 
     @router.get("/api/grades/classes")
-    async def grades_classes(year: int, semester: str, refresh: bool = False) -> dict[str, Any]:
+    async def grades_classes(year: str | None = None, semester: str | None = None, refresh: bool = False) -> dict[str, Any]:
+        year_number = _parse_year(year)
         if semester not in SEMESTER_NAMES:
             raise _bad_request("invalid_semester")
         try:
-            result = await grades.classes(year, semester, refresh)
+            result = await grades.classes(year_number, semester, refresh)
         except GradesError as error:
             raise grades_error(error) from None
         return {"ok": True, **result.to_dict()}

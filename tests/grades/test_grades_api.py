@@ -12,7 +12,7 @@ from ssu_lecture_downloader.core.grades.models import GradesError
 from ssu_lecture_downloader.service.api_errors import AUTHENTICATION_ERROR_CODES
 
 BASE = "http://127.0.0.1:8000"
-GRADES_ERROR_CODES_EXPECTED = {"grades_consent_required", "grades_login_rejected", "grades_unavailable", "invalid_consent_version", "invalid_semester"}
+GRADES_ERROR_CODES_EXPECTED = {"grades_consent_required", "grades_login_rejected", "grades_unavailable", "invalid_consent_version", "invalid_semester", "invalid_year"}
 
 
 def client(env) -> TestClient:
@@ -290,3 +290,54 @@ def test_importing_the_app_and_serving_health_does_not_import_rusaint():
     result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=60)
     assert result.returncode == 0, result.stdout + result.stderr
 
+
+
+# ---- input validation without FastAPI's 422 echo, and a blocking gateway ------------------------------------
+
+
+@pytest.mark.parametrize("year", ["abc", "20.25", "", "-2025", "２０２５", "1800", "2300", "2025 ", "0x7e9"])
+def test_a_bad_year_is_400_invalid_year_in_the_standard_shape(tmp_path, year):
+    env = make_grades_app(tmp_path, consented=True)
+    response = client(env).get("/api/grades/classes", params={"year": year, "semester": "ONE"})
+    assert response.status_code == 400
+    assert response.json() == {"ok": False, "error_code": "invalid_year"}
+    assert_no_store(response)
+    assert env.gateway.logins == []
+
+
+def test_a_missing_year_or_semester_is_a_400_not_a_422(tmp_path):
+    env = make_grades_app(tmp_path, consented=True)
+    c = client(env)
+    assert c.get("/api/grades/classes", params={"semester": "ONE"}).json() == {"ok": False, "error_code": "invalid_year"}
+    assert c.get("/api/grades/classes", params={"year": 2025}).json() == {"ok": False, "error_code": "invalid_semester"}
+
+
+@pytest.mark.parametrize("content", [b"not json", b"", b"[1]", b'"1"'])
+def test_a_malformed_consent_body_is_400_invalid_consent_version(tmp_path, content):
+    env = make_grades_app(tmp_path)
+    response = client(env).put("/api/grades/consent", content=content, headers={"content-type": "application/json"})
+    assert response.status_code == 400
+    assert response.json() == {"ok": False, "error_code": "invalid_consent_version"}
+    assert not env.consent.path.exists()
+
+
+def test_health_answers_promptly_while_the_gateway_blocks_its_thread(tmp_path):
+    env = make_grades_app(tmp_path, consented=True, overview_timeout=5.0)
+    env.gateway.blocking = 1.0  # time.sleep inside the gateway coroutine
+
+    async def go():
+        transport = httpx.ASGITransport(app=env.app)
+        async with httpx.AsyncClient(transport=transport, base_url=BASE) as http:
+            slow = asyncio.create_task(http.get("/api/grades"))
+            await asyncio.sleep(0.3)  # the worker thread is now stuck in time.sleep
+            timings = []
+            for path in ("/api/health", "/api/terms", "/api/credentials/status"):
+                started = time.monotonic()
+                response = await http.get(path)
+                timings.append((path, response.status_code, time.monotonic() - started))
+            return timings, await slow
+
+    timings, slow_response = asyncio.run(go())
+    assert slow_response.status_code == 200
+    for path, status, elapsed in timings:
+        assert status == 200 and elapsed < 0.5, (path, elapsed)
