@@ -1,0 +1,28 @@
+@startuml update-ui-state
+title Update UI lifecycle (PROPOSED; in-memory only, owned by useAppUpdate)
+[*] --> Idle
+Idle --> Checking : launch ready / 6 h timer / (none while not Idle)
+Checking --> Idle : no update | check error (logged only)
+Checking --> Available : newer version
+Available --> Dismissed : 나중에
+Dismissed --> Checking : 24 h after 나중에 (timer ticks inside the window are skipped)
+Available --> Downloading : 지금 업데이트 [UI busy check passes]
+Available --> Available : 지금 업데이트 [backend job running] / show reason
+Downloading --> Failed : network / signature / disk error
+Downloading --> Guarding : download verified
+Guarding --> Available : Rust guard Refused (watch or native download active) / show reason, discard bytes
+Guarding --> Installing : Allowed -> prepare_for_update (sidecar stopped)
+Installing --> Failed : install error (macOS swap failed / NSIS failed)
+Installing --> Relaunching : install ok
+Relaunching --> [*] : process restart into new version
+Failed --> Available : 다시 시도
+note right of Failed
+  After a failed install the sidecar may be stopped:
+  Failed restarts it via the existing backend_restart command
+  before showing the retry (old app keeps running).
+end note
+note bottom of Checking
+  Only one check or install in flight (single hook instance).
+  Timer cleared on unmount. No state persisted to disk.
+end note
+@enduml

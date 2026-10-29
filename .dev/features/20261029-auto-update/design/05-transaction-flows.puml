@@ -1,0 +1,89 @@
+@startuml update-check-and-install
+title Update check and install (PROPOSED, macOS; Windows identical except installer)
+actor User
+participant "UpdateNotice / useAppUpdate\n(frontend/src)" as UI
+participant "Rust commands\nupdate_install_guard / prepare_for_update\n(src-tauri/src/update.rs)" as RS
+participant "BackendManager (backend.rs)\n-> platform::terminate_process_group\n(src/platform/macos.rs; Windows stub until sibling S2)" as BE
+participant "updater plugin" as UP
+participant "process plugin" as PP
+participant "GitHub Releases\ncafitac/ssu-lecture-downloader (public)" as GH
+
+== Check: on launch, then every 6 h ==
+UI -> UP : check()
+UP -> GH : GET releases/latest/download/latest.json (HTTPS, anonymous)
+alt offline / 404 / rate limit / parse error
+  GH --> UP : error
+  UP --> UI : error
+  note right of UI : log only; state stays IDLE; next check in 6 h
+else version <= current
+  UP --> UI : null
+else newer version for this platform key (darwin-x86_64)
+  UP --> UI : Update{version, notes, date}
+  UI -> User : notice "새 버전 x.y.z" [지금 업데이트] [나중에]
+end
+
+== Install: only after the user's click ==
+User -> UI : 지금 업데이트
+UI -> UI : UI busy check (tracked backend jobs: download / convert / STT)
+alt backend job running
+  UI -> User : "작업이 끝난 뒤 업데이트할 수 있어요" (retry)
+else free
+  UI -> UP : download(onProgress)
+  UP -> GH : GET .app.tar.gz (+ .sig from latest.json)
+  UP -> UP : verify minisign signature with embedded pubkey
+  alt signature invalid / network error
+    UP --> UI : error
+    UI -> User : Korean error + retry; old app untouched
+  else verified
+    UI -> RS : update_install_guard()
+    RS -> RS : watch_queue.is_active() || external_active() || native download running?
+    alt busy
+      RS --> UI : Refused(reason)
+      UI -> User : "자동 시청/다운로드가 끝난 뒤 업데이트할 수 있어요"
+      note right of UI : downloaded bytes discarded; next click re-downloads
+    else idle
+      RS --> UI : Allowed
+      UI -> RS : prepare_for_update()
+      RS -> RS : watch_runtime::shutdown (no-op: guard proved idle)
+RS -> BE : shutdown()  (idempotent; platform::terminate_process_group on the owned sidecar group)
+      RS --> UI : ok
+      UI -> UP : install()
+      UP -> UP : macOS: atomic swap of /Applications/...app\nWindows: run NSIS -setup.exe /P (passive)
+      UI -> PP : relaunch()
+      PP -> PP : exit handler (watch_runtime::shutdown, shutdown_backend — no-op now)\nstart new version
+    end
+  end
+end
+@enduml
+
+@startuml release-publication
+title Release publication (PROPOSED; only the user starts it)
+actor User
+participant "release.yml\n(same public repo; workflow permissions contents: read)" as WF
+participant "verify-version" as VV
+participant "build-macos (macos-15-intel, contents: write)\n[sprint-2: + build-windows]" as BM
+participant "tauri-action@v1" as TA
+participant "GitHub Releases\ncafitac/ssu-lecture-downloader (public)" as GH
+participant "finalize (contents: write)" as FN
+
+User -> WF : push tag v<x.y.z> or workflow_dispatch(version)
+WF -> VV : tag == tauri.conf.json == Cargo.toml == package.json == pyproject.toml ?
+alt mismatch
+  VV --> WF : fail (nothing built, nothing uploaded)
+else match
+  WF -> BM : run
+  BM -> BM : uv sync; npm ci; npm run build:backend-sidecar (PyInstaller first)
+  BM -> TA : tauri build + sign (TAURI_SIGNING_PRIVATE_KEY[_PASSWORD])\nsame repo (no owner/repo override), GITHUB_TOKEN,\nreleaseDraft = true, uploadUpdaterJson = true
+  TA -> GH : create/append DRAFT release v<x.y.z>: .dmg, .app.tar.gz, .sig, latest.json
+  note right of GH : draft = invisible to latest/download
+  WF -> FN : needs: all build jobs succeeded
+  FN -> GH : read draft latest.json
+  FN -> FN : every expected platform key present\n(darwin-x86_64 [, windows-x86_64]) with non-empty signature + url
+  alt incomplete
+    FN --> WF : fail; draft stays unpublished (user deletes or re-runs)
+  else complete
+    FN -> GH : publish draft (draft=false, make_latest=true)
+    note right of GH : clients see the new latest.json from now on
+  end
+end
+@enduml
