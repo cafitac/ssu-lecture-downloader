@@ -610,6 +610,136 @@ const progress = await import('../src/lib/progress.ts');
   }
 }
 
+// Per-lecture pipeline: waiting states, per-lecture outcomes, weighted progress (PL-UI-STATES, AC7/AC8).
+{
+  const { buildJobRows, summarizeRows, readPipelineSummary } = await import('../src/lib/jobItems.ts');
+  const { describeErrorCode } = await import('../src/lib/errors.ts');
+  const item = (id) => ({ id: String(id), rawId: id, title: `강의 ${id}`, sizeBytes: 100 });
+  const job = (status, events, extra = {}) => ({ job_id: 'artifact-1', status, cancel_requested: false, progress: events, result: null, error_code: null, ...extra });
+  const txtPlan = { courseId: 1, courseName: 'c', kind: 'video', outputs: ['mp3', 'txt'], items: [item(1), item(2), item(3)] };
+  const mp3Plan = { ...txtPlan, outputs: ['mp3'] };
+  const rowsOf = (plan, events, extra) => buildJobRows(plan, job('running', events, extra));
+  const one = (plan, events, extra) => rowsOf({ ...plan, items: [item(1)] }, events, extra)[0];
+  const ev = (stage, extra = {}) => ({ stage, module_item_id: 1, ...extra });
+
+  // Old backend (today's stages only): a finished download is "waiting for audio", never "받는 중 100%".
+  let rows = rowsOf(txtPlan, [
+    ev('download_done'), { stage: 'download_done', module_item_id: 2 }, { stage: 'artifact_audio_started', total: 3 },
+    ev('extracting_audio'), ev('audio_progress', { progress_percent: 40 }),
+  ]);
+  assert.deepEqual(rows.map((row) => [row.phase, row.label, row.percent]), [['extracting', '음성 추출 중', 40], ['waiting_audio', '음성 추출 대기 중', null], ['waiting', '대기', null]]);
+  // Audio finished, subtitles not started: "자막 대기 중", not "자막 만드는 중 0%".
+  let row = one(txtPlan, [ev('download_done'), ev('extracting_audio'), ev('audio_done')]);
+  assert.deepEqual([row.phase, row.label, row.percent], ['waiting_transcript', '자막 대기 중', null]);
+  row = one(txtPlan, [ev('download_done'), ev('audio_done'), ev('transcribing'), ev('transcript_started')]);
+  assert.deepEqual([row.phase, row.label, row.percent, row.note], ['transcribing', '자막 만드는 중', 10, undefined]);
+  // MP3 only: audio done is done; MP4 only: unchanged ("받는 중" until the item is finished).
+  assert.equal(one(mp3Plan, [ev('download_done'), ev('audio_done')]).phase, 'done');
+  assert.deepEqual([one({ ...txtPlan, outputs: ['mp4'] }, [ev('download_progress', { bytes_written: 5, total_bytes: 10 })], { job_id: 'abc' }).phase], ['downloading']);
+  // Playable check of a native video before the audio step.
+  assert.equal(one(txtPlan, [ev('download_done'), ev('video_playable_check_started')], { job_id: 'native-1' }).phase, 'verifying');
+  assert.equal(one(txtPlan, [ev('download_done'), ev('video_playable_check_done')], { job_id: 'native-1' }).phase, 'waiting_audio');
+
+  // New backend: copy of every waiting state in design/09 § 화면 문구.
+  assert.deepEqual(rowsOf(txtPlan, [{ stage: 'artifact_item_queued', module_item_id: 2, at: 1 }])[1].label, '대기');
+  row = one(txtPlan, [ev('download_done', { at: 1 }), ev('audio_waiting', { at: 2 })]);
+  assert.deepEqual([row.phase, row.label], ['waiting_audio', '음성 추출 대기 중']);
+  row = one(txtPlan, [ev('audio_done'), ev('transcript_waiting', { reason: 'local_engine' })]);
+  assert.deepEqual([row.phase, row.label, row.note], ['waiting_transcript', '자막 대기 중', undefined]);
+  row = one(txtPlan, [ev('audio_done'), ev('transcript_waiting', { reason: 'server_busy', ahead_requests: 2 })]);
+  assert.deepEqual([row.label, row.note], ['자막 서버 응답 기다리는 중', '먼저 보낸 요청 2개']);
+  assert.equal(one(txtPlan, [ev('audio_done'), ev('transcript_waiting', { reason: 'server_busy' })]).note, undefined);
+  row = one(txtPlan, [ev('audio_done'), ev('transcript_waiting', { reason: 'server_deferred', retry_after_seconds: 12 })]);
+  assert.equal(row.label, '자막 대기 중 (서버가 잠시 미룸)');
+  row = one(txtPlan, [ev('audio_done'), ev('transcript_queued', { queue_position: 3, job_id: 'j1' })]);
+  assert.equal(row.label, '자막 대기 중 (3번째)');
+  row = one(txtPlan, [ev('audio_done'), ev('transcript_queued', { queue_position: 3 }), ev('transcript_queued', { queue_position: 1 })]);
+  assert.equal(row.label, '자막 대기 중 (1번째)');
+  // A reason this app does not know is a plain wait.
+  assert.equal(one(txtPlan, [ev('audio_done'), ev('transcript_waiting', { reason: 'something_new' })]).label, '자막 대기 중');
+  // The turn comes: waiting text goes away; estimated percent reads "약 n%" only when flagged.
+  row = one(txtPlan, [ev('audio_done'), ev('transcript_waiting', { reason: 'server_busy', ahead_requests: 1 }), ev('transcribing', { remote: true }), ev('transcript_progress', { remote: true, progress_percent: 37.4, progress_estimated: true })]);
+  assert.deepEqual([row.phase, row.label, row.note, row.percent, row.estimated], ['transcribing', '자막 만드는 중 (원격)', undefined, 37, true]);
+  row = one(txtPlan, [ev('transcript_progress', { remote: true, progress_percent: 60 })]);
+  assert.equal(row.estimated, undefined);
+
+  // One lecture finishes, one fails (its own copy), the third keeps going.
+  rows = rowsOf(txtPlan, [
+    ev('transcript_done'), ev('artifact_item_done'),
+    { stage: 'audio_progress', module_item_id: 2, progress_percent: 10 },
+    { stage: 'artifact_item_failed', module_item_id: 2, error_code: 'stt_remote_job_lost', failed_stage: 'transcript' },
+    { stage: 'transcript_progress', module_item_id: 2, progress_percent: 90 },
+    { stage: 'download_progress', module_item_id: 3, bytes_written: 10, total_bytes: 100 },
+  ]);
+  assert.deepEqual(rows.map((row) => row.phase), ['done', 'failed', 'downloading']);
+  assert.equal(rows[1].reason, '자막 서버에서 작업을 찾지 못했어요. 다시 시도해 주세요.');
+  assert.equal(rows[1].reasonCode, 'stt_remote_job_lost');
+  assert.equal(rows[1].percent, null, 'events after artifact_item_failed cannot revive the row');
+  assert.equal(summarizeRows(rows).running, true);
+  rows = rowsOf(txtPlan, [ev('audio_waiting'), ev('artifact_item_cancelled'), { stage: 'audio_progress', module_item_id: 1, progress_percent: 5 }]);
+  assert.equal(rows[0].phase, 'cancelled');
+  // Cancelling a job also cancels rows that are only waiting.
+  assert.deepEqual(buildJobRows(txtPlan, job('cancelled', [ev('download_done'), ev('audio_done')])).map((row) => row.phase), ['cancelled', 'cancelled', 'cancelled']);
+
+  // Final lists of a finished job win, even when the early events were compacted away.
+  const items_status = [
+    { module_item_id: 1, state: 'done' },
+    { module_item_id: 2, state: 'failed', error_code: 'stt_remote_upload_too_large', failed_stage: 'transcript' },
+    { module_item_id: 3, state: 'cancelled' },
+  ];
+  const summary = { total: 3, succeeded: 1, failed: 1, cancelled: 1 };
+  const finished = job('failed', [], { error_code: 'partial_failure', result: { ok: false, error_code: 'partial_failure', download: { items: [] }, artifacts: [], progress: [], summary, items_status } });
+  rows = buildJobRows(txtPlan, finished);
+  assert.deepEqual(rows.map((row) => row.phase), ['done', 'failed', 'cancelled']);
+  assert.equal(rows[1].reason, '음성 파일이 서버 허용 크기보다 커요.');
+  assert.deepEqual(readPipelineSummary(finished), summary);
+  assert.equal(readPipelineSummary(job('running', [], { result: { summary } })), null, 'the summary of a running job is not final');
+  assert.equal(readPipelineSummary(job('failed', [], { result: { summary: { total: 'x' } } })), null);
+  assert.deepEqual(readPipelineSummary(job('failed', [], { result: { download: { summary } } })), summary);
+  let totals = summarizeRows(rows, readPipelineSummary(finished));
+  assert.deepEqual([totals.total, totals.done, totals.failed, totals.unfinished, totals.running], [3, 1, 1, 2, false]);
+  // Older backend: no summary / items_status, same rows as before.
+  assert.deepEqual(buildJobRows(txtPlan, job('succeeded', [])).map((row) => row.phase), ['done', 'done', 'done']);
+  totals = summarizeRows(buildJobRows(txtPlan, job('succeeded', [])), null);
+  assert.deepEqual([totals.done, totals.unfinished], [3, 0]);
+
+  // Overall bar: download 40, audio 20, subtitles 40, only for the steps asked for.
+  const overall = (plan, events) => one(plan, events).overall;
+  assert.equal(overall(txtPlan, []), 0);
+  assert.equal(overall(txtPlan, [ev('download_progress', { bytes_written: 50, total_bytes: 100 })]), 20);
+  assert.equal(overall(txtPlan, [ev('download_done')]), 40);
+  assert.equal(overall(txtPlan, [ev('download_done'), ev('audio_progress', { progress_percent: 50 })]), 50);
+  assert.equal(overall(txtPlan, [ev('audio_done')]), 60);
+  assert.equal(overall(txtPlan, [ev('audio_done'), ev('transcript_progress', { progress_percent: 50 })]), 80);
+  assert.equal(overall(mp3Plan, [ev('download_done'), ev('audio_progress', { progress_percent: 50 })]), 83, 'normalised to download + audio');
+  assert.equal(overall({ ...txtPlan, outputs: ['mp4'] }, [ev('download_progress', { bytes_written: 50, total_bytes: 100 })]), 50);
+  assert.equal(overall({ ...txtPlan, kind: 'material', outputs: ['mp4'] }, [ev('download_done')]), 100);
+  assert.equal(overall(txtPlan, [ev('artifact_item_done')]), 100);
+  assert.equal(overall(txtPlan, [ev('artifact_item_failed', { error_code: 'stt_failed' })]), 100);
+  // Three lectures at 100 / 40 / 0 average to 47, and a lecture waiting for audio is not 100 %.
+  rows = rowsOf(txtPlan, [ev('artifact_item_done'), { stage: 'download_done', module_item_id: 2 }]);
+  assert.equal(summarizeRows(rows).percent, 47);
+  assert.ok(rows[1].overall < 100 && rows[1].phase === 'waiting_audio');
+
+  // Events this UI does not know are ignored, with or without fields it does not know.
+  const noise = [ev('gate_wait', { at: 5, gate: 'media', mystery: { deep: true } }), ev('future_stage_name', { at: 6 })];
+  assert.deepEqual(rowsOf(txtPlan, noise).map((row) => row.phase), ['waiting', 'waiting', 'waiting']);
+
+  // New error copy, exactly as in design/09.
+  assert.equal(describeErrorCode('stt_remote_job_lost'), '자막 서버에서 작업을 찾지 못했어요. 다시 시도해 주세요.');
+  assert.equal(describeErrorCode('stt_remote_upload_too_large'), '음성 파일이 서버 허용 크기보다 커요.');
+  assert.equal(describeErrorCode('stt_remote_bad_request'), '자막 서버가 이 음성 파일을 받지 않았어요.');
+
+  // Drawer: title, "약 n%", accessible status text (polite, never an alert), bar value text.
+  const drawer = readFileSync(new URL('../src/components/DownloadDrawer.tsx', import.meta.url), 'utf8');
+  assert.ok(drawer.includes('`진행 중 ${summary.done}/${summary.total}`'));
+  assert.ok(!drawer.includes('`받는 중 ${summary.done}'), 'drawer title is "진행 중 d/t"');
+  assert.ok(drawer.includes("row.estimated ? '약 ' : ''"));
+  assert.ok(/role="status" aria-live="polite"/.test(drawer));
+  assert.ok(!drawer.includes('role="alert"') && !drawer.includes('aria-live="assertive"'));
+  assert.ok(drawer.includes('aria-valuetext'));
+}
+
 // Pure content helpers.
 {
   const content = await import('../src/lib/content.ts');

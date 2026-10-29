@@ -1,0 +1,125 @@
+@startuml per-lecture-pipeline-domain
+title Per-lecture pipeline — domain model (PROPOSED; CURRENT parts marked)
+skinparam packageStyle rectangle
+hide empty members
+
+package "service (FastAPI sidecar)" as service {
+
+  class ArtifactPipeline <<application service, one per artifact job>> {
+    + run() : JobOutcome
+    --
+    - plan (dry-run batch, CURRENT)
+    - lectures : map<module_item_id, LecturePipeline>
+    - executor : ThreadPoolExecutor(size = planned lectures)
+    - artifacts : list (lock-protected, CURRENT)
+    --
+    submits a LecturePipeline when its input is ready:
+    at plan time (no download needed) or from on_item_ready
+  }
+
+  class LecturePipeline <<per-lecture linear chain>> {
+    + run() : LectureResult
+    --
+    steps in order: video? -> mp4? -> audio? -> transcript? -> cleanup
+    - context : {index, total, module_item_id, title}
+    - state : LectureState (memory only)
+  }
+
+  class LectureResult <<value object>> {
+    module_item_id
+    state : done | failed | cancelled
+    error_code : str?
+    failed_stage : download | mp4 | audio | transcript | cleanup ?
+  }
+
+  class StageGates <<process-wide, in AppContext>> {
+    media : BoundedSemaphore(2)
+    local_stt : BoundedSemaphore(1)
+    + hold(name, should_cancel, on_wait) : context manager
+    --
+    cancel-aware acquire (poll 0.25 s)
+    release always in finally
+  }
+
+  class JobOutcomeSummary <<value object>> {
+    total, succeeded, failed, cancelled
+    + outcome() : succeeded | failed(partial_failure | common code)
+  }
+}
+
+package "core (no OS calls)" as core {
+  class LmsService <<CURRENT>> {
+    + batch_download_lectures(..., on_item_ready=None)
+    --
+    on_item_ready(item) called once per finished item
+    (downloaded / skipped / failed), from the download worker
+  }
+
+  class postprocess_media <<CURRENT module>> {
+    ensure_playable_mp4()
+    extract_audio()
+    convert_to_stt_wav()
+    cut_audio_segment()
+  }
+
+  class LocalWhisperEngine <<CURRENT, faster-whisper>> {
+    model cache lock (load only)
+  }
+
+  interface RemoteProvider <<CURRENT port>> {
+    transcribe(wav, temperature, should_cancel)
+    probe()
+  }
+
+  class WhisperCppServerProvider <<CURRENT kind whisper_cpp_server>> {
+    one POST /inference per audio
+    response wait = queue-aware budget (PROPOSED)
+  }
+  class OpenAICompatibleProvider <<CURRENT kind openai_compatible>> {
+    response wait = queue-aware budget (PROPOSED)
+  }
+
+  interface JobRemoteProvider <<PROPOSED port, kind stt_job>> {
+    submit(audio, opts, idempotency_key) : JobHandle
+    status(job_id) : JobStatus
+    result(job_id) : segments
+    cancel(job_id)
+    capabilities() : {repairs_loops, chunks_server_side, max_upload_bytes}
+  }
+
+  class JobQueueProvider <<PROPOSED adapter>> {
+    poll loop: queued (no deadline) / running (budget)
+    429 + Retry-After -> wait, resubmit same key
+    no client chunking
+  }
+
+  class RemoteSTTService <<CURRENT>> {
+    settings + SSH tunnel
+    + in_flight counter (PROPOSED, for the budget)
+  }
+}
+
+ArtifactPipeline "1" *-- "0..*" LecturePipeline : owns
+ArtifactPipeline ..> LmsService : plan + download(on_item_ready)
+ArtifactPipeline ..> JobOutcomeSummary : builds
+LecturePipeline ..> LectureResult : returns
+LecturePipeline ..> StageGates : media / local_stt
+LecturePipeline ..> postprocess_media
+LecturePipeline ..> LocalWhisperEngine : under local_stt gate
+LecturePipeline ..> RemoteSTTService : no app gate
+RemoteSTTService ..> RemoteProvider
+RemoteSTTService ..> JobRemoteProvider
+RemoteProvider <|.. WhisperCppServerProvider
+RemoteProvider <|.. OpenAICompatibleProvider
+JobRemoteProvider <|.. JobQueueProvider
+
+note bottom of LecturePipeline
+  I1 linear: a step starts only after the previous step of the SAME lecture succeeded.
+  I2 isolation: a lecture never reads or sets another lecture's state; no shared abort flag.
+  I3 limits: concurrent media work <= 2 and local STT <= 1 in the whole process.
+  I4 no remote throttle: remote requests are sent as soon as audio is ready.
+  I5 cancel: after job.should_cancel() no lecture starts a new step; gate waits end.
+  I6 cleanup: intermediate audio / source video of a lecture are deleted only by that lecture,
+     only after its own chain succeeded (CURRENT rules).
+end note
+@enduml

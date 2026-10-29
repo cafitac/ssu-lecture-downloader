@@ -1,0 +1,124 @@
+@startuml flow1-per-lecture-chain
+title Flow 1 — Artifact job: plan, per-lecture hand-off, no barrier (PROPOSED)
+participant "routers/download.py\nPOST /api/download/artifacts/jobs" as R
+participant "JobRunner (CURRENT)" as J
+participant "ArtifactPipeline" as P
+participant "LmsService.batch_download_lectures" as L
+participant "LecturePipeline L1" as L1
+participant "LecturePipeline L2" as L2
+participant "StageGates (media 2, local_stt 1)" as G
+
+R -> J : start_job(work)
+J -> P : run()
+P -> L : dry-run plan (CURRENT)
+L --> P : planned items
+P -> L1 : submit now (mp3 already on disk, no video needed)
+note right of P : event artifact_item_queued per planned lecture
+P -> L : download(needs_video_ids, on_item_ready=submit)
+L -> L : parallel downloads (max_parallel_downloads, CURRENT)
+L --> P : on_item_ready(L2 item)  [from download worker, L3 still downloading]
+P -> L2 : submit
+L2 -> G : hold(media)
+alt gate busy
+  L2 -> L2 : emit audio_waiting (once)
+end
+G --> L2 : acquired
+L2 -> L2 : extract_audio (ffmpeg) ; release media in finally
+L2 -> L2 : transcript step (Flow 3 / 4 / local under local_stt)
+L2 -> L2 : cleanup intermediates of L2 only (CURRENT rules)
+L2 --> P : LectureResult(done)
+L --> P : batch result (returned after all downloads; used only for the download payload)
+P -> P : wait until every submitted LecturePipeline is terminal
+P -> P : summary {total, succeeded, failed, cancelled}; items_status
+P --> J : JobOutcome succeeded | failed(partial_failure | common code)
+note over P
+  No barrier: post-processing of a lecture starts from on_item_ready.
+  No _abort: a LectureResult(failed) changes nothing for other lectures.
+  Login / plan failure: JobOutcome.failed before any LecturePipeline is submitted (CURRENT).
+end note
+@enduml
+
+@startuml flow2-failure-and-cancel
+title Flow 2 — Failure isolation and cancel-all (PROPOSED)
+participant "ArtifactPipeline" as P
+participant "L1 (extracting)" as L1
+participant "L2 (downloading)" as L2
+participant "L3 (waiting media)" as L3
+participant "Job (CURRENT)" as J
+participant "Remote provider" as RP
+
+== failure in one lecture ==
+L1 -> L1 : extract_audio -> ffmpeg_failed
+L1 -> L1 : emit artifact_item_failed {error_code, failed_stage: audio}
+L1 --> P : LectureResult(failed)
+note right of P : L2 and L3 continue; no flag is set
+== cancel-all ==
+J -> J : POST .../cancel -> cancel_requested = true (CURRENT)
+L2 -> L2 : download loop sees should_cancel -> DownloadCancelled (CURRENT)
+L3 -> L3 : gate wait poll sees should_cancel -> leaves without acquiring
+L3 -> L3 : emit artifact_item_cancelled
+RP -> RP : legacy: shutdown socket (CURRENT) / job kind: DELETE /v1/stt/jobs/{id} (best effort)
+P --> J : outcome; JobRunner sets cancelled (CURRENT rule: should_cancel wins)
+@enduml
+
+@startuml flow3-legacy-remote
+title Flow 3 — Interim remote path, kind whisper_cpp_server (PROPOSED budget)
+participant "LecturePipeline" as L
+participant "RemoteSTTService" as S
+participant "WhisperCppServerProvider" as W
+participant "SSH tunnel (CURRENT)" as T
+participant "whisper-server :8795 (Mac Studio, unchanged)" as WS
+
+L -> S : transcribe (no app gate)
+S -> S : hold(media) for convert_to_stt_wav only
+S -> S : ahead = in_flight ; in_flight += 1
+S -> W : POST /inference (whole WAV)
+W -> T : connect + upload (idle timeout 60 s per socket op)
+T -> WS : request
+alt ahead > 0
+  L -> L : emit transcript_waiting {reason: server_busy, ahead_requests: ahead}
+end
+W -> W : wait response, budget = 1200 s * (1 + ahead), cap 4 h
+WS --> W : SRT (after serving earlier requests)
+W --> S : cues ; in_flight -= 1 (finally)
+S -> S : loop repair windows: one POST per window, same budget rule
+S --> L : TranscriptionResult
+note over W
+  Budget exceeded -> stt_remote_timeout (message includes elapsed).
+  Cancel -> socket shutdown at once (CURRENT).
+  HTTP 429/503 from a server that rejects concurrent requests -> short backoff and resend (O1).
+end note
+@enduml
+
+@startuml flow4-job-provider
+title Flow 4 — Job-style remote provider, kind stt_job (PROPOSED, gated on AC11)
+participant "LecturePipeline" as L
+participant "JobQueueProvider" as Q
+participant "Shared model server\n(e.g. modelhost, external)" as M
+
+L -> Q : transcribe(audio) (no app gate; WAV conversion under media gate)
+Q -> M : POST /v1/stt/jobs (Idempotency-Key, X-Priority: BACKGROUND, audio)
+alt 429 BACKGROUND_DEFERRED
+  M --> Q : 429 Retry-After: 120
+  Q -> L : transcript_waiting {reason: server_deferred, retry_after_seconds}
+  Q -> Q : sleep (cancel-aware), resubmit with the SAME Idempotency-Key
+else accepted
+  M --> Q : 202 {job_id, state: queued, queue_position}
+end
+loop until terminal (poll 2 s, backoff on errors)
+  Q -> M : GET /v1/stt/jobs/{job_id}
+  M --> Q : {state, queue_position?, progress_percent?, progress_estimated?}
+  Q -> L : transcript_queued {queue_position} | transcript_progress {progress_percent}
+  note right of Q
+    queued: no deadline (cancel only)
+    running: budget from started_at
+    poll errors: retry with backoff, fail stt_remote_unreachable after 2 min
+  end note
+end
+Q -> M : GET /v1/stt/jobs/{job_id}/result?format=srt
+M --> Q : SRT
+Q --> L : cues (server chunked and repaired; client repair only if capabilities.repairs_loops = false)
+alt cancel / failure / budget exceeded
+  Q -> M : DELETE /v1/stt/jobs/{job_id} (best effort)
+end
+@enduml

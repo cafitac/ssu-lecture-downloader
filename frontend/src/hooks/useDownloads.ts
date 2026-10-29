@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ApiError, cancelDownloadJob, fetchDownloadJob, isAuthenticationError, startArtifactDownloadJob, startBatchDownloadJob, startDownloadJob } from '../lib/api';
 import { SESSION_EXPIRED_MESSAGE, friendlyError } from '../lib/errors';
-import { buildJobRows, isExpiredMediaUrlCode, isRetryable, summarizeRows } from '../lib/jobItems';
+import { buildJobRows, isExpiredMediaUrlCode, isRetryable, readPipelineSummary, summarizeRows } from '../lib/jobItems';
 import type { JobPlan, JobRow } from '../lib/jobItems';
 import { TERMINAL_DOWNLOAD_STATUSES } from '../lib/progress';
 import type { DownloadJobStatus } from '../lib/types';
@@ -36,7 +36,7 @@ export function useDownloads({ downloadDir, onAuthError, onError }: Options) {
 
   const active = starting || (job !== null && !isTerminal(job));
   const rows = useMemo<JobRow[]>(() => (plan ? buildJobRows(plan, job) : []), [plan, job]);
-  const summary = useMemo(() => summarizeRows(rows), [rows]);
+  const summary = useMemo(() => summarizeRows(rows, readPipelineSummary(job)), [rows, job]);
 
   /** Applies a fresh job snapshot; returns false when the failure sends the user back to login. */
   const applyJob = useCallback((next: DownloadJobStatus): boolean => {
