@@ -1006,6 +1006,21 @@ wheels = [
 ]
 
 [[package]]
+name = "rusaint"
+version = "0.16.3"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/68/49/961d1deaed87d4c9a3a6c1aea27c8bb3667c7dc4fbf247d1d40eeb1effef/rusaint-0.16.3.tar.gz", hash = "sha256:95b7575c7056ebab705b666f6f46e95f27a361f29b6cb15f131119fed1653f87", size = 93234, upload-time = "2026-04-02T02:27:38.279Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/4c/d7/32b8b09f84e20e02e35698e28dc67e2ae3ab246eb2d998ff57940fe3e606/rusaint-0.16.3-py3-none-macosx_10_12_x86_64.whl", hash = "sha256:a93680c63962ce50b9a6d00fa0a47040b31716058b87f033f54cc481f01f918b", size = 4844222, upload-time = "2026-04-02T02:27:26.205Z" },
+    { url = "https://files.pythonhosted.org/packages/fe/e7/49956b5993acd145e4d35fac61b175fbcee7a1ef00e51b6bfa9e506f5b98/rusaint-0.16.3-py3-none-macosx_11_0_arm64.whl", hash = "sha256:68b9ac399816ff71433b24ca06de02f1270c468308621d053ebb724a4903d78a", size = 4729448, upload-time = "2026-04-02T02:27:28.145Z" },
+    { url = "https://files.pythonhosted.org/packages/7f/36/5d0ffc1c1faefe48a4204f836c0dddbb9ebd1c1118a0c0541c597b6e9f74/rusaint-0.16.3-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:1b07d01a0131a95bca0bd35eb8790e63643d4eaf64ac01f3a50221914a9af255", size = 5122422, upload-time = "2026-04-02T02:27:29.79Z" },
+    { url = "https://files.pythonhosted.org/packages/d3/7e/651721dfff00b8eefcbcfe0c41c63a6ad22bf308179e929a29246d84af94/rusaint-0.16.3-py3-none-manylinux_2_28_aarch64.whl", hash = "sha256:213ee5426d4a0e6cb28c08c5e5fb3cba9c38c6519464da84546e8c06bdcaa15e", size = 5075276, upload-time = "2026-04-02T02:27:31.843Z" },
+    { url = "https://files.pythonhosted.org/packages/72/36/abf28c1eac96fce34042808246f8cdfb263ee655abb740c93e7a5f7fed35/rusaint-0.16.3-py3-none-musllinux_1_2_aarch64.whl", hash = "sha256:f01c930c720cadfff057c8f7c33f0f0ab900f4e970211b9c2d25e4f33f7db986", size = 5275575, upload-time = "2026-04-02T02:27:33.322Z" },
+    { url = "https://files.pythonhosted.org/packages/b7/0b/295523b73f5234f4c24f4e484d8844bc01522a98d1540df6d7a829497f23/rusaint-0.16.3-py3-none-musllinux_1_2_x86_64.whl", hash = "sha256:73e8bba501a32a72f80ed8ae9d265dc9449e1f7eb0aaa20e00baf905e92c13cf", size = 5436955, upload-time = "2026-04-02T02:27:35.198Z" },
+    { url = "https://files.pythonhosted.org/packages/57/79/b5729c419ea5c23798c33ad7632cd000e5ac0cd687fb3f32de53cb282de9/rusaint-0.16.3-py3-none-win_amd64.whl", hash = "sha256:d83de32400c6067fe8055d8afc35376e84517502d929d38ef3c0f4ec6d6efb29", size = 4226254, upload-time = "2026-04-02T02:27:36.902Z" },
+]
+
+[[package]]
 name = "setuptools"
 version = "82.0.1"
 source = { registry = "https://pypi.org/simple" }
@@ -1045,6 +1060,7 @@ dependencies = [
     { name = "imageio-ffmpeg" },
     { name = "pydantic" },
     { name = "python-dotenv" },
+    { name = "rusaint" },
     { name = "typer" },
     { name = "uvicorn", extra = ["standard"] },
     { name = "websockets" },
@@ -1067,6 +1083,7 @@ requires-dist = [
     { name = "imageio-ffmpeg", specifier = ">=0.5.1" },
     { name = "pydantic", specifier = ">=2" },
     { name = "python-dotenv", specifier = ">=1" },
+    { name = "rusaint", specifier = "==0.16.3" },
     { name = "typer", specifier = ">=0.12" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.47.0" },
     { name = "websockets", specifier = ">=13" },

@@ -1,0 +1,107 @@
+// Target persisted and in-memory state for the grades view (PROPOSED).
+// There is no database. Only `grades_consent_file` is on disk; every other table is an
+// in-process record of the Python sidecar (lost on exit) or an API response shape.
+// Disk root = app_data_dir from the sibling design:
+//   macOS   ~/Library/Application Support/com.local.ssu-lecture-downloader
+//   Windows %LOCALAPPDATA%\com.local.ssu-lecture-downloader (sibling S2)
+
+Project ssu_grades_state {
+  database_type: 'local files + process memory'
+  Note: 'Grade values are memory-only (decision D5 pending, recommended). No credential, token, cookie, or grade value is persisted by this feature.'
+}
+
+Enum grades_error_code {
+  grades_consent_required [note: 'HTTP 409']
+  grades_login_rejected [note: 'HTTP 403, u-SAINT refused the login; never an LMS auth code']
+  grades_unavailable [note: 'HTTP 503, network/timeout/parse/missing native lib/404 old backend']
+  invalid_consent_version [note: 'HTTP 400, PUT consent with a version other than the current one']
+  invalid_semester [note: 'HTTP 400, classes query with an unknown semester']
+}
+
+Table grades_consent_file {
+  path varchar [pk, note: 'app_data_dir/grades-consent.json; written atomically (temp + rename), 0o600 on POSIX']
+  schema int [not null, note: 'always 1']
+  consent_version int [not null, note: 'current copy version = 1; a higher app version re-asks']
+  granted_at varchar [not null, note: 'ISO-8601 UTC']
+  Note: 'Single writer and reader: GradesConsentStore. Absent file = no consent. Contains no username and no grade data. Deleted on revoke.'
+}
+
+Table grades_snapshot_memory {
+  account_key varchar [pk, note: 'current username; compared, never logged or persisted']
+  fetched_at timestamp [not null]
+  overview_ref varchar [note: '-> grades_overview_dto']
+  ttl_seconds int [not null, default: 1800]
+  Note: 'Owned by GradesService. Cleared on consent revoke, DELETE /api/credentials, changed credentials, process exit.'
+}
+
+Table usaint_session_memory {
+  account_key varchar [pk, ref: - grades_snapshot_memory.account_key]
+  created_at timestamp [not null]
+  Note: 'rusaint USaintSession handle; reused while the snapshot lives; dropped with it. Never serialized.'
+}
+
+Table class_list_memory {
+  account_key varchar [ref: > grades_snapshot_memory.account_key]
+  year int [not null]
+  semester varchar [not null, note: 'ONE | SUMMER | TWO | WINTER (rusaint SemesterType)']
+  fetched_at timestamp [not null]
+  indexes {
+    (account_key, year, semester) [pk]
+  }
+  Note: 'Lazy per-semester class grades, inside the snapshot lifetime.'
+}
+
+Table grades_overview_dto {
+  fetched_at varchar [note: 'ISO-8601']
+  recorded_summary json [note: 'GradeSummaryDto: attempted_credits, earned_credits, pf_earned_credits, grade_points_sum, grade_points_average, arithmetic_mean']
+  certificated_summary json [note: 'GradeSummaryDto']
+  semesters json [note: 'SemesterDto[] newest first']
+  Note: 'Response of GET /api/grades. Cache-Control: no-store.'
+}
+
+Table semester_dto {
+  year int [not null]
+  semester varchar [not null]
+  attempted_credits float
+  earned_credits float
+  pf_earned_credits float
+  grade_points_average float
+  grade_points_sum float
+  arithmetic_mean float
+  semester_rank json [note: '{rank, total} from U32Pair']
+  general_rank json [note: '{rank, total}']
+  academic_probation boolean
+  consult boolean
+  flunked boolean
+  indexes {
+    (year, semester) [pk]
+  }
+}
+
+Table class_grade_dto {
+  year int [not null]
+  semester varchar [not null]
+  code varchar [not null]
+  class_name varchar [not null]
+  credits float [note: 'rusaint grade_points (semantics O3)']
+  score varchar [note: 'number as string, or P / F (O3)']
+  grade varchar [note: 'rusaint rank, e.g. A+ (O3)']
+  professor varchar
+  indexes {
+    (year, semester, code) [pk]
+  }
+  Note: 'Response item of GET /api/grades/classes. include_details=false; class_detail is DEFERRED.'
+}
+
+Table lms_score_dto {
+  course_id varchar [not null]
+  course_name varchar
+  assignment_group varchar
+  assignment_name varchar [not null]
+  score float [not null, note: 'only posted, non-hidden submissions']
+  points_possible float
+  Note: 'G2 (SHOULD). Response of GET /api/grades/lms. No final_score / current_score column exists by design. Label: 비공식 · 교수님이 올린 점수만.'
+}
+
+// DTO containment (not foreign keys): grades_overview_dto.semesters holds semester_dto rows;
+// class_list_memory (year, semester) holds the class_grade_dto rows of that semester.

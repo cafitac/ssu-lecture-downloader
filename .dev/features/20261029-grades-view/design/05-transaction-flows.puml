@@ -1,0 +1,193 @@
+@startuml grades-consent
+title Flow 1 — First open and consent (PROPOSED)
+actor Student
+participant "GradesPane / useGrades\n(React)" as UI
+participant "routers/grades.py" as R
+participant "GradesService" as S
+participant "GradesConsentStore\n(grades-consent.json)" as C
+
+Student -> UI : click "성적" toggle
+UI -> R : GET /api/grades/status
+R -> S : status()
+S -> C : read()
+C --> S : absent
+S --> R : {consent.granted=false, available}
+R --> UI : 200 (Cache-Control: no-store)
+UI --> Student : consent step\n"u-SAINT에 같은 계정으로 로그인해서 성적을 읽어 와요"
+alt "나중에"
+  UI -> UI : back to previous view; no request
+else "동의하고 성적 보기"
+  UI -> R : PUT /api/grades/consent {consent_version: 1}
+  R -> S : grant_consent(1)
+  S -> C : grant: write temp file, fsync, rename (0o600)
+  C --> S : GradesConsent
+  S --> R : status granted
+  R --> UI : 200
+  UI -> UI : continue with Flow 2
+end
+note over S, C
+  No u-SAINT call happens in this flow (I1).
+  The file holds schema, consent_version, granted_at only.
+end note
+@enduml
+
+@startuml grades-fetch
+title Flow 2 — Fetch overview: consent → login → fetch → cache → display (PROPOSED)
+participant "useGrades" as UI
+participant "routers/grades.py\n(async def)" as R
+participant "GradesService" as S
+participant "CredentialStore\n(in memory, existing)" as CS
+participant "RusaintGateway\n(lazy import rusaint)" as G
+participant "u-SAINT\n(external, read-only)" as U
+
+UI -> R : GET /api/grades?refresh=false
+R -> S : overview(refresh)
+S -> S : consent current? else GradesError(grades_consent_required) → 409
+S -> CS : get()
+CS --> S : pair (username, password)
+S -> S : snapshot fresh (< 30 min) and account_key == username and not refresh?
+alt cache hit
+  S --> R : snapshot.overview
+else miss
+  S -> S : acquire asyncio.Lock (single flight; a waiter re-checks the snapshot after acquiring)
+  group asyncio.wait_for(25 s)
+    alt reusable session for this account
+      S -> G : overview(session)
+    else no session
+      S -> G : login(username, password)
+      G -> U : USaintSessionBuilder().with_password(id, pw)
+      U --> G : USaintSession (memory only)
+      S -> G : overview(session)
+    end
+    G -> U : CourseGradesApplicationBuilder().build(session)
+    G -> U : semesters(BACHELOR), recorded_summary(BACHELOR), certificated_summary(BACHELOR)
+    U --> G : rusaint objects
+    G -> G : GradesMapper.to_overview (type-checked, no echo)
+    G --> S : GradesOverview
+  end
+  S -> S : snapshot := {account_key, fetched_at, overview}; session kept
+  S -> S : log "grades_fetch ok elapsed_ms" (no values)
+  S -> S : release lock
+  S --> R : overview
+end
+R --> UI : 200 {fetched_at, recorded_summary, certificated_summary, semesters}\nCache-Control: no-store
+UI -> UI : render summary + semester groups (React state only)
+@enduml
+
+@startuml grades-classes
+title Flow 3 — Expand a semester: class grades (PROPOSED)
+participant "useGrades" as UI
+participant "routers/grades.py" as R
+participant "GradesService" as S
+participant "RusaintGateway" as G
+participant "u-SAINT" as U
+
+UI -> R : GET /api/grades/classes?year=2025&semester=ONE
+R -> S : classes(year, semester, refresh)
+S -> S : consent check; snapshot.classes_by_term hit?
+alt hit
+  S --> R : ClassList
+else miss
+  S -> S : single-flight lock; ensure session (Flow 2 login branch)
+  group asyncio.wait_for(20 s)
+    S -> G : classes(session, year, semester)
+    G -> U : app.classes(BACHELOR, year, semester, include_details=False)
+    U --> G : ClassGrade[]
+    G --> S : ClassList (mapped)
+  end
+  S -> S : snapshot.classes_by_term[(year, semester)] := ClassList
+  S --> R : ClassList
+end
+R --> UI : 200 {year, semester, classes[]}  (no-store)
+@enduml
+
+@startuml grades-failure
+title Flow 4 — Failure path: only the grades tab degrades (PROPOSED)
+participant "useGrades" as UI
+participant "routers/grades.py" as R
+participant "GradesService" as S
+participant "RusaintGateway" as G
+participant "u-SAINT" as U
+
+UI -> R : GET /api/grades
+R -> S : overview()
+S -> G : overview(reused session)
+G -> U : request
+U --> G : error / timeout / unexpected page
+G --> S : GradesError(grades_unavailable) from None
+S -> S : drop session; ONE retry with a fresh login
+S -> G : login(username, password)
+alt u-SAINT rejects the login
+  G --> S : GradesError(grades_login_rejected)
+  S --> R : raise
+  R --> UI : 403 {ok:false, error_code:"grades_login_rejected"}
+else still failing / timeout / rusaint ImportError or OSError
+  G --> S : GradesError(grades_unavailable)
+  S --> R : raise
+  R --> UI : 503 {ok:false, error_code:"grades_unavailable"}
+end
+S -> S : log "grades_fetch <code> elapsed_ms" (no message, no values)
+UI -> UI : grades pane: "지금 가져올 수 없어요" + reason line + 다시 시도
+note over UI
+  useGrades never calls onAuthError:
+  the LMS session, lecture list, downloads,
+  watch queue and deadlines are untouched.
+  Old backend (404) → same "지금 가져올 수 없어요".
+end note
+note over S
+  The previous snapshot (if any, same account, within TTL)
+  is not replaced; refresh failures keep showing it
+  with "업데이트하지 못했어요" in the pane sub line.
+end note
+@enduml
+
+@startuml grades-clear
+title Flow 5 — Turn off, logout, changed credentials (PROPOSED)
+actor Student
+participant "SettingsDialog" as SD
+participant "routers/grades.py" as R
+participant "routers/credentials.py\n(existing)" as CR
+participant "GradesService" as S
+participant "GradesConsentStore" as C
+
+alt 설정 > 성적 보기 > 끄기
+  Student -> SD : 끄기
+  SD -> R : DELETE /api/grades/consent
+  R -> S : revoke_consent()
+  S -> C : revoke (delete file; missing file is fine)
+  S -> S : clear(): snapshot = None, session = None
+else 로그아웃
+  CR -> CR : DELETE /api/credentials (existing)
+  CR -> S : clear()
+else 다른 계정으로 로그인
+  CR -> CR : POST /api/credentials with a different pair (existing cache clear)
+  CR -> S : clear()
+end
+note over S
+  Consent survives logout (it is a per-computer choice);
+  grade data and the u-SAINT session never do.
+end note
+@enduml
+
+@startuml grades-lms-scores
+title Flow 6 — G2 (SHOULD): this term's posted LMS scores (PROPOSED)
+participant "GradesPane" as UI
+participant "routers/grades.py" as R
+participant "LmsScoreReader" as L
+participant "SsuLectureService\n(cookie session, existing)" as LMS
+participant "Canvas API\n(LMS, read-only)" as CV
+
+UI -> R : GET /api/grades/lms?term_id=
+R -> L : current_term_scores(term_id)
+L -> LMS : logged-in session (cookies, not xn_api_token)
+L -> CV : GET /api/v1/users/self/enrollments?state[]=active&state[]=completed
+L -> CV : per course: GET /api/v1/courses/:id/assignment_groups?include[]=assignments&include[]=submission
+CV --> L : groups + submissions
+L -> L : keep score != null and not hidden/muted; drop final_score/current_score
+L --> R : LmsScoreList
+R --> UI : 200 (no-store); label "비공식 · 교수님이 올린 점수만"
+note over L
+  Uses the existing LMS error mapping; an LMS failure here
+  shows only inside the LMS block of the grades pane.
+end note
+@enduml

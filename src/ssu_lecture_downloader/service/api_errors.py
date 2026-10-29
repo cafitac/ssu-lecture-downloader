@@ -11,6 +11,12 @@ from urllib.parse import urlsplit
 from curl_cffi.requests import exceptions as curl_exceptions
 from fastapi import HTTPException
 
+from ssu_lecture_downloader.core.grades.models import (
+    GRADES_CONSENT_REQUIRED,
+    GRADES_LOGIN_REJECTED,
+    MISSING_CREDENTIALS,
+    GradesError,
+)
 from ssu_lecture_downloader.core.errors import (
     NETWORK_ERROR,
     NETWORK_TIMEOUT,
@@ -39,6 +45,19 @@ AUTHENTICATION_ERROR_CODES = {
     "lms_session_unverified",
 }
 
+# u-SAINT grades codes. They are deliberately NOT in AUTHENTICATION_ERROR_CODES: the frontend signs the
+# user out of the LMS on those, and a grades failure must only degrade the grades tab.
+GRADES_ERROR_CODES = frozenset(
+    {
+        "grades_consent_required",  # 409
+        "grades_login_rejected",  # 403
+        "grades_unavailable",  # 503
+        "invalid_consent_version",  # 400
+        "invalid_semester",  # 400
+        "invalid_year",  # 400
+    }
+)
+
 INTERNAL_ERROR_CODE = "internal_error"
 MEDIA_CONTENT_ID_MISSING_MESSAGE = "attendance item does not expose Commons content_id"
 
@@ -52,6 +71,18 @@ def missing_credentials_error() -> HTTPException:
             "credentials": {"SSU_USERNAME": "missing", "SSU_PASSWORD": "missing"},
         },
     )
+
+
+def grades_error(error: GradesError) -> HTTPException:
+    """The API error for a GradesError: code only, never a message or the cause."""
+    if error.code == MISSING_CREDENTIALS:
+        return missing_credentials_error()  # the existing contract: 400 missing_credentials
+    status = {
+        GRADES_CONSENT_REQUIRED: HTTPStatus.CONFLICT,
+        GRADES_LOGIN_REJECTED: HTTPStatus.FORBIDDEN,
+    }.get(error.code, HTTPStatus.SERVICE_UNAVAILABLE)
+    code = error.code if error.code in GRADES_ERROR_CODES else "grades_unavailable"
+    return HTTPException(status_code=status, detail={"ok": False, "error_code": code})
 
 
 def status_for_error_code(error_code: str | None) -> int:
@@ -187,6 +218,7 @@ def background_job_error_code(exc: Exception, service: Any) -> str:
 
 __all__ = [
     "AUTHENTICATION_ERROR_CODES",
+    "GRADES_ERROR_CODES",
     "INTERNAL_ERROR_CODE",
     "NETWORK_ERROR",
     "NETWORK_TIMEOUT",

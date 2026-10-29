@@ -23,11 +23,13 @@ from ssu_lecture_downloader.service.api_errors import (
 )
 from ssu_lecture_downloader.service.app_context import AppContext, build_app_context
 from ssu_lecture_downloader.core.chrome_watch import ChromeWatchManager
+from ssu_lecture_downloader.core.grades.service import GradesService
 from ssu_lecture_downloader.service.credentials import CredentialStore, default_credential_store
 from ssu_lecture_downloader.core.jobs import JobRunner
 from ssu_lecture_downloader.core.stt_remote import RemoteSTTService
 from ssu_lecture_downloader.service.routers import credentials as credentials_routes
 from ssu_lecture_downloader.service.routers import download as download_routes
+from ssu_lecture_downloader.service.routers import grades as grades_routes
 from ssu_lecture_downloader.service.routers import health as health_routes
 from ssu_lecture_downloader.service.routers import lms_pages as lms_pages_routes
 from ssu_lecture_downloader.service.routers import media as media_routes
@@ -60,6 +62,7 @@ def create_app(
     api_token: str | None = None,
     remote_stt: RemoteSTTService | None = None,
     chrome_watch: ChromeWatchManager | None = None,
+    grades: GradesService | None = None,  # None builds the real one (rusaint gateway, consent file in the app-data folder)
     platform: Any | None = None,  # an OS adapter (see platforms/base.py); None selects the one for this OS
 ) -> FastAPI:
     contexts: list[AppContext] = []
@@ -69,13 +72,15 @@ def create_app(
         yield
         # Backend exit: no Chrome playback window may outlive it.
         for context in contexts:
+            if context.grades is not None:
+                await run_in_threadpool(context.grades.close)
             if context.chrome_watch is not None:
                 await run_in_threadpool(context.chrome_watch.shutdown)
 
     app = FastAPI(title="SSU Lecture Downloader Local API", lifespan=lifespan)
 
     # Middleware order: the last one added is the outermost. Request flow is
-    # Host check -> CORS -> API token -> unhandled-error catch-all -> routes.
+    # grades no-store -> Host check -> CORS -> API token -> unhandled-error catch-all -> routes.
     app.add_middleware(UnhandledErrorMiddleware)
     app.add_middleware(ApiTokenMiddleware, token=api_token if api_token is not None else configured_api_token())
     app.add_middleware(
@@ -86,6 +91,7 @@ def create_app(
         allow_headers=["Content-Type", "Accept", API_TOKEN_HEADER],
     )
     app.add_middleware(LoopbackHostMiddleware)
+    app.add_middleware(grades_routes.GradesNoStoreMiddleware)  # outermost: every /api/grades response, errors included
 
     @app.exception_handler(StarletteHTTPException)
     async def http_exception_handler(_request, exc: StarletteHTTPException):
@@ -100,9 +106,10 @@ def create_app(
         default_output_dir=default_output_dir,
         remote_stt=remote_stt,
         chrome_watch=chrome_watch,
+        grades=grades,
     )
     contexts.append(ctx)
-    for module in (health_routes, credentials_routes, download_routes, media_routes, stt_remote_routes, watch_routes, lms_pages_routes):
+    for module in (health_routes, credentials_routes, grades_routes, download_routes, media_routes, stt_remote_routes, watch_routes, lms_pages_routes):
         # The routes are already built; attach them as-is instead of having FastAPI rebuild each one.
         app.router.routes.extend(module.build_router(ctx).routes)
     return app

@@ -13,6 +13,7 @@ dependencies = [
     "imageio-ffmpeg>=0.5.1",
     "pydantic>=2",
     "python-dotenv>=1",
+    "rusaint==0.16.3",
     "typer>=0.12",
     "uvicorn[standard]>=0.47.0",
     "websockets>=13",
