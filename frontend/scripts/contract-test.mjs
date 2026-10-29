@@ -745,17 +745,17 @@ const progress = await import('../src/lib/progress.ts');
     assert.equal(row.phase, 'waiting_transcript', 'equal `at` keeps list order');
   }
 
-  // Real logs from pl-py-pipeline 35a3352 (scripts/fixtures/*.json, captured through its test rig; the files name the command).
+  // Real logs from pl-py-pipeline 3b1a6e7 (scripts/fixtures/*.json, captured through its test rig; the files name the command).
   {
     const loadFixture = (name) => {
       const fixture = JSON.parse(readFileSync(new URL(`./fixtures/${name}`, import.meta.url), 'utf8'));
-      assert.ok(fixture.source.includes('35a3352') && fixture.command, `${name} names its source revision and command`);
+      assert.ok(fixture.source.includes('3b1a6e7') && fixture.command, `${name} names its source revision and command`);
       return fixture.progress;
     };
     const tier = { waiting: 0, preparing: 1, downloading: 2, verifying: 3, waiting_audio: 3, extracting: 4, waiting_transcript: 5, transcribing: 5, done: 6, failed: 6, cancelled: 6, skipped: 6 };
 
     // Normal remote run: loop repair and server-busy waits. Replaying every prefix of the log (a poll after each event) a lecture never goes back.
-    const remote = loadFixture('backend-35a3352-remote-run.json');
+    const remote = loadFixture('backend-3b1a6e7-remote-run.json');
     const remotePlan = { courseId: 1, courseName: 'c', kind: 'video', outputs: ['txt'], items: [1, 2, 3, 4].map(item) };
     const furthest = [0, 0, 0, 0];
     for (let length = 1; length <= remote.length; length += 1) {
@@ -771,13 +771,13 @@ const progress = await import('../src/lib/progress.ts');
     assert.ok(rows.every((entry) => !entry.final && entry.overall <= 99));
     assert.deepEqual(buildJobRows(remotePlan, job('succeeded', remote, { job_id: 'artifact-r' })).map((entry) => [entry.phase, entry.overall, entry.final]), [1, 2, 3, 4].map(() => ['done', 100, true]));
 
-    // Over the 400-event cap: 28 of 30 lectures wait for audio; the two that hold a slot have no stage event of their own in this build.
-    const capped = loadFixture('backend-35a3352-over-cap.json');
+    // Over the 400-event cap: 28 of 30 lectures wait for audio; the two that hold a slot kept their extracting_audio entry.
+    const capped = loadFixture('backend-3b1a6e7-over-cap.json');
     assert.equal(capped.length, 400);
     const mp3Many = { courseId: 1, courseName: 'c', kind: 'video', outputs: ['mp3'], items: Array.from({ length: 30 }, (_, index) => item(index + 1)) };
     rows = buildJobRows(mp3Many, job('running', capped, { job_id: 'artifact-c' }));
     assert.equal(rows.filter((entry) => entry.phase === 'waiting_audio' && entry.label === '음성 추출 대기 중').length, 28);
-    assert.equal(rows.filter((entry) => entry.phase === 'waiting').length, 2);
+    assert.deepEqual(rows.filter((entry) => entry.phase === 'extracting').map((entry) => [entry.label, entry.percent]), [['음성 추출 중', 0], ['음성 추출 중', 0]]);
     assert.ok(rows.every((entry) => entry.phase !== 'failed' && entry.overall <= 99 && !entry.final));
   }
 

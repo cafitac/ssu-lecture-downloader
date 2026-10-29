@@ -1,4 +1,4 @@
-"""Capture real compacted progress lists from the pl-py-pipeline test rig (backend 35a3352).
+"""Capture real compacted progress lists from the pl-py-pipeline test rig (backend 3b1a6e7).
 
 Usage: uv run python capture_backend_progress.py <out dir> <pl-py-pipeline worktree>   (run with cwd = that worktree)
 Writes remote.json and cap.json; the fixtures next to this file are those two files wrapped with a source header.
@@ -23,15 +23,15 @@ def scenario_remote():
         rig.lms.video_path(s.item_id).with_suffix('.mp3').write_bytes(b'audio')
     mp.setattr(stt, 'transcribe_audio', t.REAL_TRANSCRIBE_AUDIO)
     def convert(src, dst, should_cancel=None):
-        t.pause(0.15); write_silent_wav(dst, 60)
+        t.simulate_work(0.15); write_silent_wav(dst, 60)
     def cut(src, dst, start, end, should_cancel=None):
-        t.pause(0.1); write_silent_wav(dst, max(1, end - start))
+        t.simulate_work(0.1); write_silent_wav(dst, max(1, end - start))
     mp.setattr(postprocess_media, 'convert_to_stt_wav', convert)
     mp.setattr(postprocess_media, 'cut_audio_segment', cut)
     first = srt((0, 4, '안녕하세요'), (4, 6, '음'), *[(20 + i, 21 + i, '같은 문장') for i in range(10)], (59.9, 60, '마무리'))
     repair = srt((2, 4, '복구된 문장'), (30, 32, '창 밖 문장'))
     def respond(request):
-        t.pause(0.3)
+        t.simulate_work(0.3)
         return 200, 'text/plain', repair if request.fields['temperature'] == '0.2' else first
     with FakeSttServer(respond) as server:
         rig.enable_remote(server.url)

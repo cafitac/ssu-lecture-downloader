@@ -25,4 +25,5 @@ Sprint-owned (sprint-1.md): `frontend/src/lib/jobItems.ts`, `frontend/src/compon
 
 Also touched, outside the sprint-owned list: `frontend/src/hooks/useDownloads.ts` (keeps the furthest row per job id + row id between polls via `holdFurthestRows`).
 
-Test fixtures (new): `frontend/scripts/fixtures/backend-35a3352-remote-run.json`, `frontend/scripts/fixtures/backend-35a3352-over-cap.json`, `frontend/scripts/fixtures/capture_backend_progress.py`.
+Test fixtures (new): `frontend/scripts/fixtures/backend-3b1a6e7-remote-run.json`, `frontend/scripts/fixtures/backend-3b1a6e7-over-cap.json`, `frontend/scripts/fixtures/capture_backend_progress.py`.
+- 2026-10-30: fixtures re-captured from backend 3b1a6e7 (cap keeps stage-entry events); the over-cap run now shows the two slot-holding lectures as "음성 추출 중".
