@@ -3,17 +3,15 @@ mod acl_tests;
 mod backend;
 #[cfg(all(test, target_os = "macos"))]
 mod invariant_tests;
-mod launch_agent;
 mod native_download;
+mod platform;
 mod reminders;
 mod viewer;
 mod watch_external;
 mod watch_queue;
 mod watch_runtime;
 
-use std::ffi::CStr;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::Arc;
 use tauri::Manager;
 
@@ -32,33 +30,10 @@ struct RemindersStatus {
 fn reminders_status_for(service: &ReminderService) -> RemindersStatus {
     RemindersStatus {
         enabled: service.enabled(),
-        agent_installed: real_user_home_dir()
-            .map(|home| launch_agent::is_installed(&home))
-            .unwrap_or(false),
+        agent_installed: platform::reminder_schedule_installed(),
         last_saved_at: reminders::read_cache(service.dir()).map(|cache| cache.saved_at),
-        supported: launch_agent::supported(),
+        supported: platform::reminder_schedule_supported(),
     }
-}
-
-/// Installs (or refreshes) the LaunchAgent for the running executable.
-fn install_reminder_agent() -> Result<(), String> {
-    let home = real_user_home_dir().ok_or("홈 폴더를 찾을 수 없습니다.")?;
-    let exe = std::env::current_exe().map_err(|error| error.to_string())?;
-    launch_agent::install(
-        &home,
-        &exe,
-        unsafe { libc::getuid() },
-        &launch_agent::SystemLaunchctl,
-    )
-}
-
-fn remove_reminder_agent() -> Result<(), String> {
-    let home = real_user_home_dir().ok_or("홈 폴더를 찾을 수 없습니다.")?;
-    launch_agent::uninstall(
-        &home,
-        unsafe { libc::getuid() },
-        &launch_agent::SystemLaunchctl,
-    )
 }
 
 #[tauri::command]
@@ -82,11 +57,11 @@ fn reminders_set_enabled(
     enabled: bool,
 ) -> Result<RemindersStatus, String> {
     reminders::write_enabled_setting(service.dir(), enabled)?;
-    if launch_agent::supported() {
+    if platform::reminder_schedule_supported() {
         if enabled {
-            install_reminder_agent()?;
+            platform::install_reminder_schedule()?;
         } else {
-            remove_reminder_agent()?;
+            platform::remove_reminder_schedule()?;
         }
     }
     if enabled {
@@ -98,7 +73,7 @@ fn reminders_set_enabled(
 #[tauri::command]
 fn reminders_test() -> Result<(), String> {
     use reminders::Notifier;
-    reminders::OsascriptNotifier.notify(
+    platform::PlatformNotifier.notify(
         "기한 임박: 알림 테스트",
         "과제 · 샘플 알림 · 실제 기한은 이렇게 알려 드려요",
     )
@@ -106,38 +81,9 @@ fn reminders_test() -> Result<(), String> {
 
 #[tauri::command]
 fn real_download_dir() -> Result<String, String> {
-    real_user_home_dir()
+    platform::real_user_home_dir()
         .map(|home| home.join("Downloads").to_string_lossy().to_string())
         .ok_or_else(|| "Could not resolve the macOS user Downloads folder".to_string())
-}
-
-#[cfg(target_os = "macos")]
-fn real_user_home_dir() -> Option<PathBuf> {
-    unsafe {
-        let passwd = libc::getpwuid(libc::getuid());
-        if passwd.is_null() {
-            return fallback_home_dir();
-        }
-        let home = CStr::from_ptr((*passwd).pw_dir)
-            .to_string_lossy()
-            .to_string();
-        if home.is_empty() {
-            fallback_home_dir()
-        } else {
-            Some(PathBuf::from(home))
-        }
-    }
-}
-
-#[cfg(not(target_os = "macos"))]
-fn real_user_home_dir() -> Option<PathBuf> {
-    fallback_home_dir()
-}
-
-fn fallback_home_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME")
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
 }
 
 fn folder_to_open(path: &Path) -> PathBuf {
@@ -156,17 +102,7 @@ fn open_path_in_finder(path: String) -> Result<(), String> {
         return Err("다운로드 폴더 경로가 비어 있습니다.".to_string());
     }
     let folder = folder_to_open(Path::new(&path));
-    Command::new("open")
-        .arg(&folder)
-        .status()
-        .map_err(|error| format!("Finder를 열 수 없습니다: {error}"))
-        .and_then(|status| {
-            if status.success() {
-                Ok(())
-            } else {
-                Err(format!("Finder 열기 명령이 실패했습니다: {status}"))
-            }
-        })
+    platform::open_path(&folder)
 }
 
 #[tauri::command]
@@ -174,17 +110,7 @@ fn open_url_in_browser(url: String) -> Result<(), String> {
     if !(url.starts_with("https://") || url.starts_with("http://")) {
         return Err("공식 시청 주소가 올바르지 않습니다.".to_string());
     }
-    Command::new("open")
-        .arg(url)
-        .status()
-        .map_err(|error| format!("브라우저를 열 수 없습니다: {error}"))
-        .and_then(|status| {
-            if status.success() {
-                Ok(())
-            } else {
-                Err(format!("브라우저 열기 명령이 실패했습니다: {status}"))
-            }
-        })
+    platform::open_url(&url)
 }
 
 /// The app's context (config, assets and the capabilities compiled in by `build.rs`). The macro
@@ -203,7 +129,7 @@ pub fn run() {
     // Started by the reminders LaunchAgent: check the cache, notify, exit. No Tauri, no
     // backend, no window.
     if reminders::is_check_invocation(std::env::args()) {
-        std::process::exit(reminders::run_check_cli(real_user_home_dir()));
+        std::process::exit(reminders::run_check_cli(platform::real_user_home_dir()));
     }
     let project_root =
         backend::project_root_from_manifest_dir(Path::new(env!("CARGO_MANIFEST_DIR")));
@@ -248,14 +174,17 @@ pub fn run() {
                 .path()
                 .app_data_dir()
                 .ok()
-                .or_else(|| real_user_home_dir().map(|home| reminders::data_dir_for_home(&home)))
+                .or_else(|| {
+                    platform::real_user_home_dir()
+                        .map(|home| platform::app_data_dir_for_home(&home))
+                })
                 .unwrap_or_else(|| std::env::temp_dir().join("ssu-lecture-downloader"));
-            let packaged = launch_agent::supported();
+            let packaged = platform::reminder_schedule_supported();
             let service =
-                ReminderService::start(data_dir, packaged, Arc::new(reminders::OsascriptNotifier));
+                ReminderService::start(data_dir, packaged, Arc::new(platform::PlatformNotifier));
             if packaged && service.enabled() {
                 // Also repairs the agent when the app was moved or the plist went missing.
-                if let Err(error) = install_reminder_agent() {
+                if let Err(error) = platform::install_reminder_schedule() {
                     eprintln!("reminders: {error}");
                 }
             }

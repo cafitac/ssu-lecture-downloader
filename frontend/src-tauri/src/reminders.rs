@@ -268,49 +268,7 @@ pub trait Notifier: Send + Sync {
     fn notify(&self, title: &str, body: &str) -> Result<(), String>;
 }
 
-/// `osascript` arguments for one notification. The text travels as separate argv items read by
-/// an `on run argv` handler, never interpolated into the script, so quotes, backslashes or
-/// AppleScript syntax in a title cannot change what runs.
-pub fn osascript_args(title: &str, body: &str) -> Vec<String> {
-    vec![
-        "-e".to_string(),
-        "on run argv".to_string(),
-        "-e".to_string(),
-        "display notification (item 2 of argv) with title (item 1 of argv)".to_string(),
-        "-e".to_string(),
-        "end run".to_string(),
-        title.to_string(),
-        body.to_string(),
-    ]
-}
-
-pub struct OsascriptNotifier;
-
-impl Notifier for OsascriptNotifier {
-    fn notify(&self, title: &str, body: &str) -> Result<(), String> {
-        let output = std::process::Command::new("/usr/bin/osascript")
-            .args(osascript_args(title, body))
-            .output()
-            .map_err(|error| format!("알림을 보낼 수 없습니다: {error}"))?;
-        if output.status.success() {
-            Ok(())
-        } else {
-            Err(format!(
-                "알림을 보낼 수 없습니다: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            ))
-        }
-    }
-}
-
 // ------------------------------------------------------------------------ storage
-
-/// `<home>/Library/Application Support/<identifier>`, where Tauri keeps the app data on macOS.
-pub fn data_dir_for_home(home: &Path) -> PathBuf {
-    home.join("Library")
-        .join("Application Support")
-        .join(APP_IDENTIFIER)
-}
 
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
@@ -400,12 +358,7 @@ impl DirLock {
             .write(true)
             .open(dir.join(LOCK_FILE))
             .ok()?;
-        #[cfg(unix)]
-        {
-            use std::os::fd::AsRawFd;
-            // Blocks until the other checker is done; failing to lock must not block reminders.
-            let _ = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
-        }
+        crate::platform::lock_exclusive(&file);
         Some(DirLock { _file: file })
     }
 }
@@ -490,12 +443,17 @@ pub fn run_check_cli(home: Option<PathBuf>) -> i32 {
         eprintln!("reminders: cannot resolve the home directory");
         return 1;
     };
-    let dir = data_dir_for_home(&home);
+    let dir = crate::platform::app_data_dir_for_home(&home);
     // The agent only exists while reminders are on; a missing preference means on.
     if read_enabled_setting(&dir) == Some(false) {
         return 0;
     }
-    match check_and_notify(&dir, unix_now(), &OsascriptNotifier, &local_utc_offset) {
+    match check_and_notify(
+        &dir,
+        unix_now(),
+        &crate::platform::PlatformNotifier,
+        &local_utc_offset,
+    ) {
         Ok(_) => 0,
         Err(error) => {
             eprintln!("reminders: {error}");
@@ -767,26 +725,6 @@ mod tests {
     }
 
     #[test]
-    fn osascript_args_keep_text_out_of_the_script() {
-        let title = r#"기한 "임박": \ do shell script "rm -rf ~""#;
-        let body = "강의 · a\"b'c\\d";
-        let args = osascript_args(title, body);
-        let script: Vec<&String> = args
-            .iter()
-            .enumerate()
-            .filter(|(i, _)| *i < 6 && i % 2 == 1)
-            .map(|(_, a)| a)
-            .collect();
-        for line in &script {
-            assert!(!line.contains("rm -rf") && !line.contains("강의"), "{line}");
-        }
-        assert_eq!(args[args.len() - 2], title);
-        assert_eq!(args[args.len() - 1], body);
-        assert_eq!(args[0], "-e");
-        assert_eq!(args[1], "on run argv");
-    }
-
-    #[test]
     fn argv_detection_ignores_the_program_name() {
         assert!(is_check_invocation(["app", "--check-reminders"]));
         assert!(is_check_invocation(["app", "-x", "--check-reminders"]));
@@ -801,10 +739,6 @@ mod tests {
         let conf: serde_json::Value =
             serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
         assert_eq!(conf["identifier"], APP_IDENTIFIER);
-        assert_eq!(
-            data_dir_for_home(Path::new("/Users/x")),
-            Path::new("/Users/x/Library/Application Support/com.local.ssu-lecture-downloader")
-        );
     }
 
     #[test]
