@@ -11,6 +11,7 @@ import importlib.util
 import os
 import signal
 import stat
+import subprocess
 import sys
 import threading
 import tomllib
@@ -24,11 +25,14 @@ from chrome_fakes import FakeBrowser, FakeClock, FakePopen, KillRecorder, make_c
 from ssu_lecture_downloader.service import app_context
 from ssu_lecture_downloader.core import stt, stt_remote_config
 from ssu_lecture_downloader.core import chrome_watch as cw
+from ssu_lecture_downloader.platforms import macos, select_platform
+from ssu_lecture_downloader.platforms.base import APP_IDENTIFIER, PROFILE_DIR_ENV, STT_CONFIG_PATH_ENV
+from ssu_lecture_downloader.platforms.macos import MacOSPlatform
 
 pytestmark = pytest.mark.skipif(sys.platform != "darwin", reason="pins macOS behavior; other platforms get their own characterization")
 
 # conftest hides the real candidates from every test; keep a handle on the real function.
-REAL_CHROME_CANDIDATES = cw.chrome_candidates
+REAL_CHROME_CANDIDATES = macos.chrome_candidates
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 APP_ID = "com.local.ssu-lecture-downloader"
@@ -40,8 +44,8 @@ def fake_home(tmp_path, monkeypatch):
     home = tmp_path / "home" / "me"
     home.mkdir(parents=True)
     monkeypatch.setenv("HOME", str(home))
-    monkeypatch.delenv(cw.PROFILE_DIR_ENV, raising=False)
-    monkeypatch.delenv(stt_remote_config.STT_CONFIG_PATH_ENV, raising=False)
+    monkeypatch.delenv(PROFILE_DIR_ENV, raising=False)
+    monkeypatch.delenv(STT_CONFIG_PATH_ENV, raising=False)
     return home
 
 
@@ -56,29 +60,30 @@ def reset_popen():
 
 
 def test_chrome_watch_profile_dir_under_application_support(fake_home):
-    assert str(cw.default_profile_dir()) == f"{fake_home}/Library/Application Support/{APP_ID}/chrome-watch-profile"
+    assert str(select_platform().chrome_profile_dir()) == f"{fake_home}/Library/Application Support/{APP_ID}/chrome-watch-profile"
 
 
 def test_chrome_watch_profile_dir_env_override_is_expanded(fake_home, monkeypatch):
-    monkeypatch.setenv(cw.PROFILE_DIR_ENV, "~/custom-profile")
-    assert str(cw.default_profile_dir()) == f"{fake_home}/custom-profile"
-    assert cw.PROFILE_DIR_ENV == "SSU_CHROME_WATCH_PROFILE_DIR"
+    monkeypatch.setenv(PROFILE_DIR_ENV, "~/custom-profile")
+    assert str(select_platform().chrome_profile_dir()) == f"{fake_home}/custom-profile"
+    assert PROFILE_DIR_ENV == "SSU_CHROME_WATCH_PROFILE_DIR"
 
 
 def test_chrome_watch_pid_file_sits_next_to_the_profile_dir(fake_home):
     # Inert process hooks: a manager registers itself for an atexit shutdown() that would otherwise
     # run the real `ps`/`killpg` against the owner's real watch Chrome once HOME is restored.
+    platform = MacOSPlatform(process_command=lambda pid: None, killpg=lambda *a: None)
     manager = cw.ChromeWatchManager(
         lambda *a: {},
-        profile_dir=cw.default_profile_dir(),
-        process_command=lambda pid: None,
-        killpg=lambda *a: None,
+        chrome_locator=platform,
+        process_tree=platform,
+        profile_dir=platform.chrome_profile_dir(),
     )
     assert str(manager._pidfile()) == f"{fake_home}/Library/Application Support/{APP_ID}/chrome-watch.pid"
     # Default profile resolution (no profile_dir given), still with inert hooks.
-    default_manager = cw.ChromeWatchManager(lambda *a: {}, process_command=lambda p: None, killpg=lambda *a: None)
+    default_manager = cw.ChromeWatchManager(lambda *a: {}, chrome_locator=platform, process_tree=platform, app_paths=platform)
     try:
-        assert default_manager.profile_dir == cw.default_profile_dir()
+        assert default_manager.profile_dir == platform.chrome_profile_dir()
     finally:
         # Registered for the atexit sweep with the real (default) profile dir; keep it out of that
         # sweep so the interpreter exit never reaches the owner's real watch Chrome pidfile.
@@ -86,14 +91,14 @@ def test_chrome_watch_pid_file_sits_next_to_the_profile_dir(fake_home):
 
 
 def test_stt_json_path(fake_home):
-    assert str(stt_remote_config.default_config_path()) == f"{fake_home}/Library/Application Support/{APP_ID}/stt.json"
-    assert stt_remote_config.STT_CONFIG_PATH_ENV == "SSU_STT_CONFIG_PATH"
-    assert stt_remote_config.APP_IDENTIFIER == APP_ID
+    assert str(select_platform().stt_config_path()) == f"{fake_home}/Library/Application Support/{APP_ID}/stt.json"
+    assert STT_CONFIG_PATH_ENV == "SSU_STT_CONFIG_PATH"
+    assert APP_IDENTIFIER == APP_ID
 
 
 def test_stt_json_is_written_with_mode_0600(tmp_path):
     path = tmp_path / "support" / "stt.json"
-    store = stt_remote_config.RemoteSTTSettingsStore(path)
+    store = stt_remote_config.RemoteSTTSettingsStore(path, writer=MacOSPlatform())
     store.save(stt_remote_config.RemoteSTTConfig(api_key="k"))
     assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
     assert not list(path.parent.glob("*.part"))
@@ -144,7 +149,7 @@ def test_chrome_args_exact_argv():
 def test_background_launch_argv_goes_through_open(tmp_path):
     chrome = f"/Applications/{CHROME_REL}"
     args = cw.build_chrome_args(chrome, "/p")
-    assert cw.build_background_launch(chrome, args) == [
+    assert macos.build_background_launch(chrome, args) == [
         "/usr/bin/open",
         "-g",
         "-n",
@@ -181,16 +186,22 @@ def _manager(tmp_path, *, ignore_term=False, background=False, rows=None):
         if sig == signal.SIGKILL or (sig == signal.SIGTERM and not ignore_term):
             alive["yes"] = False
 
-    manager = cw.ChromeWatchManager(
-        lambda *a: {},
-        background_launch=background,
-        profile_dir=profile,
+    platform = MacOSPlatform(
         candidates=[chrome],
         popen=RecordingPopen,
-        connect=lambda url: FakeBrowser([]),
         killpg=killpg,
         process_command=lambda pid: f"{chrome} --user-data-dir={profile}" if alive["yes"] else None,
         list_processes=lambda: rows or [],
+        clock=clock,
+        sleep=clock.sleep,
+    )
+    manager = cw.ChromeWatchManager(
+        lambda *a: {},
+        chrome_locator=platform,
+        process_tree=platform,
+        background_launch=background,
+        profile_dir=profile,
+        connect=lambda url: FakeBrowser([]),
         clock=clock,
         sleep=clock.sleep,
         timings=cw.Timings(terminate_grace=3.0),
@@ -215,9 +226,9 @@ def _assert_grace_respected(env, grace=3.0):
 
 
 STD_KWARGS = {
-    "stdin": cw.subprocess.DEVNULL,
-    "stdout": cw.subprocess.DEVNULL,
-    "stderr": cw.subprocess.DEVNULL,
+    "stdin": subprocess.DEVNULL,
+    "stdout": subprocess.DEVNULL,
+    "stderr": subprocess.DEVNULL,
     "start_new_session": True,
 }
 
@@ -255,7 +266,7 @@ def test_background_launch_goes_through_open_and_records_the_chrome_main_pid(tmp
     try:
         popen = FakePopen.instances[0]
         assert proc is popen
-        assert popen.args == cw.build_background_launch(env.chrome, cw.build_chrome_args(env.chrome, env.profile))
+        assert popen.args == macos.build_background_launch(env.chrome, cw.build_chrome_args(env.chrome, env.profile))
         assert popen.args[:6] == ["/usr/bin/open", "-g", "-n", "-W", "-a", f"{tmp_path}/Google Chrome.app"]
         assert popen.kwargs == STD_KWARGS
         assert _pidfile(env).read_text(encoding="utf-8") == "11"  # Chrome itself, not the launcher (4242)
@@ -315,8 +326,8 @@ def test_background_terminate_escalates_to_sigkill_when_chrome_stays_alive(tmp_p
 
 def test_default_killpg_is_os_killpg(monkeypatch):
     calls = []
-    monkeypatch.setattr(cw.os, "killpg", lambda pgid, sig: calls.append((pgid, sig)))
-    cw.default_killpg(77, signal.SIGTERM)
+    monkeypatch.setattr(macos.os, "killpg", lambda pgid, sig: calls.append((pgid, sig)))
+    macos.default_killpg(77, signal.SIGTERM)
     assert calls == [(77, signal.SIGTERM)]
 
 
@@ -333,20 +344,20 @@ def test_default_killpg_is_os_killpg(monkeypatch):
     ],
 )
 def test_local_stt_predicate(monkeypatch, platform_name, machine, expected):
-    monkeypatch.setattr(stt.sys, "platform", platform_name)
-    monkeypatch.setattr(stt.platform, "machine", lambda: machine)
-    assert stt.faster_whisper_platform_supported() is expected
+    monkeypatch.setattr(macos.sys, "platform", platform_name)
+    monkeypatch.setattr(macos.platform, "machine", lambda: machine)
+    assert MacOSPlatform().local_engine_supported() is expected
 
 
 def test_unsupported_intel_mac_message_is_unchanged(monkeypatch):
     monkeypatch.setattr(stt, "_has_faster_whisper", lambda: False)
-    monkeypatch.setattr(stt.sys, "platform", "darwin")
-    monkeypatch.setattr(stt.platform, "machine", lambda: "x86_64")
-    status = stt.check_stt_provider("faster_whisper")
+    monkeypatch.setattr(macos.sys, "platform", "darwin")
+    monkeypatch.setattr(macos.platform, "machine", lambda: "x86_64")
+    status = stt.check_stt_provider("faster_whisper", stt_capability=MacOSPlatform())
     assert (status.available, status.platform_supported) == (False, False)
     assert status.install_hint == "이 Mac(Intel)에서는 자막 생성을 지원하지 않아요. Apple 실리콘 Mac에서 사용할 수 있어요."
-    monkeypatch.setattr(stt.platform, "machine", lambda: "arm64")
-    status = stt.check_stt_provider("faster_whisper")
+    monkeypatch.setattr(macos.platform, "machine", lambda: "arm64")
+    status = stt.check_stt_provider("faster_whisper", stt_capability=MacOSPlatform())
     assert status.platform_supported is True
     assert status.install_hint == stt.faster_whisper_install_hint()
 

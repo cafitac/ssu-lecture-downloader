@@ -16,6 +16,7 @@ from ssu_lecture_downloader.service.api import create_app
 from ssu_lecture_downloader.service.credentials import CredentialPair
 from ssu_lecture_downloader.core.ssh_tunnel import TunnelError
 from ssu_lecture_downloader.core.stt_remote import RemoteSTTService
+from ssu_lecture_downloader.platforms.macos import MacOSPlatform
 from ssu_lecture_downloader.core.stt_remote_config import RemoteSTTConfig, RemoteSTTSettingsStore, apply_patch
 
 SECRET = 'sk-test-secret-123'
@@ -50,7 +51,7 @@ class FakeTunnel:
 
 
 def make_client(tmp_path: Path, tunnel: FakeTunnel | None = None) -> tuple[TestClient, RemoteSTTService]:
-    service = RemoteSTTService(RemoteSTTSettingsStore(tmp_path / 'settings' / 'stt.json'), tunnel or FakeTunnel())
+    service = RemoteSTTService(RemoteSTTSettingsStore(tmp_path / 'settings' / 'stt.json', writer=MacOSPlatform()), tunnel or FakeTunnel())
     app = create_app(service_factory=FakeService, default_output_dir=tmp_path, credential_store=FakeCredentialStore(CredentialPair(username='u', password='p')), remote_stt=service)
     return TestClient(app), service
 
@@ -81,7 +82,7 @@ def test_config_round_trip_persists_to_disk_and_never_returns_the_api_key(tmp_pa
     assert response.json()['api_key_set'] is True
     assert response.json()['base_url'] == 'https://stt.example.com'
     # Persisted: a fresh service on the same file sees it; the file is private.
-    reloaded = RemoteSTTService(RemoteSTTSettingsStore(tmp_path / 'settings' / 'stt.json'))
+    reloaded = RemoteSTTService(RemoteSTTSettingsStore(tmp_path / 'settings' / 'stt.json', writer=MacOSPlatform()))
     assert reloaded.config().api_key == SECRET and reloaded.is_enabled()
     mode = stat.S_IMODE(os.stat(tmp_path / 'settings' / 'stt.json').st_mode)
     assert mode == 0o600

@@ -1,4 +1,5 @@
-from ssu_lecture_downloader.service.credentials import CredentialPair, CompositeCredentialStore, EnvCredentialStore, InMemoryCredentialStore, MacOSKeychainCredentialStore, default_credential_store
+from ssu_lecture_downloader.platforms.macos import MacOSKeychainCredentialStore
+from ssu_lecture_downloader.service.credentials import CredentialPair, CompositeCredentialStore, EnvCredentialStore, InMemoryCredentialStore, default_credential_store
 
 
 class RecordingRunner:

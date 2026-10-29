@@ -5,8 +5,7 @@ import time
 from pathlib import Path
 
 import pytest
-from stt_fakes import FakeSttServer, RecordedRequest, json_text, sleepy, srt, write_silent_wav
-
+from stt_fakes import SUPPORTS_LOCAL_STT, FakeSttServer, RecordedRequest, json_text, sleepy, srt, write_silent_wav
 from ssu_lecture_downloader.core import postprocess_media
 from ssu_lecture_downloader.core.stt import TranscriptionCancelled, TranscriptionRequest, transcribe_audio
 from ssu_lecture_downloader.core.stt_cues import TranscriptSegment
@@ -17,6 +16,7 @@ from ssu_lecture_downloader.core.stt_remote import (
     WhisperCppServerProvider,
     repair_repeated_cues,
 )
+from ssu_lecture_downloader.platforms.macos import MacOSPlatform
 from ssu_lecture_downloader.core.stt_remote_config import RemoteSTTSettingsStore
 
 
@@ -207,7 +207,7 @@ def fake_ffmpeg(monkeypatch):
 
 
 def service_for(tmp_path: Path, url: str, **config) -> RemoteSTTService:
-    service = RemoteSTTService(RemoteSTTSettingsStore(tmp_path / 'stt.json'))
+    service = RemoteSTTService(RemoteSTTSettingsStore(tmp_path / 'stt.json', writer=MacOSPlatform()))
     service.update({'enabled': True, 'kind': 'whisper_cpp_server', 'base_url': url, **config})
     return service
 
@@ -229,7 +229,7 @@ def test_pipeline_repairs_a_loop_cleans_cues_and_writes_all_transcript_files(tmp
     events: list[dict] = []
     with FakeSttServer(respond) as server:
         service = service_for(tmp_path, server.url)
-        result = transcribe_audio(TranscriptionRequest(audio_path=audio, output_dir=tmp_path, overwrite=True), on_progress=events.append, remote=service)
+        result = transcribe_audio(TranscriptionRequest(audio_path=audio, output_dir=tmp_path, overwrite=True), on_progress=events.append, remote=service, stt_capability=SUPPORTS_LOCAL_STT)
 
     assert result.ok, result.message
     assert fake_ffmpeg == [(10.0, 40.0)]
@@ -254,8 +254,8 @@ def test_pipeline_cancel_and_server_errors_map_to_codes(tmp_path, fake_ffmpeg):
     audio.write_bytes(b'mp3')
     with FakeSttServer(lambda request: (503, 'text/plain', 'busy')) as server:
         service = service_for(tmp_path, server.url)
-        failed = transcribe_audio(TranscriptionRequest(audio_path=audio, output_dir=tmp_path), remote=service)
-        cancelled = transcribe_audio(TranscriptionRequest(audio_path=audio, output_dir=tmp_path), should_cancel=lambda: True, remote=service)
+        failed = transcribe_audio(TranscriptionRequest(audio_path=audio, output_dir=tmp_path), remote=service, stt_capability=SUPPORTS_LOCAL_STT)
+        cancelled = transcribe_audio(TranscriptionRequest(audio_path=audio, output_dir=tmp_path), should_cancel=lambda: True, remote=service, stt_capability=SUPPORTS_LOCAL_STT)
 
     assert (failed.ok, failed.error_code) == (False, 'stt_remote_http_error')
     assert service.status()['reachable'] is False and 'HTTP 503' in service.status()['last_error']
@@ -267,7 +267,7 @@ def test_pipeline_empty_transcript_is_an_error(tmp_path, fake_ffmpeg):
     audio = tmp_path / 'lecture.mp3'
     audio.write_bytes(b'mp3')
     with FakeSttServer(lambda request: (200, 'text/plain', srt((0, 1, '음'), (1, 2, '어')))) as server:
-        result = transcribe_audio(TranscriptionRequest(audio_path=audio, output_dir=tmp_path), remote=service_for(tmp_path, server.url))
+        result = transcribe_audio(TranscriptionRequest(audio_path=audio, output_dir=tmp_path), remote=service_for(tmp_path, server.url), stt_capability=SUPPORTS_LOCAL_STT)
 
     assert result.error_code == 'stt_empty_result'
 
@@ -275,12 +275,12 @@ def test_pipeline_empty_transcript_is_an_error(tmp_path, fake_ffmpeg):
 def test_fake_provider_and_disabled_remote_keep_the_local_path(tmp_path):
     audio = tmp_path / 'lecture.wav'
     audio.write_bytes(b'audio')
-    disabled = RemoteSTTService(RemoteSTTSettingsStore(tmp_path / 'stt.json'))
-    enabled_url_service = RemoteSTTService(RemoteSTTSettingsStore(tmp_path / 'other.json'))
+    disabled = RemoteSTTService(RemoteSTTSettingsStore(tmp_path / 'stt.json', writer=MacOSPlatform()))
+    enabled_url_service = RemoteSTTService(RemoteSTTSettingsStore(tmp_path / 'other.json', writer=MacOSPlatform()))
     enabled_url_service.update({'enabled': True, 'base_url': 'http://127.0.0.1:9'})
 
-    local = transcribe_audio(TranscriptionRequest(audio_path=audio, provider='fake', overwrite=True), remote=disabled)
-    fake_wins = transcribe_audio(TranscriptionRequest(audio_path=audio, provider='fake', overwrite=True), remote=enabled_url_service)
+    local = transcribe_audio(TranscriptionRequest(audio_path=audio, provider='fake', overwrite=True), remote=disabled, stt_capability=SUPPORTS_LOCAL_STT)
+    fake_wins = transcribe_audio(TranscriptionRequest(audio_path=audio, provider='fake', overwrite=True), remote=enabled_url_service, stt_capability=SUPPORTS_LOCAL_STT)
 
     assert local.ok and fake_wins.ok  # the 'fake' provider never goes to a remote server
 
@@ -297,5 +297,5 @@ def test_check_reports_reachability_and_remembers_it(tmp_path):
     assert status['reachable'] is False and status['error_code'] == 'stt_remote_unreachable'
     assert down.provider_status()['available'] is False and down.provider_status()['installed'] is True
 
-    unconfigured = RemoteSTTService(RemoteSTTSettingsStore(tmp_path / 'none.json'))
+    unconfigured = RemoteSTTService(RemoteSTTSettingsStore(tmp_path / 'none.json', writer=MacOSPlatform()))
     assert unconfigured.check()['error_code'] == 'stt_remote_not_configured'

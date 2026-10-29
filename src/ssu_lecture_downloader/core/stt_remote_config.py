@@ -1,6 +1,7 @@
 """Persisted settings of the remote subtitle (STT) server.
 
-Stored as a JSON file in the app data folder (mode 0600 because it may hold an API key).
+Stored as a JSON file in the app data folder, written through the injected private-file writer
+(owner-only because it may hold an API key).
 The key is write-only: `public_view` only says whether one is set and nothing else ever
 returns or logs it.
 """
@@ -8,8 +9,8 @@ returns or logs it.
 from __future__ import annotations
 
 import json
-import os
 import threading
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import urlsplit
@@ -17,9 +18,6 @@ from urllib.parse import urlsplit
 from pydantic import BaseModel
 
 from ssu_lecture_downloader.core.ssh_tunnel import is_valid_port, is_valid_ssh_host
-
-STT_CONFIG_PATH_ENV = 'SSU_STT_CONFIG_PATH'
-APP_IDENTIFIER = 'com.local.ssu-lecture-downloader'
 
 RemoteKind = Literal['whisper_cpp_server', 'openai_compatible']
 REMOTE_KINDS = ('whisper_cpp_server', 'openai_compatible')
@@ -56,13 +54,6 @@ class RemoteSTTConfig(BaseModel):
             'api_key_set': bool(self.api_key),
             'tunnel': self.tunnel.model_dump() if self.tunnel else None,
         }
-
-
-def default_config_path() -> Path:
-    override = os.environ.get(STT_CONFIG_PATH_ENV, '').strip()
-    if override:
-        return Path(override).expanduser()
-    return Path.home() / 'Library' / 'Application Support' / APP_IDENTIFIER / 'stt.json'
 
 
 def validate_base_url(value: str) -> str:
@@ -119,13 +110,21 @@ def apply_patch(current: RemoteSTTConfig, patch: dict[str, Any]) -> RemoteSTTCon
 
 
 class RemoteSTTSettingsStore:
-    def __init__(self, path: Path | None = None) -> None:
+    """`writer` is a SecretFileWriter and `path_provider` yields the default path (AppPaths.stt_config_path)."""
+
+    def __init__(self, path: Path | None = None, *, writer: Any, path_provider: Callable[[], Path] | None = None) -> None:
         self._path = path
+        self._path_provider = path_provider
+        self._writer = writer
         self._lock = threading.Lock()
 
     @property
     def path(self) -> Path:
-        return self._path or default_config_path()
+        if self._path is not None:
+            return self._path
+        if self._path_provider is None:
+            raise ValueError('RemoteSTTSettingsStore needs path or path_provider')
+        return self._path_provider()
 
     def load(self) -> RemoteSTTConfig:
         with self._lock:
@@ -139,12 +138,5 @@ class RemoteSTTSettingsStore:
         with self._lock:
             path = self.path
             path.parent.mkdir(parents=True, exist_ok=True)
-            partial = path.with_name(f'{path.name}.part')
-            try:
-                # 0600 from the first byte: the file may contain the API key.
-                fd = os.open(partial, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-                with os.fdopen(fd, 'w', encoding='utf-8') as handle:
-                    json.dump(config.model_dump(), handle, ensure_ascii=False, indent=2)
-                os.replace(partial, path)
-            finally:
-                partial.unlink(missing_ok=True)
+            text = json.dumps(config.model_dump(), ensure_ascii=False, indent=2)
+            self._writer.write_private(path, text.encode('utf-8'))

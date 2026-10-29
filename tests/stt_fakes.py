@@ -13,6 +13,19 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 
+class FakeSttCapability:
+    """An SttCapability (the platform's local-engine answer) with a fixed value."""
+
+    def __init__(self, supported: bool) -> None:
+        self.supported = supported
+
+    def local_engine_supported(self) -> bool:
+        return self.supported
+
+
+SUPPORTS_LOCAL_STT = FakeSttCapability(True)
+
+
 @dataclass
 class RecordedRequest:
     method: str
