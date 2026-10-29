@@ -16,7 +16,16 @@ from dataclasses import dataclass
 from typing import Any
 
 MAX_JOB_PROGRESS_EVENTS = 400
-COALESCED_PROGRESS_STAGES = {"download_progress", "audio_progress", "transcript_progress", "transcript_repair"}
+COALESCED_PROGRESS_STAGES = {
+    "download_progress",
+    "audio_progress",
+    "transcript_progress",
+    "transcript_repair",
+    # Wait notes (queue position, "n requests ahead") replace each other per lecture.
+    "transcript_waiting",
+    "transcript_queued",
+    "audio_waiting",
+}
 TERMINAL_STATUSES = frozenset({"succeeded", "failed", "cancelled"})
 # Finished jobs are kept so late polls still resolve, but not forever.
 DEFAULT_MAX_FINISHED_JOBS = 50
@@ -32,21 +41,99 @@ def _progress_identity(event: dict[str, Any]) -> tuple[object, object, object, o
     )
 
 
+# Stage-entry events: the first event of a step, which says which step a lecture is in (later ticks only refine it).
+STAGE_ENTRY_PROGRESS_STAGES = frozenset({
+    "downloading",
+    "download_started",
+    "extracting_audio",
+    "transcribing",
+    "transcript_connecting",
+    "transcript_started",
+})
+
+
+def is_milestone_event(event: dict[str, Any]) -> bool:
+    """Events that say where a lecture is: they are the last to be dropped when the list is over its cap.
+
+    Terminal and waiting notes, the entry event of each step (so a row never falls back to an earlier step once
+    its `audio_done` survives), and a bare `failed`, which a batch emits as an item's final result.
+    """
+    stage = str(event.get("stage") or "")
+    return (
+        stage.startswith("artifact_item_")
+        or stage in ("done", "failed", "transcript_queued")
+        or stage in STAGE_ENTRY_PROGRESS_STAGES
+        or stage.endswith("_done")
+        or stage.endswith("_waiting")
+        or (stage.startswith("video_") and stage.endswith("_started"))
+    )
+
+
+TERMINAL_ITEM_STAGES = frozenset({"artifact_item_done", "artifact_item_failed", "artifact_item_cancelled"})
+# What stays of a finished lecture when the list is over its cap: its entry and its end.
+FINISHED_ITEM_KEPT_STAGES = TERMINAL_ITEM_STAGES | {"artifact_item_queued"}
+
+
+def _lecture_key(event: dict[str, Any]) -> str | None:
+    module_item_id = event.get("module_item_id")
+    return str(module_item_id) if module_item_id is not None else None
+
+
+def _trim_to_cap(progress: list[dict[str, Any]]) -> None:
+    """Drop events until the list fits the cap, least informative first.
+
+    1. Plain events (noise ticks, notes) and everything a finished lecture left behind except its
+       `artifact_item_queued` and terminal `artifact_item_*` event: the row is closed, only its end matters.
+    2. Only when nothing of that kind is left, the oldest remaining events, whatever they are.
+
+    A running lecture's coalesced entries (one per identity: its newest tick or wait note) and the event just
+    appended are not in the first group, so finished lectures cannot push live percentages out of the list.
+    """
+    overflow = len(progress) - MAX_JOB_PROGRESS_EVENTS
+    if overflow <= 0:
+        return
+    finished = {key for item in progress if item.get("stage") in TERMINAL_ITEM_STAGES and (key := _lecture_key(item)) is not None}
+    newest = progress[-1]
+
+    def evict_first(item: dict[str, Any]) -> bool:
+        if item is newest:
+            return False
+        stage = item.get("stage")
+        if _lecture_key(item) in finished:
+            return stage not in FINISHED_ITEM_KEPT_STAGES
+        if stage in COALESCED_PROGRESS_STAGES:
+            return False
+        return not is_milestone_event(item)
+
+    keep: list[dict[str, Any]] = []
+    for item in progress:
+        if overflow > 0 and evict_first(item):
+            overflow -= 1
+        else:
+            keep.append(item)
+    if overflow > 0:
+        del keep[:overflow]
+    progress[:] = keep
+
+
 def append_compacted_progress(progress: list[dict[str, Any]], event: dict[str, Any]) -> None:
-    """Append progress without retaining every byte-level tick forever."""
-    if event.get("stage") in COALESCED_PROGRESS_STAGES:
+    """Append progress without retaining every byte-level tick forever.
+
+    A coalesced stage deletes its previous entry (same lecture and file) and appends the new one at the end, so the
+    list stays chronological: `at` never decreases along it.
+
+    Over the cap see `_trim_to_cap`: plain events and finished lectures' leftovers go first (oldest first);
+    milestones and running lectures' newest ticks are dropped only when nothing else is left.
+    """
+    stage = event.get("stage")
+    if stage in COALESCED_PROGRESS_STAGES:
         identity = _progress_identity(event)
         for index in range(len(progress) - 1, -1, -1):
             if _progress_identity(progress[index]) == identity:
-                progress[index] = event
+                del progress[index]
                 break
-        else:
-            progress.append(event)
-    else:
-        progress.append(event)
-    overflow = len(progress) - MAX_JOB_PROGRESS_EVENTS
-    if overflow > 0:
-        del progress[:overflow]
+    progress.append(event)
+    _trim_to_cap(progress)
 
 
 class ProgressCollector:

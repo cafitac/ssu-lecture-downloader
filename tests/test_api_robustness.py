@@ -364,7 +364,7 @@ def test_job_registry_prunes_old_finished_jobs(tmp_path):
     assert client.get(f'/api/download/jobs/{ids[0]}').status_code == 404
 
 
-# ---- item 7: failed/cancelled artifact jobs stop queued work -------------------------------
+# ---- item 7: a failed lecture ends alone; cancel stops every lecture -------------------------
 
 
 class TwoVideoService(FakeService):
@@ -373,7 +373,7 @@ class TwoVideoService(FakeService):
     def __init__(self, videos):
         self.videos = videos
 
-    def batch_download_lectures(self, username, password, *, course_id, course_name, output_dir, dry_run, module_item_ids=None, include_completed=False, on_progress=None, should_cancel=None, conflict_strategy='rename', max_parallel_downloads=4):
+    def batch_download_lectures(self, username, password, *, course_id, course_name, output_dir, dry_run, module_item_ids=None, include_completed=False, on_progress=None, should_cancel=None, conflict_strategy='rename', max_parallel_downloads=4, on_item_ready=None):
         items = [
             BatchDownloadItemResult(
                 ok=True, error_code=None, dry_run=dry_run, written=False, course_id=course_id, module_item_id=index,
@@ -401,25 +401,46 @@ def make_videos(tmp_path):
     return videos
 
 
-def test_artifact_job_failure_does_not_run_the_remaining_queued_items(tmp_path, monkeypatch):
+def test_artifact_job_failure_of_one_lecture_does_not_stop_the_others(tmp_path, monkeypatch):
+    """Replaces the old abort-on-first-failure rule: lecture 1 fails, lecture 2 still runs to its end."""
     videos = make_videos(tmp_path)
     extracted = []
 
     def fake_extract(request, on_progress=None, should_cancel=None):
         extracted.append(request.input_path.name)
-        return AudioExtractionResult(ok=False, input_path=request.input_path, error_code='ffmpeg_failed', message='bad input')
+        if request.input_path.name == 'lecture-1.mp4':
+            return AudioExtractionResult(ok=False, input_path=request.input_path, error_code='ffmpeg_failed', message='bad input')
+        output = request.input_path.with_suffix('.mp3')
+        output.write_bytes(b'audio')
+        return AudioExtractionResult(ok=True, input_path=request.input_path, output_path=output, file_size=5)
 
     monkeypatch.setattr('ssu_lecture_downloader.core.postprocess_media.extract_audio', fake_extract)
     client = make_artifact_client(tmp_path, videos)
 
     started = client.post('/api/download/artifacts/jobs', json={'course_id': 1, 'module_item_ids': [1, 2], 'outputs': ['mp3'], 'max_parallel_downloads': 4}).json()
     status = wait_job(client, '/api/download/artifacts/jobs', started['job_id'])
-    time.sleep(0.1)
 
     assert status['status'] == 'failed'
-    assert status['error_code'] == 'ffmpeg_failed'
-    assert extracted == ['lecture-1.mp4']
-    assert status['result']['artifacts'][0]['error_code'] == 'ffmpeg_failed'
+    assert status['error_code'] == 'partial_failure'
+    assert sorted(extracted) == ['lecture-1.mp4', 'lecture-2.mp4']
+    assert videos[1].with_suffix('.mp3').exists()
+    assert [artifact.get('error_code') for artifact in status['result']['artifacts'] if not artifact['ok']] == ['ffmpeg_failed']
+    assert status['result']['summary'] == {'total': 2, 'succeeded': 1, 'failed': 1, 'cancelled': 0}
+
+
+def test_artifact_job_where_every_lecture_fails_the_same_way_reports_that_code(tmp_path, monkeypatch):
+    videos = make_videos(tmp_path)
+
+    def fake_extract(request, on_progress=None, should_cancel=None):
+        return AudioExtractionResult(ok=False, input_path=request.input_path, error_code='ffmpeg_failed', message='bad input')
+
+    monkeypatch.setattr('ssu_lecture_downloader.core.postprocess_media.extract_audio', fake_extract)
+    client = make_artifact_client(tmp_path, videos)
+
+    started = client.post('/api/download/artifacts/jobs', json={'course_id': 1, 'module_item_ids': [1, 2], 'outputs': ['mp3']}).json()
+    status = wait_job(client, '/api/download/artifacts/jobs', started['job_id'])
+
+    assert (status['status'], status['error_code']) == ('failed', 'ffmpeg_failed')
 
 
 def test_artifact_job_cancel_ends_cancelled_not_failed(tmp_path, monkeypatch):

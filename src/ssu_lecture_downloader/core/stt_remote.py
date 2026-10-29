@@ -23,6 +23,7 @@ import time
 import wave
 from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
+from contextlib import contextmanager, nullcontext
 from typing import Any, Protocol
 from urllib.parse import urlsplit
 from uuid import uuid4
@@ -31,7 +32,7 @@ from ssu_lecture_downloader.core import postprocess_media, stt_cues
 from ssu_lecture_downloader.core.postprocess_media import MediaCancelled
 from ssu_lecture_downloader.core.progress import emit_progress
 from ssu_lecture_downloader.core.ssh_tunnel import SshTunnel, TunnelError
-from ssu_lecture_downloader.core.stt import TranscriptionCancelled, TranscriptionRequest, TranscriptionResult, write_transcript_files
+from ssu_lecture_downloader.core.stt import MEDIA, TranscriptionCancelled, TranscriptionRequest, TranscriptionResult, WorkGates, write_transcript_files
 from ssu_lecture_downloader.core.stt_cues import TranscriptSegment
 from ssu_lecture_downloader.core.stt_remote_config import (
     DEFAULT_OPENAI_MODEL,
@@ -41,7 +42,15 @@ from ssu_lecture_downloader.core.stt_remote_config import (
     apply_patch,
 )
 
+# Response budget of ONE request when nothing is ahead of it on the server (also the legacy idle timeout).
 REQUEST_TIMEOUT_SECONDS = 20 * 60
+# Every further request of this app already sent to the same server adds one more budget, up to this cap.
+RESPONSE_BUDGET_CAP_SECONDS = 4 * 60 * 60
+# Connect and upload: a socket that stays silent this long is dead (the server has not even read the body).
+IDLE_TIMEOUT_SECONDS = 60
+# A server that rejects concurrent requests (HTTP 429/503) gets the request again after these waits.
+BACKOFF_STATUSES = frozenset({429, 503})
+BACKOFF_SECONDS = (5.0, 10.0, 20.0, 30.0)
 PROBE_TIMEOUT_SECONDS = 5.0
 CANCEL_POLL_SECONDS = 0.3
 UPLOAD_CHUNK_BYTES = 1024 * 1024
@@ -95,9 +104,15 @@ def http_request(
     headers: dict[str, str] | None = None,
     body: MultipartBody | None = None,
     timeout: float = REQUEST_TIMEOUT_SECONDS,
+    response_timeout: float | None = None,
     should_cancel: Callable[[], bool] | None = None,
 ) -> tuple[int, bytes]:
-    """One HTTP request with no redirects and no proxies, abortable through `should_cancel`."""
+    """One HTTP request with no redirects and no proxies, abortable through `should_cancel`.
+
+    `timeout` is the idle timeout of connect and upload. Once the whole request is sent the
+    socket waits for the response up to `response_timeout` (default: `timeout`), which is how
+    a request queued behind others on a one-at-a-time server is allowed to wait.
+    """
     parts = urlsplit(url)
     if parts.scheme not in ('http', 'https') or not parts.hostname:
         raise RemoteSTTError('invalid_stt_base_url', '서버 주소가 올바르지 않아요.')
@@ -105,6 +120,7 @@ def http_request(
     connection = connection_class(parts.hostname, parts.port, timeout=timeout)
     target = (parts.path or '/') + (f'?{parts.query}' if parts.query else '')
     outcome: dict[str, Any] = {}
+    started = time.monotonic()
 
     def run() -> None:
         try:
@@ -118,6 +134,8 @@ def http_request(
             if body is not None:
                 for chunk in body.chunks():
                     connection.send(chunk)
+            if response_timeout is not None and connection.sock is not None:
+                connection.sock.settimeout(response_timeout)
             response = connection.getresponse()
             outcome['value'] = (response.status, response.read())
         except BaseException as exc:  # noqa: BLE001 - re-raised on the calling thread
@@ -142,7 +160,8 @@ def http_request(
     error = outcome.get('error')
     if error is not None:
         if isinstance(error, (TimeoutError, socket.timeout)):
-            raise RemoteSTTError('stt_remote_timeout', '자막 서버가 시간 안에 응답하지 않았어요.') from error
+            waited = round(time.monotonic() - started)
+            raise RemoteSTTError('stt_remote_timeout', f'자막 서버가 시간 안에 응답하지 않았어요 ({waited}초 기다렸어요).') from error
         if isinstance(error, (OSError, http.client.HTTPException)):
             raise RemoteSTTError('stt_remote_unreachable', '자막 서버에 연결하지 못했어요. 서버와 SSH 터널을 확인해 주세요.') from error
         raise error
@@ -152,10 +171,68 @@ def http_request(
 # -------------------------------------------------------------------- providers
 
 
+def response_budget_seconds(ahead_requests: int, *, base: float = REQUEST_TIMEOUT_SECONDS, cap: float = RESPONSE_BUDGET_CAP_SECONDS) -> float:
+    """How long one request may wait for its response: `base` per request in front of it plus its own, capped."""
+    return min(base * (1 + max(0, ahead_requests)), max(cap, base))
+
+
+def _wait_cancellable(seconds: float, should_cancel: Callable[[], bool] | None) -> None:
+    deadline = time.monotonic() + seconds
+    while True:
+        if should_cancel is not None and should_cancel():
+            raise TranscriptionCancelled('transcription cancelled')
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return
+        time.sleep(min(CANCEL_POLL_SECONDS, remaining))
+
+
+def post_audio(
+    url: str,
+    *,
+    headers: dict[str, str] | None,
+    fields: dict[str, str],
+    wav_path: Path,
+    idle_timeout: float,
+    response_budget: float,
+    backoff_seconds: Sequence[float],
+    should_cancel: Callable[[], bool] | None,
+    on_event: Callable[[dict[str, Any]], None] | None,
+) -> tuple[int, bytes]:
+    """POST the audio and wait up to `response_budget` for the answer (a queue-aware wait, not an idle one).
+
+    A server that answers 429/503 instead of queueing is asked again after a short wait (the
+    wait is cancel-aware and counts against the same budget); the last answer is returned when
+    the budget cannot cover another wait.
+    """
+    deadline = time.monotonic() + response_budget
+    attempt = 0
+    while True:
+        remaining = max(deadline - time.monotonic(), 1.0)
+        status, body = http_request('POST', url, headers=headers, body=MultipartBody(fields, 'file', wav_path), timeout=idle_timeout, response_timeout=remaining, should_cancel=should_cancel)
+        if status not in BACKOFF_STATUSES or not backoff_seconds:
+            return status, body
+        delay = backoff_seconds[min(attempt, len(backoff_seconds) - 1)]
+        if time.monotonic() + delay >= deadline:
+            return status, body
+        if on_event is not None:
+            on_event({'reason': 'server_deferred', 'retry_after_seconds': delay})
+        _wait_cancellable(delay, should_cancel)
+        attempt += 1
+
+
 class RemoteProvider(Protocol):
     kind: str
 
-    def transcribe(self, wav_path: Path, *, temperature: float = 0.0, should_cancel: Callable[[], bool] | None = None) -> list[TranscriptSegment]: ...
+    def transcribe(
+        self,
+        wav_path: Path,
+        *,
+        temperature: float = 0.0,
+        should_cancel: Callable[[], bool] | None = None,
+        ahead_requests: int = 0,
+        on_event: Callable[[dict[str, Any]], None] | None = None,
+    ) -> list[TranscriptSegment]: ...
 
     def probe(self) -> None: ...
 
@@ -178,14 +255,45 @@ def _error_text(status: int, body: bytes) -> str:
 class WhisperCppServerProvider:
     kind = 'whisper_cpp_server'
 
-    def __init__(self, base_url: str, *, language: str = 'ko', timeout: float = REQUEST_TIMEOUT_SECONDS) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        *,
+        language: str = 'ko',
+        timeout: float | None = None,
+        idle_timeout: float | None = None,
+        budget_cap: float | None = None,
+        backoff_seconds: Sequence[float] | None = None,
+    ) -> None:
         self.base_url = base_url.rstrip('/')
         self.language = language
-        self.timeout = timeout
+        # `timeout` is the response budget of one request; each request ahead of it adds one more (see post_audio).
+        self.timeout = REQUEST_TIMEOUT_SECONDS if timeout is None else timeout
+        self.idle_timeout = min(IDLE_TIMEOUT_SECONDS if idle_timeout is None else idle_timeout, self.timeout)
+        self.budget_cap = RESPONSE_BUDGET_CAP_SECONDS if budget_cap is None else budget_cap
+        self.backoff_seconds = BACKOFF_SECONDS if backoff_seconds is None else tuple(backoff_seconds)
 
-    def transcribe(self, wav_path: Path, *, temperature: float = 0.0, should_cancel: Callable[[], bool] | None = None) -> list[TranscriptSegment]:
+    def transcribe(
+        self,
+        wav_path: Path,
+        *,
+        temperature: float = 0.0,
+        should_cancel: Callable[[], bool] | None = None,
+        ahead_requests: int = 0,
+        on_event: Callable[[dict[str, Any]], None] | None = None,
+    ) -> list[TranscriptSegment]:
         fields = {'temperature': str(temperature), 'response_format': 'srt', 'language': self.language}
-        status, body = http_request('POST', f'{self.base_url}/inference', body=MultipartBody(fields, 'file', wav_path), timeout=self.timeout, should_cancel=should_cancel)
+        status, body = post_audio(
+            f'{self.base_url}/inference',
+            headers=None,
+            fields=fields,
+            wav_path=wav_path,
+            idle_timeout=self.idle_timeout,
+            response_budget=response_budget_seconds(ahead_requests, base=self.timeout, cap=self.budget_cap),
+            backoff_seconds=self.backoff_seconds,
+            should_cancel=should_cancel,
+            on_event=on_event,
+        )
         if status != 200:
             raise RemoteSTTError('stt_remote_http_error', f'자막 서버가 오류를 돌려줬어요 ({_error_text(status, body)}).')
         text = _decode(body)
@@ -209,24 +317,56 @@ class WhisperCppServerProvider:
 class OpenAICompatibleProvider:
     kind = 'openai_compatible'
 
-    def __init__(self, base_url: str, *, model: str = DEFAULT_OPENAI_MODEL, api_key: str = '', language: str = 'ko', timeout: float = REQUEST_TIMEOUT_SECONDS) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        *,
+        model: str = DEFAULT_OPENAI_MODEL,
+        api_key: str = '',
+        language: str = 'ko',
+        timeout: float | None = None,
+        idle_timeout: float | None = None,
+        budget_cap: float | None = None,
+        backoff_seconds: Sequence[float] | None = None,
+    ) -> None:
         root = base_url.rstrip('/')
         # Users often paste ".../v1"; the paths below add it themselves.
         self.root = root[: -len('/v1')] if root.endswith('/v1') else root
         self.model = model or DEFAULT_OPENAI_MODEL
         self.api_key = api_key
         self.language = language
-        self.timeout = timeout
+        self.timeout = REQUEST_TIMEOUT_SECONDS if timeout is None else timeout
+        self.idle_timeout = min(IDLE_TIMEOUT_SECONDS if idle_timeout is None else idle_timeout, self.timeout)
+        self.budget_cap = RESPONSE_BUDGET_CAP_SECONDS if budget_cap is None else budget_cap
+        self.backoff_seconds = BACKOFF_SECONDS if backoff_seconds is None else tuple(backoff_seconds)
         self._response_format = 'srt'
 
     def _headers(self) -> dict[str, str]:
         return {'Authorization': f'Bearer {self.api_key}'} if self.api_key else {}
 
-    def transcribe(self, wav_path: Path, *, temperature: float = 0.0, should_cancel: Callable[[], bool] | None = None) -> list[TranscriptSegment]:
+    def transcribe(
+        self,
+        wav_path: Path,
+        *,
+        temperature: float = 0.0,
+        should_cancel: Callable[[], bool] | None = None,
+        ahead_requests: int = 0,
+        on_event: Callable[[dict[str, Any]], None] | None = None,
+    ) -> list[TranscriptSegment]:
         url = f'{self.root}/v1/audio/transcriptions'
         for _attempt in range(2):
             fields = {'model': self.model, 'language': self.language, 'response_format': self._response_format, 'temperature': str(temperature)}
-            status, body = http_request('POST', url, headers=self._headers(), body=MultipartBody(fields, 'file', wav_path), timeout=self.timeout, should_cancel=should_cancel)
+            status, body = post_audio(
+                url,
+                headers=self._headers(),
+                fields=fields,
+                wav_path=wav_path,
+                idle_timeout=self.idle_timeout,
+                response_budget=response_budget_seconds(ahead_requests, base=self.timeout, cap=self.budget_cap),
+                backoff_seconds=self.backoff_seconds,
+                should_cancel=should_cancel,
+                on_event=on_event,
+            )
             if status in (401, 403):
                 raise RemoteSTTError('stt_remote_auth_failed', 'API 키가 올바르지 않거나 권한이 없어요.')
             if status in FORMAT_REJECTED_STATUSES and self._response_format == 'srt':
@@ -268,7 +408,28 @@ class RemoteSTTService:
         self.store = store
         self.tunnel = tunnel or SshTunnel()
         self._lock = threading.RLock()
+        self._in_flight = 0
+        self._in_flight_lock = threading.Lock()
         self._last_check: dict[str, Any] = {'reachable': None, 'last_error': None, 'error_code': None, 'checked_at': None}
+
+    # queue awareness --------------------------------------------------------
+
+    @property
+    def in_flight(self) -> int:
+        with self._in_flight_lock:
+            return self._in_flight
+
+    @contextmanager
+    def request_slot(self) -> Iterator[int]:
+        """Count one request of this process on the server; yields how many were already in flight (ahead of it)."""
+        with self._in_flight_lock:
+            ahead = self._in_flight
+            self._in_flight += 1
+        try:
+            yield ahead
+        finally:
+            with self._in_flight_lock:
+                self._in_flight -= 1
 
     # settings -------------------------------------------------------------
 
@@ -425,6 +586,7 @@ def transcribe_with_remote(
     service: RemoteSTTService,
     on_progress: Callable[[dict[str, Any]], None] | None = None,
     should_cancel: Callable[[], bool] | None = None,
+    gates: WorkGates | None = None,
 ) -> TranscriptionResult:
     audio_path = request.audio_path.expanduser()
     config = service.config()
@@ -438,24 +600,46 @@ def transcribe_with_remote(
         if should_cancel and should_cancel():
             raise TranscriptionCancelled('transcription cancelled')
 
+    def media_slot() -> Any:
+        """ffmpeg-class work (WAV conversion, repair cuts) shares the process-wide media limit; the HTTP calls never hold it."""
+        if gates is None:
+            return nullcontext()
+        # This wait happens inside the transcript stage, so it is a transcript wait (never `audio_waiting`).
+        return gates.hold(MEDIA, should_cancel=should_cancel, on_wait=lambda: emit_progress(on_progress, {**base_event, 'stage': 'transcript_waiting', 'reason': 'media'}))
+
+    def send(path: Path, temperature: float) -> list[TranscriptSegment]:
+        """One request. The app does not queue remote work; it only tells the user how many of its own requests are ahead."""
+        with service.request_slot() as ahead:
+            if ahead > 0:
+                emit_progress(on_progress, {**base_event, 'stage': 'transcript_waiting', 'reason': 'server_busy', 'ahead_requests': ahead})
+            return provider.transcribe(
+                path,
+                temperature=temperature,
+                should_cancel=should_cancel,
+                ahead_requests=ahead,
+                on_event=lambda event: emit_progress(on_progress, {**base_event, 'stage': 'transcript_waiting', 'ahead_requests': ahead, **event}),
+            )
+
     try:
         emit_progress(on_progress, {**base_event, 'stage': 'transcript_connecting', 'progress_percent': 2})
         provider = service.provider(language=request.language)
         check_cancel()
         with tempfile.TemporaryDirectory(prefix='ssu-stt-') as scratch:
             wav = Path(scratch) / 'audio.wav'
-            postprocess_media.convert_to_stt_wav(audio_path, wav, should_cancel)
+            with media_slot():
+                postprocess_media.convert_to_stt_wav(audio_path, wav, should_cancel)
             duration = wav_duration_seconds(wav)
             emit_progress(on_progress, {**base_event, 'stage': 'transcript_started', 'duration': duration, 'progress_percent': 5})
             check_cancel()
-            cues = provider.transcribe(wav, temperature=0.0, should_cancel=should_cancel)
+            cues = send(wav, 0.0)
             emit_progress(on_progress, {**base_event, 'stage': 'transcript_progress', 'segment_count': len(cues), 'duration': duration, 'progress_percent': PROGRESS_FIRST_PASS_DONE})
 
             def retranscribe(start: float, end: float, temperature: float) -> list[TranscriptSegment]:
                 piece = Path(scratch) / f'repair-{int(start * 1000)}-{int(end * 1000)}.wav'
-                postprocess_media.cut_audio_segment(wav, piece, start, end, should_cancel)
+                with media_slot():
+                    postprocess_media.cut_audio_segment(wav, piece, start, end, should_cancel)
                 try:
-                    return provider.transcribe(piece, temperature=temperature, should_cancel=should_cancel)
+                    return send(piece, temperature)
                 finally:
                     piece.unlink(missing_ok=True)
 

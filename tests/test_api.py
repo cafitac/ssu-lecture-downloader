@@ -194,7 +194,7 @@ class FakeService:
             diagnostics={'cookie_count': 1, 'cookie_names': ['xn_api_token'], 'cookie_domains': ['canvas.ssu.ac.kr']},
         )
 
-    def batch_download_lectures(self, username, password, *, course_id, course_name, output_dir, dry_run, module_item_ids=None, include_completed=False, on_progress=None, should_cancel=None, conflict_strategy='rename', max_parallel_downloads=4):
+    def batch_download_lectures(self, username, password, *, course_id, course_name, output_dir, dry_run, module_item_ids=None, include_completed=False, on_progress=None, should_cancel=None, conflict_strategy='rename', max_parallel_downloads=4, on_item_ready=None):
         selected_ids = module_item_ids or [3268578]
         if on_progress:
             on_progress({'stage': 'resolving', 'module_item_id': selected_ids[0], 'index': 1, 'total': 1})
