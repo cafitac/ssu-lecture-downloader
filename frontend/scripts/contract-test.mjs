@@ -1099,7 +1099,7 @@ console.log('frontend contract ok');
   assert.ok(lib.includes('watch_runtime::shutdown('), 'the playback window, menu bar item and badge go away when the app quits');
   assert.ok(readFileSync(new URL('../src-tauri/Cargo.toml', import.meta.url), 'utf8').includes('"tray-icon"'), 'the menu bar item needs the tauri tray-icon feature');
   const runtime = readFileSync(new URL('../src-tauri/src/watch_runtime.rs', import.meta.url), 'utf8').split('#[cfg(test)]')[0];
-  for (const marker of ['TrayIconBuilder', 'PlatformNotifier', 'always_on_top(true)', '.focused(false)', 'bottom_right_position', 'window_title(']) {
+  for (const marker of ['TrayIconBuilder', 'PlatformNotifier', 'set_badge(', 'set_tray_title(', 'always_on_top(true)', '.focused(false)', 'bottom_right_position', 'window_title(']) {
     assert.ok(runtime.includes(marker), `watch runtime missing ${marker}`);
   }
   // The badge call and the osascript notifier moved behind the platform seam (src-tauri/src/platform/macos.rs).
