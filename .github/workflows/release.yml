@@ -55,8 +55,8 @@ jobs:
           INPUT_VERSION: ${{ github.event.inputs.version }}
         run: |
           if [ "$EVENT_NAME" = "push" ]; then RAW="$REF_NAME"; else RAW="$INPUT_VERSION"; fi
-          VERSION="${RAW#v}"
-          python3 scripts/bump_version.py --check "$VERSION"
+          # bump_version.py alone decides what a valid tag looks like; it prints the normalized x.y.z.
+          VERSION=$(python3 scripts/bump_version.py --check "$RAW")
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
 
@@ -98,6 +98,7 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
+          package-manager-cache: false
 
       # Commit of the `stable` branch from 2026-10-09; the toolchain is named because a commit pin
       # carries no channel.
@@ -187,7 +188,7 @@ jobs:
           jq -e 'type == "object"' latest.json > /dev/null || { echo "::error::latest.json is not a JSON object"; exit 1; }
           jq -e --arg v "$VERSION" '.version == $v' latest.json > /dev/null \
             || { echo "::error::latest.json version is not $VERSION"; exit 1; }
-          # darwin-x86_64 is the key the updater reads; darwin-x86_64-app is the per-bundle entry.
+          # Plugin 2.14 reads darwin-x86_64-app first and falls back to darwin-x86_64; both must be valid.
           for PLATFORM in darwin-x86_64 darwin-x86_64-app; do
             jq -e --arg p "$PLATFORM" '(.platforms[$p].signature // "") | type == "string" and length > 0' latest.json > /dev/null \
               || { echo "::error::latest.json platforms.$PLATFORM has no signature"; exit 1; }

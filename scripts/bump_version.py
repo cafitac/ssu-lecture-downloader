@@ -10,10 +10,12 @@ The version lives in four manifests and three lockfiles that must agree:
 
 Usage:
   python scripts/bump_version.py 0.2.0          set every file to 0.2.0
-  python scripts/bump_version.py --check 0.2.0  exit 1 unless every file already says 0.2.0
+  python scripts/bump_version.py --check 0.2.0  exit 1 unless every file already says 0.2.0;
+                                                on success prints only the normalized x.y.z (stdout)
   python scripts/bump_version.py --show         print each file's version
 
-A leading `v` is accepted (`v0.2.0`). Only plain `x.y.z` versions are allowed: the release tag is
+A single leading `v` is accepted (`v0.2.0`; `vv0.2.0` is rejected). This script is the one place
+that strips it: callers pass the raw tag or input and read the normalized version from `--check`. Only plain `x.y.z` versions are allowed: the release tag is
 `v<x.y.z>` and pre-release suffixes would never become the updater's `latest`. Edits are textual
 (formatting is preserved) and all-or-nothing: nothing is written if any file fails to match.
 """
@@ -154,7 +156,8 @@ def main(argv: list[str] | None = None) -> int:
                 for problem in problems:
                     print(f"  {problem}", file=sys.stderr)
                 return 1
-            print(f"all version files are {normalize(args.check)}")
+            print(f"all version files are {normalize(args.check)}", file=sys.stderr)
+            print(normalize(args.check))
         else:
             changed = set_versions(args.version, ROOT)
             print(f"set {normalize(args.version)}; changed: {', '.join(changed) if changed else 'nothing'}")
