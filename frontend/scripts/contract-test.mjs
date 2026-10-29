@@ -1501,9 +1501,12 @@ const assistSource = readFileSync('src-tauri/src/assets/watch_assist.js', 'utf8'
   assert.equal(grades.classifyGradesError({ code: 'missing_credentials' }), 'credentials_missing');
   assert.ok(grades.gradesFailureText('login_rejected').includes('u-SAINT 웹에서 직접 로그인되는지 확인해 주세요'));
   assert.equal(grades.GRADES_LECTURES_OK, '강의 기능은 그대로 쓸 수 있어요.');
-  for (const kind of ['unavailable', 'login_rejected', 'credentials_missing']) {
+  for (const kind of ['unavailable', 'login_rejected']) {
     assert.ok(grades.gradesFailureText(kind).endsWith(grades.GRADES_LECTURES_OK), `${kind} must carry the reassurance that lecture features keep working`);
   }
+  // Missing LMS credentials also hit the lecture features, so that reassurance would be untrue there.
+  assert.ok(!grades.gradesFailureText('credentials_missing').includes(grades.GRADES_LECTURES_OK));
+  assert.ok(grades.gradesFailureText('credentials_missing').includes('앱에 다시 로그인한 뒤 시도해 주세요'));
   assert.equal(grades.isInvalidConsentVersion({ code: 'invalid_consent_version' }), true);
   assert.equal(grades.isInvalidConsentVersion({ code: 'HTTP 400' }), false);
   assert.ok(hookCode.includes('isInvalidConsentVersion') && hookCode.includes('fetchGradesStatus()'), 'a stale consent version is re-read once');

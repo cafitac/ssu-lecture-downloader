@@ -51,13 +51,15 @@ export function isInvalidConsentVersion(error: unknown): boolean {
   return codeOf(error) === 'invalid_consent_version';
 }
 
-/** The one reason line under "지금 가져올 수 없어요"; every reason ends with the same reassurance. */
+/**
+ * The one reason line under "지금 가져올 수 없어요". A u-SAINT problem ends with the reassurance that
+ * lecture features keep working; missing LMS credentials do not (they affect lectures too).
+ */
 export function gradesFailureText(kind: GradesFailureKind): string {
+  if (kind === 'credentials_missing') return '로그인 정보를 찾지 못했어요. 앱에 다시 로그인한 뒤 시도해 주세요.';
   const head = kind === 'login_rejected'
     ? 'u-SAINT가 로그인을 받지 않았어요. u-SAINT 웹에서 직접 로그인되는지 확인해 주세요.'
-    : kind === 'credentials_missing'
-      ? '로그인 정보를 찾지 못했어요. 앱에 다시 로그인한 뒤 시도해 주세요.'
-      : 'u-SAINT에 연결하지 못했어요.';
+    : 'u-SAINT에 연결하지 못했어요.';
   return `${head} ${GRADES_LECTURES_OK}`;
 }
 
