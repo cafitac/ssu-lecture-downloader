@@ -387,9 +387,14 @@ def test_a_lecture_is_processed_while_another_is_still_downloading(make_rig):
 
 
 def test_lectures_that_need_no_download_start_before_any_download_ends(make_rig):
-    rig = make_rig([Spec(1, has_video=True), Spec(2, download=0.5)])
+    release_download = threading.Event()
+    rig = make_rig([Spec(1, has_video=True), Spec(2, hold_download=release_download)])
+    job = rig.start(['mp3'])
 
-    snapshot = rig.run(['mp3'])
+    rig.wait_for(lambda: events(job, 'audio_done', 1), message='lecture 1 extracted its audio')
+    assert events(job, 'downloading', 2) and events(job, 'done', 2) == []  # the only download is still open
+    release_download.set()
+    snapshot = finish(job)
 
     assert events(snapshot, 'extracting_audio', 1)[0]['at'] < events(snapshot, 'done', 2)[0]['at']
     assert snapshot['result']['summary'] == {'total': 2, 'succeeded': 2, 'failed': 0, 'cancelled': 0}
@@ -469,12 +474,17 @@ def test_remote_requests_are_not_gated_and_say_how_many_are_ahead(make_rig, monk
 
 @pytest.mark.parametrize('stage', ['download', 'audio', 'transcript'])
 def test_one_failing_lecture_does_not_stop_the_others(make_rig, stage):
-    specs = [Spec(n, download=0.05 * n, extract=0.03, transcribe=0.03) for n in range(1, 5)]
-    specs[0].fail_at = stage  # the first lecture fails early while 2-4 are still downloading
+    others_wait_for_the_failure = threading.Event()
+    specs = [Spec(1, extract=0.03, transcribe=0.03)] + [Spec(n, extract=0.03, transcribe=0.03, hold_download=others_wait_for_the_failure) for n in range(2, 5)]
+    specs[0].fail_at = stage  # the first lecture fails while 2-4 are still downloading (held open)
     specs[0].fail_code = {'download': 'download_http_error', 'audio': 'ffmpeg_failed', 'transcript': 'stt_failed'}[stage]
     rig = make_rig(specs)
+    job = rig.start(['mp3', 'txt'])
 
-    snapshot = rig.run(['mp3', 'txt'])
+    rig.wait_for(lambda: events(job, 'artifact_item_failed', 1), message='lecture 1 to fail')
+    assert events(job, 'done', 2) == [] and events(job, 'artifact_item_done') == []  # the others have not even finished downloading
+    others_wait_for_the_failure.set()
+    snapshot = finish(job)
 
     assert snapshot['status'] == 'failed' and snapshot['error_code'] == 'partial_failure'
     result = snapshot['result']
@@ -487,8 +497,8 @@ def test_one_failing_lecture_does_not_stop_the_others(make_rig, stage):
     failed = events(snapshot, 'artifact_item_failed')
     assert [(e['module_item_id'], e['error_code'], e['failed_stage']) for e in failed] == [(1, specs[0].fail_code, stage)]
     assert len(events(snapshot, 'artifact_item_done')) == 3
-    # lecture 1 failed while the others were still going: they were processed after its failure
-    assert events(snapshot, 'artifact_item_failed')[0]['at'] < max(e['at'] for e in events(snapshot, 'artifact_item_done'))
+    # lecture 1 failed while the others were still held at their download: they ran to the end after its failure
+    assert events(snapshot, 'artifact_item_failed')[0]['at'] < min(e['at'] for e in events(snapshot, 'artifact_item_done'))
 
 
 def test_a_failed_lecture_keeps_its_own_files_and_others_clean_up_theirs(make_rig):
@@ -852,6 +862,41 @@ def test_over_the_cap_plain_events_go_first_and_every_unfinished_lecture_keeps_i
 
     snapshot, elapsed, _ = cancel_and_wait(rig, job)
     assert snapshot['status'] == 'cancelled' and elapsed < 3.0
+
+
+def test_finished_lectures_cannot_push_running_lectures_ticks_out_of_a_saturated_list():
+    from ssu_lecture_downloader.core.jobs import append_compacted_progress
+
+    progress: list[dict[str, Any]] = []
+    clock = iter(range(100_000))
+    finished_ids = range(1, 46)  # 45 lectures x 10 milestones: more than the whole cap
+    running_ids = (46, 47, 48)
+
+    def emit(stage: str, lecture: int, **extra: Any) -> None:
+        append_compacted_progress(progress, {'stage': stage, 'module_item_id': lecture, 'index': lecture, 'total': 48, 'at': float(next(clock)), **extra})
+
+    for lecture in running_ids:
+        emit('artifact_item_queued', lecture)
+        emit('transcribing', lecture)
+    for lecture in finished_ids:
+        for stage in ('artifact_item_queued', 'downloading', 'done', 'extracting_audio', 'audio_done', 'transcribing', 'transcript_connecting', 'transcript_started'):
+            emit(stage, lecture)
+        emit('transcript_waiting', lecture, reason='server_busy', ahead_requests=1, audio_path=f'{lecture}.mp3')
+        emit('transcript_progress', lecture, progress_percent=99, audio_path=f'{lecture}.mp3')
+        emit('artifact_item_done', lecture)
+        for percent in range(3):  # the running lectures keep ticking between the finished ones
+            for running in running_ids:
+                emit('transcript_progress', running, progress_percent=10 + percent + lecture, audio_path=f'{running}.mp3')
+
+    assert len(progress) == MAX_JOB_PROGRESS_EVENTS
+    for running in running_ids:
+        ticks = [e for e in progress if e['module_item_id'] == running and e['stage'] == 'transcript_progress']
+        assert len(ticks) == 1 and ticks[0]['progress_percent'] == 12 + 45  # the latest tick, with its percent
+    for lecture in finished_ids:
+        mine = {e['stage'] for e in progress if e['module_item_id'] == lecture}
+        assert {'artifact_item_queued', 'artifact_item_done'} <= mine, lecture
+    stamps = [e['at'] for e in progress]
+    assert stamps == sorted(stamps)
 
 
 def test_stage_entry_events_outlive_ticks_so_a_row_never_falls_back_to_an_earlier_step():
