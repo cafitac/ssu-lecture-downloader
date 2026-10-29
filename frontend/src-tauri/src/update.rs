@@ -18,7 +18,7 @@
 //! Platform-neutral: only `BackendManager` (which calls `platform::terminate_process_group`)
 //! touches the OS, so the Windows `cargo check --lib` job compiles this unchanged.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
 use tauri::{AppHandle, Manager, Runtime};
@@ -70,6 +70,8 @@ pub(crate) trait UpdateHost {
     fn begin_update(&self) -> Result<bool, PrepareError>;
     /// Release the latch (only the call that acquired it, when the guard refuses).
     fn cancel_update(&self);
+    /// Held for the whole of `prepare_with`, so prepares run one at a time.
+    fn prepare_lock(&self) -> &Mutex<()>;
     fn stop_backend(&self) -> Result<(), PrepareError>;
 }
 
@@ -103,10 +105,18 @@ pub(crate) fn guard_for(host: &impl UpdateHost) -> InstallGuard {
 /// Latch first, so nothing new can start; then the guard; then the stop. The sidecar is stopped
 /// only after the guard allowed, and the latch is released again when the guard refuses.
 ///
-/// Only the call that acquired the latch releases it. A prepare that finds the latch already set
-/// (an earlier prepare stopped the sidecar) returns Ok at once: it does not re-run the guard and
-/// never cancels the first one's latch.
+/// Invariant: `Ok` means the guard passed under the latch and the sidecar is stopped.
+///
+/// Prepares are serialized by `prepare_lock`, so a second prepare always sees the first one's
+/// final outcome: latch still held means the first one really prepared (the second returns Ok
+/// at once, without re-running the guard); latch released means the first one refused or failed,
+/// and the second acquires the latch itself and runs the guard and the stop. Only the call that
+/// acquired the latch releases it.
 pub(crate) fn prepare_with(host: &impl UpdateHost) -> Result<(), PrepareError> {
+    let _serialized = host
+        .prepare_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     if !host.begin_update()? {
         eprintln!("updater: update already prepared; keeping the latch");
         return Ok(());
@@ -135,14 +145,25 @@ pub(crate) fn is_update_in_progress<R: Runtime>(app: &AppHandle<R>) -> bool {
         .is_some_and(|manager| manager.update_in_progress())
 }
 
+/// Used when there is no backend manager (nothing to prepare then anyway).
+static NO_MANAGER_LOCK: Mutex<()> = Mutex::new(());
+
 pub(crate) struct AppHost<'a, R: Runtime> {
-    pub(crate) app: &'a AppHandle<R>,
+    app: &'a AppHandle<R>,
+    manager: Option<Arc<BackendManager>>,
 }
 
-impl<R: Runtime> AppHost<'_, R> {
-    fn manager(&self) -> Result<tauri::State<'_, Arc<BackendManager>>, PrepareError> {
-        self.app
+impl<'a, R: Runtime> AppHost<'a, R> {
+    pub(crate) fn new(app: &'a AppHandle<R>) -> Self {
+        let manager = app
             .try_state::<Arc<BackendManager>>()
+            .map(|state| Arc::clone(&state));
+        Self { app, manager }
+    }
+
+    fn manager(&self) -> Result<&Arc<BackendManager>, PrepareError> {
+        self.manager
+            .as_ref()
             .ok_or(PrepareError::BackendUnavailable)
     }
 }
@@ -171,6 +192,12 @@ impl<R: Runtime> UpdateHost for AppHost<'_, R> {
         }
     }
 
+    fn prepare_lock(&self) -> &Mutex<()> {
+        self.manager
+            .as_ref()
+            .map_or(&NO_MANAGER_LOCK, |manager| manager.prepare_lock())
+    }
+
     fn stop_backend(&self) -> Result<(), PrepareError> {
         self.manager()?
             .stop_for_update()
@@ -180,13 +207,13 @@ impl<R: Runtime> UpdateHost for AppHost<'_, R> {
 
 #[tauri::command]
 pub(crate) fn update_install_guard(app: AppHandle) -> InstallGuard {
-    guard_for(&AppHost { app: &app })
+    guard_for(&AppHost::new(&app))
 }
 
 /// The blocking stop (SIGTERM grace wait) runs on the blocking pool, not on a runtime thread.
 #[tauri::command]
 pub(crate) async fn prepare_for_update(app: AppHandle) -> Result<(), PrepareError> {
-    tauri::async_runtime::spawn_blocking(move || prepare_with(&AppHost { app: &app }))
+    tauri::async_runtime::spawn_blocking(move || prepare_with(&AppHost::new(&app)))
         .await
         .unwrap_or(Err(PrepareError::BackendUnavailable))
 }
@@ -203,6 +230,7 @@ mod tests {
         stop_result: Result<(), PrepareError>,
         begin_result: Result<bool, PrepareError>,
         calls: RefCell<Vec<&'static str>>,
+        lock: Mutex<()>,
     }
 
     impl FakeHost {
@@ -213,6 +241,7 @@ mod tests {
                 stop_result: Ok(()),
                 begin_result: Ok(true),
                 calls: RefCell::new(Vec::new()),
+                lock: Mutex::new(()),
             }
         }
     }
@@ -232,6 +261,9 @@ mod tests {
         }
         fn cancel_update(&self) {
             self.calls.borrow_mut().push("cancel_update");
+        }
+        fn prepare_lock(&self) -> &Mutex<()> {
+            &self.lock
         }
         fn stop_backend(&self) -> Result<(), PrepareError> {
             self.calls.borrow_mut().push("stop_backend");
@@ -363,10 +395,108 @@ mod tests {
 
         // Same with the real manager: the first prepare latches and stops, the second keeps it.
         let (app, manager) = mock_app_with_backend();
-        let real = AppHost { app: app.handle() };
+        let real = AppHost::new(app.handle());
         assert_eq!(prepare_with(&real), Ok(()));
         assert_eq!(prepare_with(&real), Ok(()));
         assert!(manager.update_in_progress(), "the first latch survives");
+    }
+
+    /// A host shared by two threads, with a real latch like the manager's. Its first guard check
+    /// parks inside the guard until the test releases it, so a second prepare overlaps it.
+    struct OverlapHost {
+        latch: std::sync::atomic::AtomicBool,
+        lock: Mutex<()>,
+        /// The owner is inside the guard (sent once).
+        entered_guard: std::sync::mpsc::Sender<()>,
+        /// The test lets the owner's guard finish (taken once, by the first guard check).
+        release_guard: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+        /// Any later `begin_update` call (the second prepare reached the latch).
+        later_begin: std::sync::mpsc::Sender<()>,
+        begins: std::sync::atomic::AtomicUsize,
+        stops: std::sync::atomic::AtomicUsize,
+    }
+
+    impl UpdateHost for OverlapHost {
+        fn watch_active(&self) -> bool {
+            let release = self.release_guard.lock().unwrap().take();
+            if let Some(release) = release {
+                self.entered_guard.send(()).unwrap();
+                release.recv().unwrap();
+            }
+            true // a watch is running: every guard check refuses
+        }
+        fn download_running(&self) -> bool {
+            false
+        }
+        fn begin_update(&self) -> Result<bool, PrepareError> {
+            use std::sync::atomic::Ordering::SeqCst;
+            if self.begins.fetch_add(1, SeqCst) > 0 {
+                let _ = self.later_begin.send(());
+            }
+            Ok(!self.latch.swap(true, SeqCst))
+        }
+        fn cancel_update(&self) {
+            self.latch.store(false, std::sync::atomic::Ordering::SeqCst);
+        }
+        fn prepare_lock(&self) -> &Mutex<()> {
+            &self.lock
+        }
+        fn stop_backend(&self) -> Result<(), PrepareError> {
+            self.stops.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_prepare_overlapping_a_refusing_prepare_does_not_return_ok() {
+        use std::sync::atomic::Ordering::SeqCst;
+        use std::sync::mpsc::channel;
+        use std::time::Duration;
+        let (entered_tx, entered_rx) = channel();
+        let (release_tx, release_rx) = channel();
+        let (later_tx, later_rx) = channel();
+        let host = Arc::new(OverlapHost {
+            latch: std::sync::atomic::AtomicBool::new(false),
+            lock: Mutex::new(()),
+            entered_guard: entered_tx,
+            release_guard: Mutex::new(Some(release_rx)),
+            later_begin: later_tx,
+            begins: std::sync::atomic::AtomicUsize::new(0),
+            stops: std::sync::atomic::AtomicUsize::new(0),
+        });
+
+        let first = {
+            let host = Arc::clone(&host);
+            std::thread::spawn(move || prepare_with(&*host))
+        };
+        // The owner holds the latch and is parked inside its guard check.
+        entered_rx.recv().unwrap();
+        assert!(host.latch.load(SeqCst));
+
+        let second = {
+            let host = Arc::clone(&host);
+            std::thread::spawn(move || prepare_with(&*host))
+        };
+        // Serialized, the second prepare cannot reach the latch while the first is parked. (If
+        // it did, it would see the latch held and report Ok before the first one refuses.)
+        let overlapped = later_rx.recv_timeout(Duration::from_millis(300)).is_ok();
+        release_tx.send(()).unwrap();
+
+        let refused = Err(PrepareError::Refused {
+            reason: RefuseReason::WatchActive,
+        });
+        assert_eq!(first.join().unwrap(), refused);
+        assert_eq!(
+            second.join().unwrap(),
+            refused,
+            "the second prepare must see the first one's outcome, not an early Ok"
+        );
+        assert!(!overlapped, "the second prepare overlapped the first");
+        assert_eq!(host.stops.load(SeqCst), 0, "nothing was ever stopped");
+        assert!(
+            !host.latch.load(SeqCst),
+            "both refused: no latch left behind"
+        );
     }
 
     #[test]
@@ -399,7 +529,7 @@ mod tests {
     #[test]
     fn a_running_native_download_makes_the_real_guard_refuse() {
         let (app, _manager) = mock_app_with_backend();
-        let host = AppHost { app: app.handle() };
+        let host = AppHost::new(app.handle());
         assert_eq!(guard_for(&host), InstallGuard::Allowed);
 
         let jobs = app.state::<NativeDownloadJobs>();
@@ -425,7 +555,7 @@ mod tests {
     #[test]
     fn prepare_latches_the_real_backend_and_backend_restart_recovers() {
         let (app, manager) = mock_app_with_backend();
-        let host = AppHost { app: app.handle() };
+        let host = AppHost::new(app.handle());
         assert!(!is_update_in_progress(app.handle()));
         assert_eq!(prepare_with(&host), Ok(()));
         assert!(is_update_in_progress(app.handle()));
@@ -435,7 +565,9 @@ mod tests {
         );
 
         // `backend_restart` (restart_clearing_update) is the recovery of a failed install.
-        let _ = manager.restart_clearing_update();
+        let _ = manager
+            .restart_clearing_update()
+            .expect("no prepare is running");
         assert!(!is_update_in_progress(app.handle()));
         manager.shutdown();
     }
@@ -475,7 +607,7 @@ mod tests {
         }
         let backend = include_str!("backend.rs");
         assert!(
-            backend.contains("Arc::clone(&state).restart_clearing_update();"),
+            backend.contains("Arc::clone(&state).restart_clearing_update()?;"),
             "backend_restart recovers a failed install"
         );
     }
