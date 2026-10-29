@@ -15,7 +15,7 @@
 /* Dialog */
 .overlay { position: fixed; inset: 0; z-index: 20; display: grid; place-items: center; padding: var(--sp-4); background: rgba(10, 12, 16, 0.45); }
 .dialog {
-  width: min(480px, 100%); max-height: 100%; display: grid; grid-template-rows: auto minmax(0, 1fr);
+  width: min(480px, 100%); max-height: calc(100vh - var(--sp-8)); display: grid; grid-template-rows: auto minmax(0, 1fr);
   border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg); outline: none;
 }
 .dialog-head { display: flex; align-items: center; justify-content: space-between; padding: var(--sp-3) var(--sp-3) var(--sp-3) var(--sp-5); border-bottom: 1px solid var(--border); }

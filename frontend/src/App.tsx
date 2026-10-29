@@ -3,6 +3,7 @@ import { ActionBar } from './components/ActionBar';
 import { CourseSidebar } from './components/CourseSidebar';
 import { DeadlinesPane } from './components/DeadlinesPane';
 import { DownloadDrawer } from './components/DownloadDrawer';
+import { GradesPane } from './components/GradesPane';
 import { LecturePane } from './components/LecturePane';
 import { BackendScreen, LoginScreen, SplashScreen } from './components/Screens';
 import { SettingsDialog } from './components/SettingsDialog';
@@ -15,6 +16,7 @@ import { useCourseContent } from './hooks/useCourseContent';
 import { useDeadlines } from './hooks/useDeadlines';
 import { useDownloadDir } from './hooks/useDownloadDir';
 import { useDownloads } from './hooks/useDownloads';
+import { useGrades } from './hooks/useGrades';
 import { useLmsPages } from './hooks/useLmsPages';
 import { useLmsSession } from './hooks/useLmsSession';
 import type { LmsSession } from './hooks/useLmsSession';
@@ -48,7 +50,7 @@ function Workspace({ session }: { session: LmsSession }) {
   const { toasts, push, dismiss } = useToasts();
   const { courses, expire } = session;
   const now = useNow();
-  const [view, setView] = useState<'course' | 'deadlines'>('course');
+  const [view, setView] = useState<'course' | 'deadlines' | 'grades'>('course');
   const [selectedCourseId, setSelectedCourseId] = useState<string | null>(null);
   const [tab, setTab] = useState<LectureTab>('video');
   const [unwatchedOnly, setUnwatchedOnly] = useState(false);
@@ -79,6 +81,12 @@ function Workspace({ session }: { session: LmsSession }) {
   const { dir, pick } = useDownloadDir();
   const content = useCourseContent(course, dir, onAuthError);
   const deadlines = useDeadlines(session.termId, courses, onAuthError);
+  // Grades: no request is made before the user opens the tab; a failure there never reaches onAuthError.
+  const grades = useGrades();
+  const { open: openGrades } = grades;
+  useEffect(() => {
+    if (view === 'grades' && grades.phase === 'idle') openGrades();
+  }, [view, grades.phase, openGrades]);
   const downloads = useDownloads({ downloadDir: dir, onAuthError, onError });
   const media = useMediaDependencies({ onMessage: push, downloadBusy: downloads.active });
   const lmsPages = useLmsPages({ notify: push, onAuthError });
@@ -305,11 +313,13 @@ function Workspace({ session }: { session: LmsSession }) {
         busy={busyElsewhere}
         dueSoonCount={dueSoonCount(deadlines.items, now)}
         deadlinesOpen={view === 'deadlines'}
+        gradesOpen={view === 'grades'}
         watchAllCount={allQueue.length}
         watchAllLoading={deadlines.state === 'loading' || deadlines.state === 'idle'}
         queueActive={viewer.queue.active}
         onWatchAll={() => setWatchAllOpen(true)}
         onToggleDeadlines={() => setView((current) => (current === 'deadlines' ? 'course' : 'deadlines'))}
+        onToggleGrades={() => setView((current) => (current === 'grades' ? 'course' : 'grades'))}
         onTermChange={session.changeTerm}
         onRefresh={() => { session.refresh(); content.reload(true); }}
         onOpenSettings={() => setSettingsOpen(true)}
@@ -327,7 +337,9 @@ function Workspace({ session }: { session: LmsSession }) {
         />
         <main className="main">
           <div className="main-body">
-            {view === 'deadlines' ? (
+            {view === 'grades' ? (
+              <GradesPane grades={grades} now={now} onLater={() => setView('course')} />
+            ) : view === 'deadlines' ? (
               <DeadlinesPane
                 items={deadlines.items}
                 state={deadlines.state}
@@ -428,6 +440,7 @@ function Workspace({ session }: { session: LmsSession }) {
           busy={downloads.active}
           media={media}
           debugEvents={viewer.debugEvents}
+          grades={grades}
           watchMode={viewer.mode}
           chromeAvailable={viewer.chromeAvailable}
           queueActive={viewer.queue.active}
