@@ -53,6 +53,12 @@ export interface JobRow {
   overall: number;
   written?: number;
   total?: number;
+  /**
+   * True when this state cannot change any more: an `artifact_item_*` event, the job's `items_status`,
+   * the end of the job, or a step that never undoes itself (done, cancelled). A `failed` row of a
+   * running job is not final: the backend retries after `download_failed` (signed-URL expiry).
+   */
+  final: boolean;
   /** Plain-Korean failure reason for `failed` rows. */
   reason?: string;
   /** Raw failure code behind `reason`, for retry decisions (never shown). */
@@ -362,6 +368,32 @@ function weightedProgress(ctx: StepContext, phase: RowPhase, percent: number | n
   return Math.min(100, Math.round((got / whole) * 100));
 }
 
+/** Phases that end a row (a `failed` one is final only when `JobRow.final` says so). */
+const FINAL_PHASES = new Set<RowPhase>(['done', 'failed', 'cancelled', 'skipped']);
+/** Order of the running phases; the video check and the wait that follows it are one tier because MP4 output is checked after download_done; waiting for subtitles and making them are one tier because a media wait can follow transcribing. */
+const PHASE_RANK: Record<RowPhase, number> = {
+  waiting: 0, preparing: 1, downloading: 2, verifying: 4, waiting_audio: 4, extracting: 5,
+  waiting_transcript: 6, transcribing: 6, done: 7, failed: 7, cancelled: 7, skipped: 7,
+};
+
+/**
+ * Events of one lecture in the order they happened. The backend moves waiting events to the end of
+ * the list and replaces progress ticks in place, so list order can lie; `at` is the clock.
+ * Events without `at` keep their slot; ties keep list order.
+ */
+function inEventOrder(events: ProgressEvent[]): ProgressEvent[] {
+  const slots: number[] = [];
+  events.forEach((event, index) => {
+    if (typeof event.at === 'number' && Number.isFinite(event.at)) slots.push(index);
+  });
+  if (slots.length < 2) return events;
+  const timed = slots.map((index) => events[index]).map((event, order) => ({ event, order }));
+  timed.sort((a, b) => (a.event.at as number) - (b.event.at as number) || a.order - b.order);
+  const ordered = events.slice();
+  slots.forEach((slot, i) => { ordered[slot] = timed[i].event; });
+  return ordered;
+}
+
 /** One row per planned item. `job` is `null` while the job is still being prepared. */
 export function buildJobRows(plan: JobPlan, job: DownloadJobStatus | null): JobRow[] {
   const events = job?.progress ?? [];
@@ -374,11 +406,11 @@ export function buildJobRows(plan: JobPlan, job: DownloadJobStatus | null): JobR
   const finalStates = itemsStatusById(job?.result);
 
   return plan.items.map((item): JobRow => {
-    const own = events.filter((event) => (
+    const own = inEventOrder(events.filter((event) => (
       event.module_item_id !== undefined && event.module_item_id !== null
         ? String(event.module_item_id) === item.id
         : plan.items.length === 1
-    ));
+    )));
     const state: Accumulated = { phase: 'waiting', percent: null, failure: null, locked: false, seen: new Set() };
     for (const event of own) applyEvent(state, event, ctx);
 
@@ -416,6 +448,9 @@ export function buildJobRows(plan: JobPlan, job: DownloadJobStatus | null): JobR
       }
     }
 
+    // A failure of a running job may still be retried by the backend; only the sources below are final.
+    const jobEnded = job !== null && TERMINAL_DOWNLOAD_STATUSES.has(job.status);
+    const isFinal = phase === 'failed' ? state.locked || finalState === 'failed' || jobEnded : FINAL_PHASES.has(phase);
     const outputPath = result?.output_path ?? state.outputPath;
     const percent = phase === 'done' ? 100 : phase === 'failed' ? null : state.percent;
     const waiting = phase === 'waiting_transcript' ? waitingTranscriptText(state) : null;
@@ -426,7 +461,9 @@ export function buildJobRows(plan: JobPlan, job: DownloadJobStatus | null): JobR
       phase,
       label: waiting ? waiting.label : phase === 'waiting_audio' && state.audioWaitStep === 'mp4' ? WAITING_MP4_LABEL : phase === 'transcribing' && state.remote ? REMOTE_TRANSCRIBING_LABEL : PHASE_LABEL[phase],
       percent,
-      overall: weightedProgress(ctx, phase, percent),
+      final: isFinal,
+      // Only a final row reads 100: a finished download of an MP4-only job still has its check ahead.
+      overall: isFinal ? weightedProgress(ctx, phase, percent) : phase === 'failed' ? 0 : Math.min(99, weightedProgress(ctx, phase, percent)),
       written: state.written,
       total: state.total ?? (item.sizeBytes ?? undefined),
       outputPath: outputPath ?? undefined,
@@ -442,19 +479,11 @@ export function buildJobRows(plan: JobPlan, job: DownloadJobStatus | null): JobR
   });
 }
 
-/** Phases a row can only leave by finishing; their rank is above every running phase. */
-const FINAL_PHASES = new Set<RowPhase>(['done', 'failed', 'cancelled', 'skipped']);
-/** Order of the running phases; waiting for subtitles and making them are one tier because a media wait can follow transcribing. */
-const PHASE_RANK: Record<RowPhase, number> = {
-  waiting: 0, preparing: 1, downloading: 2, verifying: 3, waiting_audio: 4, extracting: 5,
-  waiting_transcript: 6, transcribing: 6, done: 7, failed: 7, cancelled: 7, skipped: 7,
-};
-
 /**
  * Keeps each row at its furthest point between polls. The backend caps the event list, so old
  * events can disappear and a running row would fall back to "대기" or 0%. `marks` is keyed by
  * job id + row id and holds the last row shown; it is updated in place and is safe to call twice
- * for the same poll. A final state (`artifact_item_*`, `items_status`, job end) always wins.
+ * for the same poll. A final row (`JobRow.final`: `artifact_item_*`, `items_status`, job end) always wins and is never undone; a `failed` row of a running job is not final.
  */
 export function holdFurthestRows(jobId: string | null | undefined, rows: JobRow[], marks: Map<string, JobRow>): JobRow[] {
   if (!jobId) return rows;
@@ -462,8 +491,11 @@ export function holdFurthestRows(jobId: string | null | undefined, rows: JobRow[
     const key = `${jobId}:${row.id}`;
     const before = marks.get(key);
     let shown = row;
-    if (before && !FINAL_PHASES.has(row.phase)) {
-      if (FINAL_PHASES.has(before.phase) || PHASE_RANK[row.phase] < PHASE_RANK[before.phase]) shown = before;
+    if (before && !row.final) {
+      if (before.final) shown = before;
+      // A failure the backend may retry is not pinned: show what happens next, but keep the bar where it was.
+      else if (row.phase === 'failed' || before.phase === 'failed') shown = { ...row, overall: Math.max(row.overall, before.overall) };
+      else if (PHASE_RANK[row.phase] < PHASE_RANK[before.phase]) shown = before;
       else if (row.overall < before.overall) shown = { ...row, overall: before.overall };
     }
     marks.set(key, shown);

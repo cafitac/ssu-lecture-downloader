@@ -718,6 +718,79 @@ const progress = await import('../src/lib/progress.ts');
     assert.ok(hookSource.includes('holdFurthestRows(job?.job_id'), 'the hook keeps the furthest row per job');
   }
 
+  // Event order is the backend's clock (`at`), not list order. Recorded from pl-py-pipeline f367be8 after
+  // compaction: the waiting event sits at the end and the 99% tick replaced an older one in place.
+  {
+    const recorded = [
+    {"module_item_id": "1", "stage": "download_done", "file_size": 10, "output_path": "/a/L1.mp4", "at": 1},
+    {"module_item_id": "1", "stage": "extracting_audio", "output_path": "/a/L1.mp4", "at": 2},
+    {"module_item_id": "1", "stage": "audio_done", "output_path": "/a/L1.mp3", "file_size": 5, "progress_percent": 100, "at": 3},
+    {"module_item_id": "1", "stage": "transcribing", "output_path": "/a/L1.mp3", "remote": true, "at": 4},
+    {"module_item_id": "1", "remote": true, "stage": "transcript_connecting", "progress_percent": 2, "at": 5},
+    {"module_item_id": "1", "remote": true, "stage": "transcript_started", "progress_percent": 5, "at": 6},
+    {"module_item_id": "1", "remote": true, "stage": "transcript_progress", "progress_percent": 99, "at": 11},
+    {"module_item_id": "1", "remote": true, "stage": "transcript_repair", "repair_index": 2, "repair_total": 3, "progress_percent": 88, "at": 10},
+    {"module_item_id": "1", "remote": true, "stage": "transcript_waiting", "reason": "server_busy", "ahead_requests": 2, "at": 9}
+    ];
+    row = one(txtPlan, recorded);
+    assert.deepEqual([row.phase, row.label, row.percent, row.note], ['transcribing', '자막 만드는 중 (원격)', 99, undefined], 'a lecture at 99% is not shown as waiting');
+    assert.ok(row.overall <= 99 && !row.final);
+    // Events without `at` keep their slot, ties keep list order.
+    row = one(txtPlan, [ev('audio_done'), ev('transcript_waiting', { reason: 'server_busy', at: 5 }), ev('transcribing', { at: 6 })]);
+    assert.equal(row.phase, 'transcribing');
+    row = one(txtPlan, [ev('audio_done', { at: 2 }), ev('transcript_waiting', { reason: 'media' }), ev('transcribing', { at: 1 })]);
+    assert.equal(row.phase, 'waiting_transcript', 'the untimed event keeps its place between the timed ones');
+    row = one(txtPlan, [ev('transcribing', { at: 3 }), ev('transcript_waiting', { reason: 'media', at: 3 })]);
+    assert.equal(row.phase, 'waiting_transcript', 'equal `at` keeps list order');
+  }
+
+  // A failure of a running job can still be retried by the backend (signed-URL expiry): it is not pinned.
+  {
+    const { holdFurthestRows } = await import('../src/lib/jobItems.ts');
+    const marks = new Map();
+    const poll = (events, status = 'running', extra = {}) => holdFurthestRows('artifact-1', buildJobRows(txtPlan, job(status, events, extra)), marks);
+    let shown = poll([ev('download_progress', { bytes_written: 50, total_bytes: 100, at: 1 })]);
+    assert.deepEqual([shown[0].phase, shown[0].final], ['downloading', false]);
+    shown = poll([ev('download_progress', { bytes_written: 50, total_bytes: 100, at: 1 }), ev('download_failed', { error_code: 'network_error', at: 2 })]);
+    assert.deepEqual([shown[0].phase, shown[0].final, shown[0].overall], ['failed', false, 20]);
+    shown = poll([ev('download_failed', { error_code: 'network_error', at: 2 }), ev('download_reresolving', { at: 3 }), ev('download_progress', { bytes_written: 80, total_bytes: 100, at: 4 })]);
+    assert.deepEqual([shown[0].phase, shown[0].final, shown[0].percent], ['downloading', false, 80], 'the retry is shown, not the old failure');
+    assert.equal(shown[0].overall, 32);
+    // The same failure at the end of the job (or from the item's own final event / list) is final.
+    marks.clear();
+    shown = poll([ev('download_failed', { error_code: 'network_error', at: 2 })], 'failed', { error_code: 'network_error' });
+    assert.deepEqual([shown[0].phase, shown[0].final], ['failed', true]);
+    marks.clear();
+    shown = poll([ev('artifact_item_failed', { error_code: 'stt_failed', at: 2 })]);
+    assert.deepEqual([shown[0].phase, shown[0].final], ['failed', true]);
+    shown = poll([ev('download_progress', { bytes_written: 10, total_bytes: 100, at: 3 })]);
+    assert.equal(shown[0].phase, 'failed', 'a final failure stays');
+  }
+
+  // MP4 output: the video check after download_done is not hidden behind "음성 추출 대기 중", and a row is not 100% before it is final.
+  {
+    const { holdFurthestRows } = await import('../src/lib/jobItems.ts');
+    const mp4Plan = { ...txtPlan, outputs: ['mp4', 'txt'] };
+    const marks = new Map();
+    const poll = (events, plan = mp4Plan, extra = {}) => holdFurthestRows('artifact-1', buildJobRows(plan, job('running', events, extra)), marks);
+    let shown = poll([ev('download_done', { at: 1 })]);
+    assert.equal(shown[0].phase, 'waiting_audio');
+    shown = poll([ev('video_playable_check_started', { at: 2 })]);
+    assert.deepEqual([shown[0].phase, shown[0].label], ['verifying', '영상 확인 중']);
+    shown = poll([ev('audio_waiting', { step: 'mp4', at: 3 })]);
+    assert.deepEqual([shown[0].phase, shown[0].label], ['waiting_audio', '영상 확인 대기 중']);
+    shown = poll([ev('video_reconstruction_started', { at: 4 })]);
+    assert.equal(shown[0].phase, 'verifying');
+    // MP4 only: a finished download whose check is still ahead is not 100%.
+    const mp4Only = { ...txtPlan, outputs: ['mp4'] };
+    row = one(mp4Only, [ev('download_done', { at: 1 })], { job_id: 'native-1' });
+    assert.deepEqual([row.phase, row.overall, row.final], ['downloading', 99, false]);
+    row = one(mp4Only, [ev('download_done', { at: 1 }), ev('artifact_item_done', { at: 2 })], { job_id: 'native-1' });
+    assert.deepEqual([row.phase, row.overall, row.final], ['done', 100, true]);
+    row = one(mp4Only, [ev('download_done', { at: 1 }), ev('video_playable_check_done', { at: 2 })], { job_id: 'native-1' });
+    assert.deepEqual([row.phase, row.overall], ['done', 100]);
+  }
+
   // One lecture finishes, one fails (its own copy), the third keeps going.
   rows = rowsOf(txtPlan, [
     ev('transcript_done'), ev('artifact_item_done'),
