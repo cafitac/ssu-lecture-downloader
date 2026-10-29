@@ -1,0 +1,162 @@
+@startuml grades-domain-model
+title Grades view — domain model (PROPOSED, targets the post-S1 core/service layout)
+skinparam packageStyle rectangle
+hide empty members
+
+package "ssu_lecture_downloader.core.grades (no OS calls; only gateway.py imports rusaint)" as core {
+
+  class GradesService <<application service, one per backend process>> {
+    + status() : GradesStatus
+    + grant_consent(version) : GradesStatus
+    + revoke_consent() : GradesStatus
+    + overview(refresh: bool) : GradesOverview
+    + classes(year, semester, refresh: bool) : ClassList
+    + clear() : None
+    --
+    - snapshot : GradesSnapshot?   (memory only)
+    - session : UsaintSessionHandle?   (memory only)
+    - lock : asyncio.Lock   (single flight)
+    - ttl = 30 min
+  }
+
+  class GradesSnapshot <<memory-only entity>> {
+    account_key : str   (current username, never persisted)
+    fetched_at : datetime
+    overview : GradesOverview
+    classes_by_term : map<(year, semester), ClassList>
+    --
+    fresh(now) : bool
+  }
+
+  class GradesConsentStore <<repository: one JSON file>> {
+    + read() : GradesConsent?
+    + grant(version, now) : GradesConsent
+    + revoke() : None
+    --
+    path : app_data_dir / "grades-consent.json"   (injected)
+  }
+
+  class GradesConsent <<value object>> {
+    schema : 1
+    consent_version : int
+    granted_at : datetime
+  }
+
+  interface UsaintGateway <<port>> {
+    + available() : bool
+    + login(username, password) : UsaintSessionHandle
+    + overview(session) : GradesOverview
+    + classes(session, year, semester) : ClassList
+  }
+
+  class RusaintGateway <<adapter: rusaint 0.16.3, lazy import>> {
+    uses USaintSessionBuilder.with_password
+    uses CourseGradesApplicationBuilder.build
+    reads semesters(BACHELOR), recorded_summary, certificated_summary, classes(include_details=False)
+    --
+    maps every rusaint exception to GradesError(code) from None
+  }
+
+  class GradesMapper <<pure>> {
+    + to_overview(semesters, recorded, certificated) : GradesOverview
+    + to_classes(class_grades) : ClassList
+    rejects unexpected types (no echo of values)
+  }
+
+  class GradesOverview <<DTO>> {
+    recorded : GradeSummaryDto
+    certificated : GradeSummaryDto
+    semesters : SemesterDto[*]
+  }
+  class GradeSummaryDto <<DTO>> {
+    attempted_credits, earned_credits, grade_points_sum, grade_points_average, arithmetic_mean, pf_earned_credits
+  }
+  class SemesterDto <<DTO>> {
+    year, semester, attempted_credits, earned_credits, pf_earned_credits,
+    grade_points_average, grade_points_sum, arithmetic_mean,
+    semester_rank {rank,total}, general_rank {rank,total},
+    academic_probation, consult, flunked
+  }
+  class ClassList <<DTO>> {
+    year, semester, classes : ClassGradeDto[*]
+  }
+  class ClassGradeDto <<DTO>> {
+    code, class_name, credits (= grade_points, O3), score (number | "P" | "F"), grade (= rank), professor
+  }
+
+  class GradesError <<domain error>> {
+    code : grades_consent_required | grades_login_rejected | grades_unavailable
+    (no message, no cause)
+  }
+
+  class LmsScoreReader <<G2, SHOULD>> {
+    + current_term_scores(session, term_id) : LmsScoreList
+    posted scores only; no final_score/current_score
+  }
+}
+
+package "ssu_lecture_downloader.service" as service {
+  class GradesRouter <<routers/grades.py>> {
+    GET /api/grades/status
+    PUT /api/grades/consent
+    DELETE /api/grades/consent
+    GET /api/grades
+    GET /api/grades/classes
+    GET /api/grades/lms (G2)
+    sets Cache-Control: no-store
+  }
+  class CredentialsRouter <<existing routers/credentials.py>> {
+    logout / changed pair → grades.clear()
+  }
+  class AppContext <<existing composition root>> {
+    + grades : GradesService
+  }
+}
+
+package "ssu_lecture_downloader.platforms (sibling S1)" as platforms {
+  interface AppPaths {
+    + app_data_dir() : Path
+  }
+}
+
+package "existing" as existing {
+  interface CredentialStore {
+    + get() : CredentialPair?
+  }
+  class SsuLectureService <<core/lms_service.py>> {
+    logged-in curl_cffi cookie session
+  }
+}
+
+GradesService --> GradesConsentStore
+GradesService --> UsaintGateway
+GradesService *-- "0..1" GradesSnapshot
+GradesService ..> CredentialStore : reads pair at fetch time
+GradesConsentStore --> GradesConsent
+RusaintGateway ..|> UsaintGateway
+RusaintGateway --> GradesMapper
+GradesSnapshot --> GradesOverview
+GradesSnapshot --> "0..*" ClassList
+GradesOverview --> GradeSummaryDto
+GradesOverview --> "0..*" SemesterDto
+ClassList --> "0..*" ClassGradeDto
+GradesRouter --> GradesService
+CredentialsRouter --> GradesService : clear()
+AppContext --> GradesService : builds
+AppContext ..> AppPaths : consent path
+LmsScoreReader ..> SsuLectureService : cookie session
+
+note bottom of GradesService
+  Invariants
+  I1 no gateway call unless consent.read() matches the current consent_version
+  I2 snapshot.account_key == current username, else treated as absent
+  I3 grade values exist only in memory (snapshot, response body); never in logs, trace, files
+  I4 GradesError codes are disjoint from LMS authentication codes
+  I5 at most one u-SAINT login/fetch in flight per process
+end note
+note right of RusaintGateway
+  Read-only: no other rusaint
+  application builder may be referenced
+  (guard test).
+end note
+@enduml
