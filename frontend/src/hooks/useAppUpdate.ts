@@ -15,14 +15,17 @@ export interface AppUpdate {
  * and offers the install flow. `workBusy` is whether the UI tracks running backend jobs.
  * It only exposes state; it never focuses, opens or announces anything by itself.
  */
-export function useAppUpdate(workBusy: boolean, api: UpdateApi = tauriUpdateApi): AppUpdate {
+export function useAppUpdate(workBusy: boolean, { api = tauriUpdateApi, onBackendRestored }: { api?: UpdateApi; onBackendRestored?: () => void } = {}): AppUpdate {
   const busyRef = useRef(workBusy);
+  const restoredRef = useRef(onBackendRestored);
   useEffect(() => {
     busyRef.current = workBusy;
+    restoredRef.current = onBackendRestored;
   });
   const [controller] = useState(() => createUpdateController({
     api,
     isWorkBusy: () => busyRef.current,
+    onBackendRestored: () => restoredRef.current?.(),
     log: (message, detail) => {
       if (detail === undefined) console.info(message);
       else console.warn(message, detail);

@@ -12,6 +12,7 @@ import { TopBar } from './components/TopBar';
 import { WatchAllDialog } from './components/WatchAllDialog';
 import { WatchStrip } from './components/WatchStrip';
 import { UpdateChip } from './components/UpdateChip';
+import { isInstalling } from './lib/appUpdate';
 import { useAppUpdate } from './hooks/useAppUpdate';
 import type { AppUpdate } from './hooks/useAppUpdate';
 import { useBackendStatus } from './hooks/useBackendStatus';
@@ -100,7 +101,6 @@ function Workspace({ session, update, onWorkBusyChange }: { session: LmsSession;
   useEffect(() => {
     onWorkBusyChange(workBusy);
   }, [workBusy, onWorkBusyChange]);
-  useEffect(() => () => onWorkBusyChange(false), [onWorkBusyChange]);
 
   // A lecture that played to its end counts as watched at once; the LMS is asked a little later.
   const refreshTimers = useRef(new Set<ReturnType<typeof setTimeout>>());
@@ -449,6 +449,7 @@ function Workspace({ session, update, onWorkBusyChange }: { session: LmsSession;
         <SettingsDialog
           downloadDir={dir}
           busy={downloads.active}
+          workBusy={workBusy}
           media={media}
           debugEvents={viewer.debugEvents}
           grades={grades}
@@ -489,12 +490,14 @@ export function App() {
   // The update check needs neither the backend nor a sign-in: one controller for the whole app, so
   // it checks at launch on every screen and "나중에" survives sign-out and sign-in.
   const [workBusy, setWorkBusy] = useState(false);
-  const update = useAppUpdate(workBusy);
-  const { status, retry } = useBackendStatus();
+  const { status, retry, refresh } = useBackendStatus();
+  const update = useAppUpdate(workBusy, { onBackendRestored: refresh });
   if (status.state !== 'ready') {
+    // While an update installs, the screen's own retry would restart the backend under the installer.
+    const installing = isInstalling(update.state.phase);
     return (
       <>
-        <BackendScreen status={status} onRetry={() => void retry()} />
+        <BackendScreen status={status} onRetry={() => void retry()} retryBlockedText={installing ? '업데이트하는 중이에요' : undefined} />
         <UpdateChip update={update} corner />
       </>
     );

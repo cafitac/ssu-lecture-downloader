@@ -11,6 +11,11 @@ import { backendSupervisionStatus, resetBackendConnection, restartBackend } from
 import { startPolling } from './polling.ts';
 import type { BackendSupervisionStatus } from './types';
 
+/** The Rust side gives a backend start this long (`BACKEND_STARTUP_TIMEOUT` in src-tauri/src/backend.rs). */
+export const BACKEND_STARTUP_TIMEOUT_MS = 90_000;
+/** The recovery waits for the whole startup bound plus a margin, so it never gives up on a start that is still allowed to finish. */
+export const BACKEND_RECOVERY_TIMEOUT_MS = BACKEND_STARTUP_TIMEOUT_MS + 15_000;
+
 export interface RecoveryOptions {
   /** How long to wait for the restarted backend to leave `starting`. */
   timeoutMs?: number;
@@ -18,7 +23,7 @@ export interface RecoveryOptions {
 }
 
 /** Polls the supervision status until it is no longer `starting`, or gives up after `timeoutMs`. */
-export function waitForBackendSettled({ timeoutMs = 30_000, intervalMs = 500 }: RecoveryOptions = {}): Promise<BackendSupervisionStatus | null> {
+export function waitForBackendSettled({ timeoutMs = BACKEND_RECOVERY_TIMEOUT_MS, intervalMs = 500 }: RecoveryOptions = {}): Promise<BackendSupervisionStatus | null> {
   return new Promise((resolve) => {
     let finished = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
@@ -48,8 +53,10 @@ export function waitForBackendSettled({ timeoutMs = 30_000, intervalMs = 500 }: 
 export async function recoverBackend(options?: RecoveryOptions): Promise<void> {
   await restartBackend();
   const settled = await waitForBackendSettled(options);
+  // Still `starting` at the bound: keep the cache untouched (a request now would cache the old port with no token).
+  if (settled === null) throw new Error('backend was still starting after the recovery wait');
   resetBackendConnection();
-  if (settled?.state !== 'ready') throw new Error('backend did not come back after the restart');
+  if (settled.state !== 'ready') throw new Error('backend did not come back after the restart');
 }
 
 export const tauriUpdateApi: UpdateApi = {

@@ -108,6 +108,8 @@ export interface UpdateControllerDeps {
   isWorkBusy: () => boolean;
   timers?: TimerApi;
   log?: (message: string, detail?: unknown) => void;
+  /** Called after a failed install brought the backend back (the app re-reads its backend status). */
+  onBackendRestored?: () => void;
 }
 
 const REAL_TIMERS: TimerApi = {
@@ -128,7 +130,7 @@ function prepareErrorCode(error: unknown): string | null {
   return null;
 }
 
-export function createUpdateController({ api, isWorkBusy, timers = REAL_TIMERS, log = () => {} }: UpdateControllerDeps) {
+export function createUpdateController({ api, isWorkBusy, timers = REAL_TIMERS, log = () => {}, onBackendRestored }: UpdateControllerDeps) {
   let state: UpdateState = INITIAL_UPDATE_STATE;
   let pending: PendingUpdate | null = null;
   let running = false;
@@ -277,6 +279,11 @@ export function createUpdateController({ api, isWorkBusy, timers = REAL_TIMERS, 
   async function restoreBackend(): Promise<boolean> {
     try {
       await api.restartBackend();
+      try {
+        onBackendRestored?.();
+      } catch (error) {
+        log('updater: backend restored callback failed', error);
+      }
       return true;
     } catch (error) {
       log('updater: backend restart failed', error);

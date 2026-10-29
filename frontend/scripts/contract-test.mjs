@@ -1994,6 +1994,21 @@ const assistSource = readFileSync('src-tauri/src/assets/watch_assist.js', 'utf8'
     assert.equal(t.calls.at(-1), 'relaunch');
     t.controller.stop();
 
+    // A restored backend is announced once (the app re-reads its status); a failed restart announces nothing.
+    let restored = 0;
+    const announced = au.createUpdateController({ ...{ api: setup({ install: async () => { throw new Error('x'); } }).api, isWorkBusy: () => false, timers: fakeClock().api }, onBackendRestored: () => { restored += 1; } });
+    announced.start();
+    await flush();
+    await announced.update();
+    assert.equal(restored, 1);
+    announced.stop();
+    const silent = au.createUpdateController({ api: setup({ install: async () => { throw new Error('x'); }, restart: async () => { throw new Error('no'); } }).api, isWorkBusy: () => false, timers: fakeClock().api, onBackendRestored: () => { restored += 1; } });
+    silent.start();
+    await flush();
+    await silent.update();
+    assert.equal(restored, 1, 'no announcement when the backend did not come back');
+    silent.stop();
+
     // The restart itself failing asks for a manual reopen.
     const both = setup({ install: async () => { throw new Error('swap failed'); }, restart: async () => { throw new Error('no'); } });
     both.controller.start();
@@ -2099,6 +2114,12 @@ const assistSource = readFileSync('src-tauri/src/assets/watch_assist.js', 'utf8'
     const server = await createServer({ root: process.cwd(), server: { middlewareMode: true, hmr: false, watch: null }, appType: 'custom', logLevel: 'error', optimizeDeps: { noDiscovery: true } });
     try {
       const { UpdateChipView, UpdateChip } = await server.ssrLoadModule('/src/components/UpdateChip.tsx');
+      const { BackendScreen } = await server.ssrLoadModule('/src/components/Screens.tsx');
+      const failedStatus = { state: 'failed', mode: 'failed', error: 'x', log_path: null };
+      const normal = renderToStaticMarkup(React.createElement(BackendScreen, { status: failedStatus, onRetry() {} }));
+      assert.ok(normal.includes('다시 시도</button>'), 'the backend screen offers its retry');
+      const blocked = renderToStaticMarkup(React.createElement(BackendScreen, { status: failedStatus, onRetry() {}, retryBlockedText: '업데이트하는 중이에요' }));
+      assert.ok(blocked.includes('업데이트하는 중이에요') && !blocked.includes('다시 시도</button>'), 'while an update installs the retry is replaced by a status line');
       const base = { phase: 'available', version: '1.2.3', notes: '- 빨라졌어요', hidden: false, progress: null, notice: null, error: null, canRetry: false };
       const render = (state, open) => renderToStaticMarkup(React.createElement(UpdateChipView, { state, open, onToggle() {}, onUpdate() {}, onLater() {} }));
       const noInterruption = (html) => {
@@ -2161,7 +2182,15 @@ const assistSource = readFileSync('src-tauri/src/assets/watch_assist.js', 'utf8'
     const appFn = appSource.slice(appSource.indexOf('export function App()'));
     assert.ok(appFn.indexOf('useAppUpdate(') > 0 && appFn.indexOf('useAppUpdate(') < appFn.indexOf('BackendScreen') && appFn.indexOf('useAppUpdate(') < appFn.indexOf('SessionGate'), 'the controller is created before the backend and session branches');
     assert.equal((appSource.match(/<UpdateChip update=\{update\} corner \/>/g) ?? []).length, 2, 'corner chip on the backend-failure screen and on the login screen');
-    assert.ok(/onWorkBusyChange\(workBusy\)/.test(appSource) && /onWorkBusyChange\(false\)/.test(appSource), 'the workspace reports tracked work up and clears it on sign-out');
+    // The workspace reports tracked work up and never clears it on unmount (a job may still run behind the login screen);
+    // sign-out waits for tracked work, like it does for downloads.
+    assert.ok(/onWorkBusyChange\(workBusy\)/.test(appSource) && !/onWorkBusyChange\(false\)/.test(appSource), 'unmount keeps the last busy value');
+    assert.ok(/workBusy=\{workBusy\}/.test(appSource), 'the settings dialog gets the tracked-work flag');
+    assert.ok(/disabled=\{signingOut \|\| busy \|\| workBusy\}/.test(readFileSync('src/components/SettingsDialog.tsx', 'utf8')), 'sign-out waits for component installs and attachment saves');
+    // While an update installs, the backend screen's retry would restart the backend under the installer.
+    assert.ok(/retryBlockedText=\{installing \? '업데이트하는 중이에요' : undefined\}/.test(appSource) && /isInstalling\(update\.state\.phase\)/.test(appSource), 'backend retry replaced while installing');
+    assert.ok(/useAppUpdate\(workBusy, \{ onBackendRestored: refresh \}\)/.test(appSource), 'a recovered backend makes the app re-read its status');
+    assert.ok(/const refresh = useCallback\(\(\) => setAttempt/.test(readFileSync('src/hooks/useBackendStatus.ts', 'utf8')));
     const updateCss = readFileSync('src/styles/update.css', 'utf8');
     assert.ok(!/inset:\s*0|backdrop/.test(updateCss), 'no full-screen layer');
     assert.deepEqual(updateCss.match(/[^}]*position:\s*fixed[^}]*/g)?.map((rule) => rule.trim().split('{')[0].trim()), ['.update-host.update-corner'], 'only the small corner chip is fixed');
@@ -2245,11 +2274,46 @@ const assistSource = readFileSync('src-tauri/src/assets/watch_assist.js', 'utf8'
     const slow = tauriBridge({ backend_supervision_status: () => { starting += 1; return { state: 'starting', mode: 'checking', error: null, log_path: null }; } });
     try {
       assert.equal(await waitForBackendSettled({ intervalMs: 5, timeoutMs: 60 }), null, 'gives up after the timeout');
-      const seen = starting;
-      await new Promise((resolve) => setTimeout(resolve, 40));
-      assert.equal(starting, seen, 'polling stops when the wait ends');
-      await assert.rejects(recoverBackend({ intervalMs: 5, timeoutMs: 30 }));
     } finally { slow.restore(); }
+
+    // The wait leaves no timer behind (polling stopped, deadline cleared), observed by tracking live timers.
+    const live = new Set();
+    const realSet = globalThis.setTimeout; const realClear = globalThis.clearTimeout;
+    globalThis.setTimeout = (callback, ms, ...rest) => { const handle = realSet((...args) => { live.delete(handle); callback(...args); }, ms, ...rest); live.add(handle); return handle; };
+    globalThis.clearTimeout = (handle) => { live.delete(handle); realClear(handle); };
+    const quiet = tauriBridge({ backend_supervision_status: () => ({ state: 'starting', mode: 'checking', error: null, log_path: null }) });
+    try {
+      assert.equal(await waitForBackendSettled({ intervalMs: 5, timeoutMs: 40 }), null);
+      for (let i = 0; i < 30; i += 1) await Promise.resolve();
+      assert.equal(live.size, 0, 'no polling or deadline timer survives the end of the wait');
+    } finally {
+      globalThis.setTimeout = realSet; globalThis.clearTimeout = realClear;
+      quiet.restore();
+    }
+
+    // Still `starting` at the bound: the recovery rejects and leaves the cached connection alone.
+    let fetches = 0;
+    const stuck = tauriBridge({
+      backend_api_connection: () => { fetches += 1; return { base_url: 'http://127.0.0.1:9100', token: 'old' }; },
+      backend_supervision_status: () => ({ state: 'starting', mode: 'checking', error: null, log_path: null }),
+    });
+    try {
+      desktop.resetBackendConnection();
+      await desktop.backendApiConnection();
+      await assert.rejects(recoverBackend({ intervalMs: 5, timeoutMs: 30 }));
+      await desktop.backendApiConnection();
+      assert.equal(fetches, 1, 'a timeout while `starting` does not reset the cached connection');
+    } finally {
+      desktop.resetBackendConnection();
+      stuck.restore();
+    }
+
+    // One documented bound, at least Rust's 90 s startup timeout plus a margin.
+    const updaterModule = await import('../src/lib/updater.ts');
+    assert.match(readFileSync('src-tauri/src/backend.rs', 'utf8'), /const BACKEND_STARTUP_TIMEOUT: Duration = Duration::from_secs\(90\);/);
+    assert.equal(updaterModule.BACKEND_STARTUP_TIMEOUT_MS, 90_000);
+    assert.ok(updaterModule.BACKEND_RECOVERY_TIMEOUT_MS >= 90_000 + 10_000, 'the recovery wait outlasts a backend start');
+    assert.equal((readFileSync('src/lib/updater.ts', 'utf8').match(/timeoutMs = /g) ?? []).length, 1);
     assert.ok(statusCalls >= 1);
   }
 
@@ -2289,9 +2353,9 @@ const assistSource = readFileSync('src-tauri/src/assets/watch_assist.js', 'utf8'
         const calls = [];
         const api = { check: async () => { calls.push('check'); return null; }, installGuard: async () => ({ status: 'allowed' }), prepare: async () => {}, restartBackend: async () => {}, relaunch: async () => {} };
         fake.__begin();
-        const result = useAppUpdate(false, api);
+        const result = useAppUpdate(false, { api });
         const cleanups = fake.__effects().map((effect) => effect()).filter(Boolean);
-        await new Promise((resolve) => setTimeout(resolve, 5));
+        for (let i = 0; i < 20; i += 1) await Promise.resolve();
         const checkedAtMount = [...calls];
         cleanups.forEach((cleanup) => cleanup());
         bridge?.restore();
