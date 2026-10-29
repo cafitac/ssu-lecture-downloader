@@ -1,6 +1,6 @@
-# 로컬 API
+# Local API
 
-앱 안에서 쓰는 FastAPI 서버(`127.0.0.1`)의 실행 방식, 접근 제한, 엔드포인트 목록입니다.
+How the local FastAPI server (`127.0.0.1`) is started, how access is restricted, and which endpoints it exposes.
 
 Run the local API manually for browser/Vite development:
 

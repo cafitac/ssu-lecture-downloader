@@ -1,4 +1,4 @@
-# 공식 플레이어 QA 경계
+# Official viewer QA boundary
 
 Browser/Vite QA and Tauri app QA are intentionally different for lecture watching:
 

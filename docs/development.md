@@ -1,14 +1,14 @@
-# 개발 가이드
+# Development guide
 
-로컬에서 백엔드, 프론트엔드, 데스크톱 앱을 띄우고 확인하는 방법입니다. 구조는 [architecture.md](architecture.md), API는 [api.md](api.md)에 있습니다.
+How to run and verify the backend, frontend and desktop app locally. Architecture is in [architecture.md](architecture.md), the API in [api.md](api.md).
 
-## 로컬 설정
+## Local setup
 
 1. Copy `.env.example` to `.env` only for terminal CLI commands.
 2. Fill in `SSU_USERNAME` and `SSU_PASSWORD` locally for CLI fallback. The API/UI login flow ignores `.env`, does not use Keychain by default, and keeps entered credentials only in the running backend process memory.
 3. Do not commit `.env` or `.local/` artifacts.
 
-## CLI 명령
+## CLI commands
 
 Login only:
 
@@ -69,7 +69,7 @@ uv run ssu-lecture-downloader batch-download --course-id 44070 --course-name 'UX
 
 `batch-download` emits progress events (`resolving`, `planned`, `downloading`, `download_started`, `download_progress`, `download_done`, `done`, `failed`, `download_retrying`) in JSON and compact progress lines in human output. Repeat `--module-item-id` for multi-select downloads.
 
-## 프론트엔드와 데스크톱 앱 실행
+## Frontend and desktop app
 
 Run the React/Vite prototype:
 
@@ -98,7 +98,7 @@ npm run tauri:build
 
 `build:backend-sidecar` runs PyInstaller (`--onedir`, so there is no unpack-to-temp step on every launch) from the repo root and writes `frontend/src-tauri/resources/backend-sidecar/ssu-api/ssu-api` plus its `_internal/` directory, which are included as a Tauri bundle resource. A leftover single-file `backend-sidecar/ssu-api` from older builds is removed by the script. The sidecar contains the Python runtime/backend and packaged media dependencies such as `imageio-ffmpeg`; `faster-whisper` is bundled when target-compatible wheels are available for the build machine/target.
 
-## 검증
+## Verification
 
 ```bash
 uv run pytest -q

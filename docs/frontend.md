@@ -1,6 +1,6 @@
-# 프론트엔드 (React/Vite + Tauri 셸)
+# Frontend (React/Vite + Tauri shell)
 
-예전 `frontend/README.md`를 옮긴 문서입니다. 명령은 따로 적지 않았으면 `frontend/`에서 실행합니다.
+Moved from the old `frontend/README.md`. Commands run from `frontend/` unless stated otherwise.
 
 React/Vite UI (plain CSS, no UI framework) for the local SSU lecture downloader API.
 

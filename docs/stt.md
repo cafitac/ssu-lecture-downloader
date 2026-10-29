@@ -1,4 +1,4 @@
-# 음성 추출과 자막
+# Audio extraction and subtitles
 
 The desktop UI includes two related paths:
 
@@ -15,7 +15,7 @@ STT uses packaged `faster-whisper` when available. The default is `large-v3` wit
 
 If Whisper/faster-whisper is missing, `/api/stt/providers/status`, `/api/media/dependencies/status`, and the UI return an explicit packaged-component reinstall/development-sync hint instead of silently falling back. In non-frozen development/runtime environments the UI also shows `필요한 구성요소 설치`, which calls `/api/media/dependencies/install/jobs` and installs only missing supported components through the backend (`imageio-ffmpeg` for ffmpeg fallback and `faster-whisper` for STT). Distributed frozen sidecars should still bundle target-compatible wheels up front; if the sidecar cannot safely self-modify, the app reports the reinstall path. The first model run can take longer because the Whisper model is downloaded/prepared locally.
 
-## 원격 자막 서버
+## Remote subtitle server
 
 Where faster-whisper cannot run (Intel Macs) subtitles come from a remote STT server configured in Settings, under "원격 자막 서버". Two kinds are supported: `whisper_cpp_server` (whisper.cpp `whisper-server`, `POST {base}/inference`) and `openai_compatible` (`POST {base}/v1/audio/transcriptions`, optional Bearer key). The settings live in `~/Library/Application Support/com.local.ssu-lecture-downloader/stt.json` (mode 0600, override with `SSU_STT_CONFIG_PATH`); the API key is write-only and never returned or logged. An optional SSH tunnel (`ssh -N -L <local>:127.0.0.1:<remote> <host alias>`) is opened on demand, reused while alive and closed with the backend. When a remote server is enabled it is preferred over the local engine for every transcription.
 
