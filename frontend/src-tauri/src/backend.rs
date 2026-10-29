@@ -424,6 +424,20 @@ impl BackendManager {
         }
     }
 
+    /// Stop the managed sidecar before an update is installed, but stay restartable:
+    /// unlike `shutdown`, this does not set `shutting_down`, so `backend_restart` still
+    /// works when the install fails and the old app has to keep running.
+    ///
+    /// `Err` (nothing stopped) while a startup worker is running: it would respawn the child.
+    pub(crate) fn stop_for_update(&self) -> Result<(), String> {
+        if self.lock().worker_active {
+            return Err("backend_starting".to_string());
+        }
+        self.terminate_child();
+        self.set_failed("업데이트를 설치하기 위해 중지했습니다.".to_string());
+        Ok(())
+    }
+
     /// App exit: stop supervising and kill the owned process tree. Idempotent.
     pub(crate) fn shutdown(&self) {
         self.lock().shutting_down = true;
@@ -1264,6 +1278,76 @@ HTTPServer(("127.0.0.1", port), Handler).serve_forever()
         );
         assert!(!dir.join("state").join(BACKEND_PID_FILE).exists());
         fs::remove_dir_all(dir).ok();
+    }
+
+    /// Retry `stop_for_update` while the startup worker thread is still winding down.
+    fn stop_for_update_when_idle(manager: &BackendManager) -> Result<(), String> {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match manager.stop_for_update() {
+                Err(error) if error == "backend_starting" && Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(25));
+                }
+                other => return other,
+            }
+        }
+    }
+
+    #[test]
+    fn stop_for_update_kills_the_tree_and_the_backend_can_be_restarted_afterwards() {
+        let dir = temp_root("e2e-stop-for-update");
+        let manager = fake_backend_manager(&dir, "serve");
+        assert!(manager.start_in_background());
+        wait_while_starting(&manager, Duration::from_secs(30));
+        assert_eq!(manager.status().state, BackendState::Ready);
+        let grandchild: libc::pid_t = fs::read_to_string(dir.join("grandchild.pid"))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        let child_pid = manager.lock().child.as_ref().unwrap().id() as libc::pid_t;
+
+        assert_eq!(stop_for_update_when_idle(&manager), Ok(()));
+
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while (pid_alive(grandchild) || pid_alive(child_pid)) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        assert!(!pid_alive(child_pid), "backend leader survived the stop");
+        assert!(!pid_alive(grandchild), "backend grandchild orphaned");
+        assert!(!dir.join("state").join(BACKEND_PID_FILE).exists());
+        let status = manager.status();
+        assert_eq!(status.state, BackendState::Failed, "{status:?}");
+        assert!(
+            manager.connection().token.is_none(),
+            "the token died with the process"
+        );
+        // Stopping again (a retried prepare) is harmless.
+        assert_eq!(manager.stop_for_update(), Ok(()));
+
+        // The install failed: the existing restart path brings the old app's backend back.
+        assert!(manager.restart(), "stop_for_update must not block restart");
+        wait_while_starting(&manager, Duration::from_secs(30));
+        assert_eq!(manager.status().state, BackendState::Ready);
+        manager.shutdown();
+        fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn stop_for_update_is_refused_while_a_startup_is_running() {
+        let root = temp_root("stop-for-update-guard");
+        let manager = BackendManager::new(root.join("project"), None, root.join("logs"), None);
+        manager.lock().worker_active = true;
+        assert_eq!(
+            manager.stop_for_update(),
+            Err("backend_starting".to_string())
+        );
+        assert_eq!(
+            manager.status().state,
+            BackendState::Starting,
+            "nothing was touched"
+        );
+        fs::remove_dir_all(root).ok();
     }
 
     #[test]

@@ -65,6 +65,7 @@ const requiredFiles = [
   'src-tauri/src/lib.rs',
   'src-tauri/src/backend.rs',
   'src-tauri/src/native_download.rs',
+  'src-tauri/src/update.rs',
   'src-tauri/src/viewer.rs',
   'src-tauri/src/assets/watch_assist.js',
   'vite.config.ts',
@@ -1569,4 +1570,52 @@ const assistSource = readFileSync('src-tauri/src/assets/watch_assist.js', 'utf8'
   assert.equal(grades.updatedAgoText(fetched, new Date('2026-10-31T05:10:00Z')), '2일 전 업데이트');
   assert.equal(grades.updatedAgoText(null, new Date()), '');
   assert.equal(grades.updatedAgoText('not a date', new Date()), '');
+}
+
+{
+  // AU-UPDATER-SHELL: the updater is wired but inert (no frontend caller yet); its config, key,
+  // endpoint and ACL scoping are pinned here.
+  const read = (path) => readFileSync(new URL(`../${path}`, import.meta.url), 'utf8');
+  const conf = JSON.parse(read('src-tauri/tauri.conf.json'));
+  const PUBKEY = 'dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEFFNEQ1MkY3RDJFRjVBRDQKUldUVVd1L1M5MUpOcmprK0xwbEY4aXJQa3ZBcnBlRjh1QUVXVWdZTUcvd3g3Nk1hMFJJTVNsbWEK';
+  assert.equal(conf.bundle.createUpdaterArtifacts, true);
+  assert.equal(conf.plugins.updater.pubkey, PUBKEY, 'the updater trusts exactly this public key');
+  // The pubkey is the key CONTENT (a minisign public key), never a path and never a secret key.
+  const pubkeyText = Buffer.from(conf.plugins.updater.pubkey, 'base64').toString('utf8');
+  assert.match(pubkeyText, /^untrusted comment: minisign public key: [0-9A-F]{16}\nRW[A-Za-z0-9+/=]+\n?$/);
+  assert.deepEqual(conf.plugins.updater.endpoints, ['https://github.com/cafitac/ssu-lecture-downloader/releases/latest/download/latest.json']);
+  assert.equal(conf.plugins.updater.windows.installMode, 'passive');
+  assert.ok(!('dangerousInsecureTransportProtocol' in conf.plugins.updater), 'updates only over HTTPS');
+
+  // ACL: updater and restart for the main window only, never for the remote watch window.
+  const mainCapability = JSON.parse(read('src-tauri/capabilities/default.json'));
+  assert.deepEqual(mainCapability.windows, ['main']);
+  assert.ok(mainCapability.permissions.includes('updater:default'));
+  assert.ok(mainCapability.permissions.includes('process:allow-restart'));
+  assert.ok(!mainCapability.permissions.includes('process:default') && !mainCapability.permissions.includes('process:allow-exit'), 'only restart, not exit');
+  const remoteCapability = read('src-tauri/capabilities/watch-remote.json');
+  assert.ok(!/updater|process/.test(remoteCapability), 'the remote watch window never gets update or process permissions');
+  const mainPermissions = read('src-tauri/permissions/main-window-commands.toml');
+  for (const command of ['update_install_guard', 'prepare_for_update']) {
+    assert.ok(mainPermissions.includes(`commands.allow = ["${command}"]`), `${command} permission`);
+    assert.ok(mainPermissions.includes(`  "allow-${command.replaceAll('_', '-')}",`), `${command} in the main-window set`);
+  }
+
+  // Plugins: crates, JS packages and desktop-only registration.
+  const cargoToml = read('src-tauri/Cargo.toml');
+  assert.match(cargoToml, /tauri-plugin-updater = "2\.14"/);
+  assert.match(cargoToml, /tauri-plugin-process = "2\.4"/);
+  const pkg = JSON.parse(read('package.json'));
+  assert.ok(pkg.dependencies['@tauri-apps/plugin-updater'] && pkg.dependencies['@tauri-apps/plugin-process']);
+  const libRs = read('src-tauri/src/lib.rs');
+  assert.match(libRs, /#\[cfg\(desktop\)\]\s*let builder = builder\s*\.plugin\(tauri_plugin_updater::Builder::new\(\)\.build\(\)\)\s*\.plugin\(tauri_plugin_process::init\(\)\)/);
+  assert.ok(libRs.includes('update::update_install_guard') && libRs.includes('update::prepare_for_update'));
+
+  // PR CI has no signing key, so its app build must turn updater artifacts off (the release workflow must not).
+  const ci = read('../.github/workflows/ci.yml');
+  assert.ok(ci.includes(`tauri build -- --bundles app --config '{"bundle":{"createUpdaterArtifacts":false}}'`), 'ci.yml PR build overrides createUpdaterArtifacts');
+
+  // Inert: nothing in the frontend source uses the update plugins yet (AU-UPDATE-UI adds that).
+  const frontendSource = readTree('src', ['.ts', '.tsx']).map((file) => readFileSync(file, 'utf8')).join('\n');
+  assert.ok(!/plugin-updater|plugin-process|update_install_guard|prepare_for_update/.test(frontendSource), 'the updater must stay inert until AU-UPDATE-UI');
 }

@@ -207,6 +207,20 @@ impl NativeDownloadJobs {
         }
     }
 
+    /// True while any native download job has not reached a terminal status. A job whose lock
+    /// is held is being updated right now, so it counts as running. Fails closed: a poisoned
+    /// registry or job counts as running.
+    pub(crate) fn has_running_job(&self) -> bool {
+        let Ok(jobs) = self.jobs.lock() else {
+            return true;
+        };
+        jobs.values().any(|job| match job.try_lock() {
+            Ok(guard) => !is_terminal_status(&guard.status),
+            Err(std::sync::TryLockError::WouldBlock) => true,
+            Err(std::sync::TryLockError::Poisoned(_)) => true,
+        })
+    }
+
     fn create(&self) -> Result<SharedNativeDownloadJob, String> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let job = Arc::new(Mutex::new(NativeDownloadJob::new(format!("native-{id}"))));
@@ -1247,5 +1261,27 @@ mod tests {
             .any(|event| event.stage == "download_cancelled"));
         assert!(!output.exists());
         fs::remove_dir_all(dir).ok();
+    }
+    #[test]
+    fn has_running_job_is_true_until_every_job_is_terminal() {
+        let jobs = NativeDownloadJobs::new();
+        assert!(!jobs.has_running_job(), "no jobs");
+        let job = jobs.create().expect("job");
+        assert!(jobs.has_running_job(), "queued counts as running");
+        for (status, running) in [
+            ("running", true),
+            ("succeeded", false),
+            ("failed", false),
+            ("cancelled", false),
+        ] {
+            job.lock().unwrap().status = status.to_string();
+            assert_eq!(jobs.has_running_job(), running, "{status}");
+        }
+        // A job whose lock is held is being updated right now: counts as running.
+        job.lock().unwrap().status = "succeeded".to_string();
+        let held = job.lock().unwrap();
+        assert!(jobs.has_running_job());
+        drop(held);
+        assert!(!jobs.has_running_job());
     }
 }

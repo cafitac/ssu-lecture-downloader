@@ -24,12 +24,23 @@ fn open_url_in_browser(_url: String) -> &'static str {
     "opened"
 }
 
+#[tauri::command]
+fn update_install_guard() -> &'static str {
+    "guard"
+}
+#[tauri::command]
+fn prepare_for_update() -> &'static str {
+    "prepared"
+}
+
 fn app() -> App<MockRuntime> {
     mock_builder()
         .invoke_handler(tauri::generate_handler![
             watch_signal,
             real_download_dir,
-            open_url_in_browser
+            open_url_in_browser,
+            update_install_guard,
+            prepare_for_update
         ])
         .build(crate::app_context())
         .expect("app builds with the real capabilities")
@@ -276,4 +287,49 @@ fn the_remote_capability_is_scoped_to_the_watch_window_and_ssu_pages() {
         default.get("remote").is_none(),
         "the main window is local only"
     );
+}
+
+#[test]
+fn updating_is_for_the_main_window_only() {
+    let default: serde_json::Value =
+        serde_json::from_str(include_str!("../capabilities/default.json")).expect("json");
+    let permissions = default["permissions"].as_array().expect("permissions");
+    for needed in ["updater:default", "process:allow-restart"] {
+        assert!(permissions.contains(&serde_json::json!(needed)), "{needed}");
+    }
+    assert!(
+        !permissions.contains(&serde_json::json!("process:default"))
+            && !permissions.contains(&serde_json::json!("process:allow-exit")),
+        "the main window may restart the app, not exit it"
+    );
+    let remote_json = include_str!("../capabilities/watch-remote.json");
+    assert!(!remote_json.contains("updater") && !remote_json.contains("process"));
+
+    // The guard and the preparation are ordinary main-window commands (and so not remote).
+    let app = app();
+    let watch = window(
+        &app,
+        &format!("{WATCH_LABEL_PREFIX}-2"),
+        remote("https://canvas.ssu.ac.kr/"),
+    );
+    let main = window(&app, "main", WebviewUrl::default());
+    for (cmd, expected) in [
+        ("update_install_guard", "guard"),
+        ("prepare_for_update", "prepared"),
+    ] {
+        assert_eq!(
+            call(&main, "local", cmd, serde_json::json!({})),
+            Ok(expected.to_string())
+        );
+        assert!(
+            call(
+                &watch,
+                "https://canvas.ssu.ac.kr/",
+                cmd,
+                serde_json::json!({})
+            )
+            .is_err(),
+            "{cmd} must not be reachable from the LMS page"
+        );
+    }
 }

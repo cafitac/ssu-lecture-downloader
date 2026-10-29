@@ -121,6 +121,16 @@ identifier = "allow-native-cancel-download-job"
 description = "Allows the main window to call `native_cancel_download_job`."
 commands.allow = ["native_cancel_download_job"]
 
+[[permission]]
+identifier = "allow-update-install-guard"
+description = "Allows the main window to call `update_install_guard`."
+commands.allow = ["update_install_guard"]
+
+[[permission]]
+identifier = "allow-prepare-for-update"
+description = "Allows the main window to call `prepare_for_update`."
+commands.allow = ["prepare_for_update"]
+
 [[set]]
 identifier = "main-window-commands"
 description = "Every app command the main window uses."
@@ -148,4 +158,6 @@ permissions = [
   "allow-native-start-batch-download-job",
   "allow-native-download-job-status",
   "allow-native-cancel-download-job",
+  "allow-update-install-guard",
+  "allow-prepare-for-update",
 ]

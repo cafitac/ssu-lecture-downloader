@@ -6,6 +6,7 @@ mod invariant_tests;
 mod native_download;
 mod platform;
 mod reminders;
+mod update;
 mod viewer;
 mod watch_external;
 mod watch_queue;
@@ -133,8 +134,13 @@ pub fn run() {
     }
     let project_root =
         backend::project_root_from_manifest_dir(Path::new(env!("CARGO_MANIFEST_DIR")));
-    let built = tauri::Builder::default()
-        .plugin(tauri_plugin_dialog::init())
+    let builder = tauri::Builder::default().plugin(tauri_plugin_dialog::init());
+    // Inert until the frontend calls the updater: nothing here checks for or installs updates.
+    #[cfg(desktop)]
+    let builder = builder
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init());
+    let built = builder
         .on_window_event(|window, event| {
             // While the playback window runs, closing the main window only hides it, so the
             // menu bar item's "앱 열기" can bring it back.
@@ -215,7 +221,9 @@ pub fn run() {
             native_download::native_start_download_job,
             native_download::native_start_batch_download_job,
             native_download::native_download_job_status,
-            native_download::native_cancel_download_job
+            native_download::native_cancel_download_job,
+            update::update_install_guard,
+            update::prepare_for_update
         ])
         .build(app_context());
     match built {
