@@ -171,6 +171,7 @@ class Rig:
         monkeypatch.setattr(postprocess_media, 'ensure_playable_mp4', self._ensure_mp4)
         monkeypatch.setattr(stt, 'transcribe_audio', self._transcribe)
         self.registry = JobRegistry()
+        self.job: Job | None = None
 
     # ---- fakes
     def _spec_for(self, path: Path) -> Spec:
@@ -190,7 +191,7 @@ class Rig:
 
     def _ensure_mp4(self, path, *, overwrite=True, on_progress=None, should_cancel=None):
         with self.media.track():
-            time.sleep(0.01)
+            time.sleep(0.05)
         return postprocess_media.VideoReconstructionResult(ok=True, input_path=path, output_path=path, file_size=5, reconstructed=False)
 
     def _transcribe(self, request, on_progress=None, should_cancel=None, remote=None, *, stt_capability, gates=None):
@@ -214,7 +215,8 @@ class Rig:
         def work(job: Job):
             return ArtifactPipeline(self.ctx, job, request, outputs, ('u', 'p'), self.tmp_path).run()
 
-        return self.ctx.runner.start(self.registry, work)
+        self.job = self.ctx.runner.start(self.registry, work)
+        return self.job
 
     def run(self, outputs: list[str], **kwargs: Any) -> dict[str, Any]:
         return finish(self.start(outputs, **kwargs))
@@ -660,7 +662,8 @@ def test_thirty_lectures_stay_classifiable_after_the_400_event_cap(make_rig, mon
     snapshot = rig.run(['mp3', 'txt'])
 
     assert len(snapshot['progress']) == MAX_JOB_PROGRESS_EVENTS  # the cap was hit and early events were dropped
-    assert len(events(snapshot, 'artifact_item_done')) < 29  # some terminal events were evicted
+    assert len(events(snapshot, 'artifact_item_done')) == 29  # milestones outlive the noise: only plain events were evicted
+    assert not events(snapshot, 'audio_note')[:1] or len(events(snapshot, 'audio_note')) < 30 * 15
     entries = {entry['module_item_id']: entry for entry in snapshot['result']['items_status']}
     assert set(entries) == set(range(1, 31))
     assert entries[7]['state'] == 'failed' and entries[7]['failed_stage'] == 'transcript'
@@ -719,3 +722,147 @@ def test_on_item_ready_reports_a_failed_download_and_a_raising_callback_does_not
 
     assert [(item.ok, item.error_code) for item in seen] == [(False, 'OSError')]
     assert result.error_code == 'partial_failure' and len(result.items) == 1
+
+
+# --------------------------------------------- repair batch: waits, cap, order, failure state
+
+
+def assert_no_audio_waiting_after_transcript_started(snapshot: dict[str, Any]) -> None:
+    seen_transcript: set[Any] = set()
+    for event in snapshot['progress']:
+        lecture = event.get('module_item_id')
+        if event['stage'] == 'transcribing' or event['stage'].startswith('transcript_'):
+            seen_transcript.add(lecture)
+        assert not (event['stage'] == 'audio_waiting' and lecture in seen_transcript), event
+
+
+def test_media_waits_inside_the_transcript_stage_are_transcript_waits_not_audio_waits(make_rig, monkeypatch):
+    specs = [Spec(n, has_video=True) for n in range(1, 6)]
+    rig = make_rig(specs)
+    for spec in specs:
+        rig.lms.video_path(spec.item_id).with_suffix('.mp3').write_bytes(b'audio')  # only the remote transcript is left
+    monkeypatch.setattr(stt, 'transcribe_audio', REAL_TRANSCRIBE_AUDIO)
+    monkeypatch.setattr(postprocess_media, 'convert_to_stt_wav', lambda src, dst, should_cancel=None: (time.sleep(0.15), write_silent_wav(dst, 5)))
+
+    with FakeSttServer(lambda request: (200, 'text/plain', srt((0, 3, '원격 자막')))) as server:
+        rig.enable_remote(server.url)
+        snapshot = rig.run(['txt'], stt_provider='faster_whisper')
+
+    assert snapshot['status'] == 'succeeded', snapshot['error_code']
+    media_waits = [e for e in events(snapshot, 'transcript_waiting') if e.get('reason') == 'media']
+    assert media_waits  # 5 conversions through a limit of 2
+    assert events(snapshot, 'audio_waiting') == []
+    assert_no_audio_waiting_after_transcript_started(snapshot)
+
+
+def test_mp4_reconstruction_waits_carry_step_mp4(make_rig):
+    rig = make_rig([Spec(n, has_video=True) for n in range(1, 7)])
+
+    snapshot = rig.run(['mp4'])
+
+    waits = events(snapshot, 'audio_waiting')
+    assert waits and {e['step'] for e in waits} == {'mp4'}
+
+
+def test_plain_audio_extraction_waits_carry_step_audio(make_rig):
+    rig = make_rig([Spec(n, has_video=True, extract=0.1) for n in range(1, 6)])
+
+    snapshot = rig.run(['mp3'])
+
+    waits = events(snapshot, 'audio_waiting')
+    assert waits and {e['step'] for e in waits} == {'audio'}
+
+
+def test_over_the_cap_plain_events_go_first_and_every_unfinished_lecture_keeps_its_milestone(make_rig, monkeypatch):
+    rig = make_rig([Spec(n, has_video=True, block_extract=True) for n in range(1, 31)])
+    inner = rig._extract
+    noisy_done = threading.Event()
+
+    def chatty(request, on_progress=None, should_cancel=None):
+        for tick in range(500):  # 1000 plain events from the two running extractions: far over the 400 cap
+            on_progress({'stage': 'audio_note', 'tick': tick})
+        noisy_done.set()
+        return inner(request, on_progress=on_progress, should_cancel=should_cancel)
+
+    monkeypatch.setattr(postprocess_media, 'extract_audio', chatty)
+    job = rig.start(['mp3'])
+    wait_for(lambda: noisy_done.is_set() and len(events(job, 'audio_waiting')) == 28, message='28 lectures waiting, noise emitted')
+    time.sleep(0.05)
+
+    progress = job.progress_events()  # mid-run: nothing has finished
+    assert len(progress) <= MAX_JOB_PROGRESS_EVENTS and len(events(job, 'audio_note')) < 1000
+    for n in range(1, 31):
+        mine = [e for e in progress if e.get('module_item_id') == n]
+        assert any(e['stage'] == 'artifact_item_queued' for e in mine), n
+    waiting_ids = {e['module_item_id'] for e in events(job, 'audio_waiting')}
+    assert len(waiting_ids) == 28  # the two lectures that hold a slot are not waiting; every other one still shows it
+
+    snapshot, elapsed, _ = cancel_and_wait(rig, job)
+    assert snapshot['status'] == 'cancelled' and elapsed < 3.0
+
+
+def test_milestones_are_dropped_only_when_nothing_else_is_left():
+    from ssu_lecture_downloader.core.jobs import append_compacted_progress
+
+    progress: list[dict[str, Any]] = []
+    for n in range(MAX_JOB_PROGRESS_EVENTS + 25):
+        append_compacted_progress(progress, {'stage': 'artifact_item_done', 'module_item_id': n, 'at': float(n)})
+
+    assert len(progress) == MAX_JOB_PROGRESS_EVENTS
+    assert progress[0]['module_item_id'] == 25  # oldest milestone went, in order, because there was nothing else
+    append_compacted_progress(progress, {'stage': 'audio_note', 'at': 1e9})
+    assert len(progress) == MAX_JOB_PROGRESS_EVENTS and progress[-1]['stage'] == 'audio_note'
+
+
+def test_waiting_events_move_to_the_end_instead_of_being_replaced_in_place():
+    from ssu_lecture_downloader.core.jobs import append_compacted_progress
+
+    def waiting(n: int, stage: str = 'transcript_waiting', **extra: Any) -> dict[str, Any]:
+        return {'stage': stage, 'module_item_id': 1, 'index': 1, 'audio_path': 'a.mp3', 'at': float(n), **extra}
+
+    progress: list[dict[str, Any]] = []
+    append_compacted_progress(progress, waiting(1, reason='local_engine'))
+    append_compacted_progress(progress, {'stage': 'transcribing', 'module_item_id': 1, 'at': 2.0})
+    append_compacted_progress(progress, waiting(3, reason='server_busy', ahead_requests=1))
+    append_compacted_progress(progress, {'stage': 'transcript_progress', 'module_item_id': 1, 'at': 4.0, 'output_path': 'x'})
+    append_compacted_progress(progress, waiting(5, reason='server_busy', ahead_requests=2))
+    append_compacted_progress(progress, waiting(6, stage='audio_waiting'))
+    append_compacted_progress(progress, waiting(7, stage='audio_waiting', step='audio'))
+
+    assert [e['stage'] for e in progress] == ['transcribing', 'transcript_progress', 'transcript_waiting', 'audio_waiting']
+    assert progress[2]['ahead_requests'] == 2 and progress[3]['step'] == 'audio'
+    assert [e['at'] for e in progress] == sorted(e['at'] for e in progress)  # still monotonic
+
+
+def test_waiting_notes_stay_monotonic_through_a_real_run(make_rig):
+    rig = make_rig([Spec(n, has_video=True, extract=0.03, transcribe=0.03) for n in range(1, 7)])
+
+    snapshot = rig.run(['mp3', 'txt'])
+
+    stamps = [e['at'] for e in snapshot['progress']]
+    assert stamps == sorted(stamps)
+    for n in range(1, 7):
+        waits = [e for e in events(snapshot, 'transcript_waiting', n)]
+        assert len(waits) <= 1  # one entry per lecture: later ones replaced the earlier
+
+
+def test_a_real_error_stays_a_failure_even_if_the_job_is_cancelled_right_after(make_rig, monkeypatch):
+    rig = make_rig([Spec(1, has_video=True), Spec(2, has_video=True, block_extract=True)])
+    inner = rig._extract
+
+    def fail_then_cancel(request, on_progress=None, should_cancel=None):
+        if request.input_path.stem == 'lecture-1':
+            wait_for(lambda: rig.job is not None, message='job handle')
+            rig.job.mark_cancel_requested()  # the cancel flag is set before this error is reported
+            return AudioExtractionResult(ok=False, input_path=request.input_path, error_code='ffmpeg_failed', message='bad input')
+        return inner(request, on_progress=on_progress, should_cancel=should_cancel)
+
+    monkeypatch.setattr(postprocess_media, 'extract_audio', fail_then_cancel)
+
+    snapshot = rig.run(['mp3'])
+
+    assert snapshot['status'] == 'cancelled'
+    by_id = {entry['module_item_id']: entry for entry in snapshot['result']['items_status']}
+    assert by_id[1] == {'module_item_id': 1, 'state': 'failed', 'error_code': 'ffmpeg_failed', 'failed_stage': 'audio'}
+    assert by_id[2]['state'] == 'cancelled'
+    assert [e['module_item_id'] for e in events(snapshot, 'artifact_item_failed')] == [1]

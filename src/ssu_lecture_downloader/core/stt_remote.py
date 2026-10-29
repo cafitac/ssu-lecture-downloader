@@ -32,7 +32,7 @@ from ssu_lecture_downloader.core import postprocess_media, stt_cues
 from ssu_lecture_downloader.core.postprocess_media import MediaCancelled
 from ssu_lecture_downloader.core.progress import emit_progress
 from ssu_lecture_downloader.core.ssh_tunnel import SshTunnel, TunnelError
-from ssu_lecture_downloader.core.stt import TranscriptionCancelled, TranscriptionRequest, TranscriptionResult, WorkGates, write_transcript_files
+from ssu_lecture_downloader.core.stt import MEDIA, TranscriptionCancelled, TranscriptionRequest, TranscriptionResult, WorkGates, write_transcript_files
 from ssu_lecture_downloader.core.stt_cues import TranscriptSegment
 from ssu_lecture_downloader.core.stt_remote_config import (
     DEFAULT_OPENAI_MODEL,
@@ -604,7 +604,8 @@ def transcribe_with_remote(
         """ffmpeg-class work (WAV conversion, repair cuts) shares the process-wide media limit; the HTTP calls never hold it."""
         if gates is None:
             return nullcontext()
-        return gates.hold('media', should_cancel=should_cancel, on_wait=lambda: emit_progress(on_progress, {**base_event, 'stage': 'audio_waiting'}))
+        # This wait happens inside the transcript stage, so it is a transcript wait (never `audio_waiting`).
+        return gates.hold(MEDIA, should_cancel=should_cancel, on_wait=lambda: emit_progress(on_progress, {**base_event, 'stage': 'transcript_waiting', 'reason': 'media'}))
 
     def send(path: Path, temperature: float) -> list[TranscriptSegment]:
         """One request. The app does not queue remote work; it only tells the user how many of its own requests are ahead."""

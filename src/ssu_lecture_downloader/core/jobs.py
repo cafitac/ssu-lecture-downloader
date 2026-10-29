@@ -24,7 +24,11 @@ COALESCED_PROGRESS_STAGES = {
     # Wait notes (queue position, "n requests ahead") replace each other per lecture.
     "transcript_waiting",
     "transcript_queued",
+    "audio_waiting",
 }
+# Coalesced stages whose newest event moves to the END of the list (it is the lecture's current state), instead of
+# being replaced in place like byte/segment ticks.
+MOVE_TO_END_PROGRESS_STAGES = frozenset({"transcript_waiting", "transcript_queued", "audio_waiting"})
 TERMINAL_STATUSES = frozenset({"succeeded", "failed", "cancelled"})
 # Finished jobs are kept so late polls still resolve, but not forever.
 DEFAULT_MAX_FINISHED_JOBS = 50
@@ -40,13 +44,28 @@ def _progress_identity(event: dict[str, Any]) -> tuple[object, object, object, o
     )
 
 
+def is_milestone_event(event: dict[str, Any]) -> bool:
+    """Events that say where a lecture is: they are the last to be dropped when the list is over its cap."""
+    stage = str(event.get("stage") or "")
+    return stage.startswith("artifact_item_") or stage == "done" or stage.endswith("_done") or stage.endswith("_waiting") or stage == "transcript_queued"
+
+
 def append_compacted_progress(progress: list[dict[str, Any]], event: dict[str, Any]) -> None:
-    """Append progress without retaining every byte-level tick forever."""
-    if event.get("stage") in COALESCED_PROGRESS_STAGES:
+    """Append progress without retaining every byte-level tick forever.
+
+    Over the cap, ticks and other plain events go first (oldest first); milestone events
+    (see `is_milestone_event`) are dropped only when nothing else is left.
+    """
+    stage = event.get("stage")
+    if stage in COALESCED_PROGRESS_STAGES:
         identity = _progress_identity(event)
         for index in range(len(progress) - 1, -1, -1):
             if _progress_identity(progress[index]) == identity:
-                progress[index] = event
+                if stage in MOVE_TO_END_PROGRESS_STAGES:
+                    del progress[index]
+                    progress.append(event)
+                else:
+                    progress[index] = event
                 break
         else:
             progress.append(event)
@@ -54,7 +73,16 @@ def append_compacted_progress(progress: list[dict[str, Any]], event: dict[str, A
         progress.append(event)
     overflow = len(progress) - MAX_JOB_PROGRESS_EVENTS
     if overflow > 0:
-        del progress[:overflow]
+        keep: list[dict[str, Any]] = []
+        newest = progress[-1]  # the event just appended is the lecture's current state: it is never the one dropped first
+        for item in progress:
+            if overflow > 0 and item is not newest and not is_milestone_event(item):
+                overflow -= 1
+            else:
+                keep.append(item)
+        if overflow > 0:
+            del keep[:overflow]
+        progress[:] = keep
 
 
 class ProgressCollector:

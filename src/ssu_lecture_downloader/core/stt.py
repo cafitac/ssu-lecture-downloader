@@ -25,6 +25,11 @@ DEFAULT_STT_BEAM_SIZE = 5
 DEFAULT_STT_INITIAL_PROMPT = '다음은 숭실대학교 온라인 강의의 한국어 음성입니다. 강의 내용, 전공 용어, 숫자와 고유명사를 가능한 한 정확하게 받아쓰기합니다.'
 
 
+# Names of the process-wide gates (see `WorkGates`); the composition root defines their limits.
+MEDIA = 'media'  # ffmpeg-class work: audio extraction, MP4 reconstruction, STT WAV conversion, repair cuts
+LOCAL_STT = 'local_stt'  # the local speech engine
+
+
 class WorkGates(Protocol):
     """Process-wide work limits handed in by the composition root (`service.pipeline_gates.StageGates`).
 

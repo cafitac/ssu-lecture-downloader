@@ -86,7 +86,7 @@ class LecturePipeline:
     def run(self) -> LectureResult:
         try:
             code = self._steps()
-        except GateCancelled:
+        except (GateCancelled, postprocess_media.MediaCancelled, stt.TranscriptionCancelled):
             code = CANCELLED
         except Exception as exc:  # noqa: BLE001 - one lecture's bug must never reach the executor or a sibling
             logger.exception("lecture pipeline failed unexpectedly")
@@ -94,7 +94,7 @@ class LecturePipeline:
         if code is None:
             result = LectureResult(self.module_item_id, "done")
             self.owner.emit({"stage": "artifact_item_done", **self.context})
-        elif code == CANCELLED or self.owner.should_cancel():
+        elif code == CANCELLED:  # a real error stays a failure even when the job cancel flag was set afterwards
             result = LectureResult(self.module_item_id, "cancelled")
             self.owner.emit({"stage": "artifact_item_cancelled", **self.context})
         else:
@@ -164,14 +164,14 @@ class LecturePipeline:
     def _with_context(self) -> Callable[[dict[str, Any]], None]:
         return lambda event: self.owner.emit({**event, **self.context})
 
-    def _media_slot(self):
-        """A slot of the process-wide ffmpeg-class limit; says so once when it has to wait."""
+    def _media_slot(self, step: str):
+        """A slot of the process-wide ffmpeg-class limit; says so once (`audio_waiting`, `step` = "mp4" | "audio") when it has to wait."""
         owner = self.owner
-        return owner.ctx.gates.hold(MEDIA, should_cancel=owner.should_cancel, on_wait=lambda: owner.emit({"stage": "audio_waiting", **self.context}))
+        return owner.ctx.gates.hold(MEDIA, should_cancel=owner.should_cancel, on_wait=lambda: owner.emit({"stage": "audio_waiting", "step": step, **self.context}))
 
     def _ensure_mp4(self, item: Any, paths: _ItemPaths) -> str | None:
         owner = self.owner
-        with self._media_slot():
+        with self._media_slot("mp4"):
             video_result = postprocess_media.ensure_playable_mp4(
                 paths.video,
                 overwrite=owner.request.overwrite_artifacts,
@@ -191,7 +191,7 @@ class LecturePipeline:
             return None, paths.audio
         if not video_exists:
             return "source_video_not_found", paths.audio
-        with self._media_slot():
+        with self._media_slot("audio"):
             owner.emit({"stage": "extracting_audio", **self.context, "output_path": str(paths.video)})
             audio_request = postprocess_media.AudioExtractionRequest(input_path=paths.video, output_dir=paths.video.parent, format=request.audio_format, overwrite=request.overwrite_artifacts)
             audio_result = postprocess_media.extract_audio(audio_request, on_progress=self._with_context(), should_cancel=owner.should_cancel)
