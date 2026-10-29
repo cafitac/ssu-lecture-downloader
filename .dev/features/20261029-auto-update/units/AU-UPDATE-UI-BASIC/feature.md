@@ -1,0 +1,46 @@
+# AU-UPDATE-UI-BASIC
+
+- Record schema: 4
+- Status: IN_PROGRESS
+- Record kind: PR_UNIT
+- Execution mode: AUTONOMOUS_SPRINT
+- Parent control record: ~/Project/cafitac/tools/ssu-lecture-downloader/.dev/features/20261029-auto-update/feature.md
+- Sprint manifest: ~/Project/cafitac/tools/ssu-lecture-downloader/.dev/features/20261029-auto-update/sprints/sprint-1-v2.md (section "AU-UPDATE-UI-BASIC")
+- Repository: cafitac/ssu-lecture-downloader (public)
+- Target/base: develop
+- Base ref: origin/develop
+- Base decision: repository default integration branch
+- Initialization base SHA: 6e1ab43 (includes PR #8, AU-UPDATER-SHELL)
+- Worktree/branch: ~/Project/cafitac/tools/ssu-lecture-downloader-wt/au-update-ui-basic (feature/au-update-ui-basic)
+- Canonical record: ~/Project/cafitac/tools/ssu-lecture-downloader-wt/au-update-ui-basic/.dev/features/20261029-auto-update/units/AU-UPDATE-UI-BASIC/feature.md
+- Design status: APPROVED (parent, revision 3)
+- Worktree cleanup policy: AUTO_AFTER_SAFE_TERMINAL
+- Worktree cleanup status: ACTIVE
+- Unit review topology: INHERIT
+- Unit review cycle budget: INHERIT
+
+## Outcome
+
+See the sprint manifest section "AU-UPDATE-UI-BASIC" (sprint-1-v2.md in the parent feature folder). Acceptance subset: AC4, AC8 (version N part). Design: 05 update-check-and-install, 06 update-ui-state-basic, 09 notice principle.
+
+## Workflow cursor
+
+- Workflow stage: FEATURE_DEVELOP
+- Next eligible action: CODE_REVIEW
+- Next action class: LOCAL_CONTINUE
+- Gate state: NONE
+
+## Progress and evidence
+
+- 2026-10-30: worktree created from origin/develop 6e1ab43 (PR #8 merged). No Rust or Python change was needed or made.
+- 2026-10-30: implemented locally (not pushed).
+  - `frontend/src/lib/appUpdate.ts`: framework-free controller (in memory, no DOM access). Check at launch and every 6 h; only from Idle, so one check or install is in flight; "나중에" hides the chip 24 h and the 6 h ticks inside the window are skipped, then it checks again. 지금 업데이트: busy check (UI-tracked work, then `update_install_guard`) -> download with progress -> busy check + guard again -> `prepare_for_update` -> install -> relaunch. A busy or refused step shows "작업이 끝난 뒤 다시 시도해 주세요" in the panel and starts nothing. Install failure after prepare Ok calls `backend_restart` and shows a Korean error with "다시 시도". No restart control exists in the UI; `backend_restart` is called only after an install failure (or after a `prepare_for_update` failure of unknown shape, where it is not certain that nothing was stopped). `backend_starting` and `backend_unavailable` mean nothing was stopped, so no restart. A relaunch failure after a successful install shows a final message with no retry and no restart.
+  - `frontend/src/lib/updater.ts`: the only file that uses `@tauri-apps/plugin-updater`, `@tauri-apps/plugin-process` and the two update commands (adapter behind the `UpdateApi` interface).
+  - `frontend/src/lib/trackedWork.ts`: small helper for "tracked jobs" (download/convert/subtitle jobs via `useDownloads.active`, media component install, page attachment saves). Kept out of the files PL-UI-STATES edits.
+  - `frontend/src/hooks/useAppUpdate.ts`, `frontend/src/components/UpdateChip.tsx` (chip + panel), `frontend/src/styles/update.css`. `TopBar.tsx` mounts `<UpdateChip workBusy=... />` and takes one new prop `workBusy`; `App.tsx` passes it (one import, one prop expression).
+  - The notice: a chip "새 버전 x.y.z" in the top bar (the check runs inside the signed-in workspace, where the top bar exists, so a launch check starts after login). Chip opens a non-modal `section` panel anchored under it: release notes, [지금 업데이트], [나중에]. No dialog/overlay/portal, no `autoFocus`, no focus trap, no key capture (no `preventDefault`/`stopPropagation`), no `Notification`/sound. Outside `mousedown` and Esc close it; the listeners exist only while it is open. While an install runs the chip carries the step ("· 받는 중 42%", "· 설치 중", "· 다시 시도 필요").
+  - The primary button of the panel is accent-tinted (`update-go`), not `btn-primary`, because an existing contract rule allows exactly one accent-filled button next to the download button.
+- Contract test: `frontend/scripts/contract-test.mjs` appended (controller with a fake clock and mocked plugin API: launch/6 h check, failed check logged, found -> chip only with no DOM/Notification/Audio access, 24 h hide and tick skipping, busy by UI work and by guard, happy path order and progress, guard re-check refusal, download failure and retry, `prepare_for_update` refused/backend_starting/unknown, no restart while the install is pending then restart after its failure, restart failure copy, relaunch failure; the adapter against a mocked Tauri bridge; the component rendered with real React SSR: no dialog/overlay/modal/autofocus markup, panel states, no buttons while installing; source rules). One existing assertion at the end of the file had to change (not append): "the updater must stay inert until AU-UPDATE-UI" now says that only `src/lib/updater.ts` may use the update plugins and commands (it pinned exactly what this unit adds).
+- Local checks: `npm ci`, `npm run typecheck` ok, `npm run test:contract` ok.
+- Screenshots (untracked, `.local/update-ui/shots/`, produced with a vite dev server whose updater adapter is replaced by a mock, and a headless Chrome driven over CDP; the harness renders the real `TopBar`, hook and controller): 1-chip-while-typing, 2-panel-open, 3-busy-message, 4-download-progress, 5-install-error. Measured in the same run: while typing in another field the chip appeared and `document.activeElement` stayed the input with the text intact, no dialog/overlay element, no disabled control, another button still clickable; Esc and an outside click closed the panel; Tab moved on to the next control (no trap); "나중에" removed the chip; the install error run called `backend_restart` once.
+- Not covered (needs the owner's Mac, CP-DOGFOOD): a real signed update through the installed app (AC6), a real `tauri dev` run of the panel.

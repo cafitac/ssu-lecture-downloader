@@ -32,6 +32,7 @@ import { isTauriRuntime, openDownloadedFolder } from './lib/desktop';
 import { friendlyError } from './lib/errors';
 import { formatBytes, shortFolderName } from './lib/format';
 import type { JobPlan, PlannedItem } from './lib/jobItems';
+import { anyTransferBusy, isTrackedWorkBusy } from './lib/trackedWork';
 import type { CourseContentItem, CourseSummary, DeadlineEntryDto, DownloadOutputFormat, WatchMode } from './lib/types';
 
 const AUTO_REFRESH_EVERY_MS = 30 * 60 * 1000;
@@ -317,6 +318,7 @@ function Workspace({ session }: { session: LmsSession }) {
         watchAllCount={allQueue.length}
         watchAllLoading={deadlines.state === 'loading' || deadlines.state === 'idle'}
         queueActive={viewer.queue.active}
+        workBusy={isTrackedWorkBusy({ downloadActive: downloads.active, componentsInstalling: media.isInstalling, attachmentSaving: anyTransferBusy(attachments.pages) })}
         onWatchAll={() => setWatchAllOpen(true)}
         onToggleDeadlines={() => setView((current) => (current === 'deadlines' ? 'course' : 'deadlines'))}
         onToggleGrades={() => setView((current) => (current === 'grades' ? 'course' : 'grades'))}

@@ -1,0 +1,34 @@
+/* App update notice: a small chip in the top bar and a non-modal panel anchored under it. */
+.update-host { display: contents; }
+.update-anchor { position: relative; flex: none; }
+.update-chip {
+  display: inline-flex; align-items: center; gap: var(--sp-2);
+  height: 24px; padding: 0 var(--sp-3); border: 0; border-radius: 12px;
+  background: var(--info-bg); color: var(--info-fg);
+  font-size: var(--fs-12); font-weight: var(--fw-semibold); white-space: nowrap; cursor: pointer;
+}
+.update-chip:hover { background: var(--accent-tint); }
+.update-chip i { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
+.update-chip[aria-expanded="true"] { box-shadow: inset 0 0 0 1px var(--accent); }
+
+.update-panel {
+  position: absolute; top: calc(100% + var(--sp-2)); right: 0; z-index: 15;
+  display: grid; gap: var(--sp-3); width: 320px; max-width: calc(100vw - 32px); padding: var(--sp-4);
+  border: 1px solid var(--border-strong); border-radius: var(--radius-md);
+  background: var(--bg); box-shadow: 0 6px 20px rgba(10, 12, 16, 0.14);
+}
+.update-panel { word-break: keep-all; }
+.update-panel-title { font-size: var(--fs-14); font-weight: var(--fw-semibold); }
+.update-notes {
+  max-height: 160px; overflow-y: auto; white-space: pre-wrap; overflow-wrap: anywhere;
+  color: var(--text-muted); font-size: var(--fs-13);
+}
+.update-status { display: grid; gap: var(--sp-2); font-size: var(--fs-13); font-variant-numeric: tabular-nums; }
+.update-progress { height: 6px; border-radius: 3px; background: var(--bg-hover); overflow: hidden; }
+.update-progress i { display: block; height: 100%; background: var(--accent); transition: width 0.2s ease; }
+.update-progress.is-indeterminate i { width: 35%; }
+.update-message { padding: var(--sp-2) var(--sp-3); border-radius: var(--radius-sm); background: var(--warning-bg); color: var(--warning-fg); font-size: var(--fs-13); }
+.update-message.is-error { background: var(--danger-bg); color: var(--danger-fg); }
+.update-actions { display: flex; justify-content: flex-end; gap: var(--sp-2); }
+.update-go { border-color: var(--accent); background: var(--accent-tint); color: var(--accent-text); }
+.update-go:hover:not(:disabled) { background: var(--bg-selected); }
