@@ -32,3 +32,4 @@
 .update-actions { display: flex; justify-content: flex-end; gap: var(--sp-2); }
 .update-go { border-color: var(--accent); background: var(--accent-tint); color: var(--accent-text); }
 .update-go:hover:not(:disabled) { background: var(--bg-selected); }
+.update-host.update-corner { display: block; position: fixed; top: var(--sp-3); right: var(--sp-3); z-index: 15; }

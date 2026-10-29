@@ -1,5 +1,5 @@
 import { useEffect, useId, useRef, useState } from 'react';
-import { useAppUpdate } from '../hooks/useAppUpdate';
+import type { AppUpdate } from '../hooks/useAppUpdate';
 import { NO_NOTES, chipLabel, isChipVisible, isInstalling, progressPercent, statusText } from '../lib/appUpdate';
 import type { UpdateState } from '../lib/appUpdate';
 
@@ -73,12 +73,14 @@ export function UpdateChipView({ state, open, onToggle, onUpdate, onLater }: Vie
 }
 
 interface Props {
-  /** Whether the UI tracks backend work (downloads, conversions, component installs) that is still running. */
-  workBusy: boolean;
+  /** The one app-wide update controller (owned by the App root, so it outlives sign-in and backend state). */
+  update: AppUpdate;
+  /** A small chip in the window corner, for the screens that have no top bar (login, backend problem). */
+  corner?: boolean;
 }
 
-export function UpdateChip({ workBusy }: Props) {
-  const { state, update, later } = useAppUpdate(workBusy);
+export function UpdateChip({ update: appUpdate, corner = false }: Props) {
+  const { state, update, later } = appUpdate;
   const [open, setOpen] = useState(false);
   const anchorRef = useRef<HTMLDivElement>(null);
   const visible = isChipVisible(state);
@@ -113,7 +115,7 @@ export function UpdateChip({ workBusy }: Props) {
   }, [open]);
 
   return (
-    <div ref={anchorRef} className="update-host">
+    <div ref={anchorRef} className={corner ? 'update-host update-corner' : 'update-host'}>
       <UpdateChipView
         state={state}
         open={open}

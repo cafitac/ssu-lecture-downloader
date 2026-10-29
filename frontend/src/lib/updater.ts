@@ -7,7 +7,50 @@ import { invoke } from '@tauri-apps/api/core';
 import { relaunch } from '@tauri-apps/plugin-process';
 import { check } from '@tauri-apps/plugin-updater';
 import type { InstallGuard, PendingUpdate, UpdateApi } from './appUpdate.ts';
-import { restartBackend } from './desktop.ts';
+import { backendSupervisionStatus, resetBackendConnection, restartBackend } from './desktop.ts';
+import { startPolling } from './polling.ts';
+import type { BackendSupervisionStatus } from './types';
+
+export interface RecoveryOptions {
+  /** How long to wait for the restarted backend to leave `starting`. */
+  timeoutMs?: number;
+  intervalMs?: number;
+}
+
+/** Polls the supervision status until it is no longer `starting`, or gives up after `timeoutMs`. */
+export function waitForBackendSettled({ timeoutMs = 30_000, intervalMs = 500 }: RecoveryOptions = {}): Promise<BackendSupervisionStatus | null> {
+  return new Promise((resolve) => {
+    let finished = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const done = (value: BackendSupervisionStatus | null) => {
+      if (finished) return;
+      finished = true;
+      if (timer !== null) clearTimeout(timer);
+      cancel();
+      resolve(value);
+    };
+    const cancel = startPolling<BackendSupervisionStatus>({
+      intervalMs,
+      initialDelayMs: 0,
+      fetch: backendSupervisionStatus,
+      isTerminal: (value) => value.state !== 'starting',
+      onUpdate: (value) => { if (value.state !== 'starting') done(value); },
+    });
+    timer = setTimeout(() => done(null), timeoutMs);
+  });
+}
+
+/**
+ * `backend_restart` after a failed install. The restarted sidecar has a new port and token, and a
+ * request made while it is still starting would cache the old port with no token, so the cached
+ * connection is dropped only once the backend has settled. Rejects unless it came back ready.
+ */
+export async function recoverBackend(options?: RecoveryOptions): Promise<void> {
+  await restartBackend();
+  const settled = await waitForBackendSettled(options);
+  resetBackendConnection();
+  if (settled?.state !== 'ready') throw new Error('backend did not come back after the restart');
+}
 
 export const tauriUpdateApi: UpdateApi = {
   async check(): Promise<PendingUpdate | null> {
@@ -34,6 +77,6 @@ export const tauriUpdateApi: UpdateApi = {
   },
   installGuard: () => invoke<InstallGuard>('update_install_guard'),
   prepare: () => invoke<void>('prepare_for_update'),
-  restartBackend,
+  restartBackend: () => recoverBackend(),
   relaunch,
 };

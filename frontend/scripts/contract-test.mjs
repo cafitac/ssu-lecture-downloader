@@ -1858,10 +1858,30 @@ const assistSource = readFileSync('src-tauri/src/assets/watch_assist.js', 'utf8'
     late.controller.start();
     await flush();
     await late.controller.update();
-    assert.deepEqual(late.calls, ['check', 'guard', 'download', 'guard'], 'refused at the re-check: no prepare, no install');
+    assert.deepEqual(late.calls, ['check', 'guard', 'download', 'guard', 'close', 'check'], 'refused at the re-check: bytes dropped (close), checked again, no prepare, no install');
     assert.equal(late.controller.getState().phase, 'available');
     assert.equal(late.controller.getState().notice, '작업이 끝난 뒤 다시 시도해 주세요');
+    assert.equal(late.controller.getState().version, '1.2.3');
+    await late.controller.update();
+    assert.equal(late.calls.filter((call) => call === 'download').length, 2, 'the next click downloads again');
+    assert.equal(late.controller.getState().phase, 'relaunching');
     late.controller.stop();
+
+    // When the check after the refusal finds nothing, the next click asks again before it downloads.
+    let lost = false;
+    const gone = setup({ guards: [{ status: 'allowed' }, guardRefused] });
+    const realCheck = gone.api.check;
+    gone.api.check = async () => (lost ? null : realCheck());
+    gone.controller.start();
+    await flush();
+    lost = true;
+    await gone.controller.update();
+    assert.equal(gone.controller.getState().phase, 'available');
+    assert.equal(gone.controller.getState().notice, '작업이 끝난 뒤 다시 시도해 주세요');
+    lost = false;
+    await gone.controller.update();
+    assert.equal(gone.controller.getState().phase, 'relaunching', 'asks again, then installs');
+    gone.controller.stop();
 
     let busy = false;
     const uiBusy = setup({ download: async () => { busy = true; } }, () => busy);
@@ -1869,6 +1889,7 @@ const assistSource = readFileSync('src-tauri/src/assets/watch_assist.js', 'utf8'
     await flush();
     await uiBusy.controller.update();
     assert.ok(!uiBusy.calls.includes('prepare') && !uiBusy.calls.includes('install'));
+    assert.deepEqual(uiBusy.calls.slice(-2), ['close', 'check'], 'tracked work seen at the re-check also drops the bytes');
     assert.equal(uiBusy.controller.getState().notice, '작업이 끝난 뒤 다시 시도해 주세요');
     uiBusy.controller.stop();
   }
@@ -1901,7 +1922,18 @@ const assistSource = readFileSync('src-tauri/src/assets/watch_assist.js', 'utf8'
     assert.equal(refused.controller.getState().phase, 'available');
     assert.equal(refused.controller.getState().notice, '작업이 끝난 뒤 다시 시도해 주세요');
     assert.ok(!refused.calls.includes('install') && !refused.calls.includes('restart'));
+    assert.deepEqual(refused.calls.slice(-3), ['prepare', 'close', 'check'], 'a refusing prepare drops the bytes as well');
     refused.controller.stop();
+
+    const unavailable = setup({ prepare: async () => { throw { code: 'backend_unavailable' }; } });
+    unavailable.controller.start();
+    await flush();
+    await unavailable.controller.update();
+    assert.equal(unavailable.controller.getState().phase, 'failed');
+    assert.equal(unavailable.controller.getState().error, '업데이트를 준비하지 못했어요. 다시 시도해 주세요.');
+    assert.equal(unavailable.controller.getState().canRetry, true);
+    assert.ok(!unavailable.calls.includes('install') && !unavailable.calls.includes('restart'), 'nothing was stopped, so no restart');
+    unavailable.controller.stop();
 
     const starting = setup({ prepare: async () => { throw { code: 'backend_starting' }; } });
     starting.controller.start();
@@ -1918,7 +1950,17 @@ const assistSource = readFileSync('src-tauri/src/assets/watch_assist.js', 'utf8'
     assert.equal(unknown.controller.getState().error, '업데이트를 준비하지 못했어요. 다시 시도해 주세요.');
     assert.deepEqual(unknown.calls.slice(-2), ['prepare', 'restart']);
     assert.ok(!unknown.calls.includes('install'));
+    assert.equal(unknown.controller.getState().canRetry, true);
     unknown.controller.stop();
+
+    // ... and when that restart does not bring the backend back, the copy asks to reopen the app, with no retry.
+    const unknownDead = setup({ prepare: async () => { throw new Error('ipc'); }, restart: async () => { throw new Error('no'); } });
+    unknownDead.controller.start();
+    await flush();
+    await unknownDead.controller.update();
+    assert.equal(unknownDead.controller.getState().error, au.INSTALL_FAILED_RESTART);
+    assert.equal(unknownDead.controller.getState().canRetry, false);
+    unknownDead.controller.stop();
   }
 
   // Install failure: no restart is offered or called between prepare Ok and the install result; a failure
@@ -1958,6 +2000,14 @@ const assistSource = readFileSync('src-tauri/src/assets/watch_assist.js', 'utf8'
     await flush();
     await both.controller.update();
     assert.equal(both.controller.getState().error, '업데이트를 설치하지 못했어요. 앱을 한 번 닫았다가 다시 열어 주세요.');
+    // The copy says to close and reopen, so no "다시 시도" is offered next to it (and the panel shows none).
+    assert.equal(both.controller.getState().canRetry, false);
+    assert.equal(au.chipLabel(both.controller.getState()), '새 버전 1.2.3 · 앱을 다시 열어 주세요');
+    const callsBefore = both.calls.length;
+    await both.controller.update();
+    both.controller.later();
+    assert.equal(both.calls.length, callsBefore, 'no retry flow starts');
+    assert.equal(both.controller.getState().phase, 'failed');
     both.controller.stop();
   }
 
@@ -2010,6 +2060,7 @@ const assistSource = readFileSync('src-tauri/src/assets/watch_assist.js', 'utf8'
           return undefined;
         }
         if (command === 'update_install_guard') return { status: 'allowed' };
+        if (command === 'backend_supervision_status') return { state: 'ready', mode: 'managed', error: null, log_path: null };
         return null;
       },
     };
@@ -2029,7 +2080,7 @@ const assistSource = readFileSync('src-tauri/src/assets/watch_assist.js', 'utf8'
       await found.close();
       assert.deepEqual(
         [...new Set(bridgeCalls)],
-        ['plugin:updater|check', 'plugin:updater|download', 'plugin:updater|install', 'update_install_guard', 'prepare_for_update', 'backend_restart', 'plugin:process|restart', 'plugin:resources|close'],
+        ['plugin:updater|check', 'plugin:updater|download', 'plugin:updater|install', 'update_install_guard', 'prepare_for_update', 'backend_restart', 'backend_supervision_status', 'plugin:process|restart', 'plugin:resources|close'],
       );
     } finally {
       if (savedWindow) Object.defineProperty(globalThis, 'window', savedWindow);
@@ -2047,7 +2098,7 @@ const assistSource = readFileSync('src-tauri/src/assets/watch_assist.js', 'utf8'
     const { renderToStaticMarkup } = await import('react-dom/server');
     const server = await createServer({ root: process.cwd(), server: { middlewareMode: true, hmr: false, watch: null }, appType: 'custom', logLevel: 'error', optimizeDeps: { noDiscovery: true } });
     try {
-      const { UpdateChipView } = await server.ssrLoadModule('/src/components/UpdateChip.tsx');
+      const { UpdateChipView, UpdateChip } = await server.ssrLoadModule('/src/components/UpdateChip.tsx');
       const base = { phase: 'available', version: '1.2.3', notes: '- 빨라졌어요', hidden: false, progress: null, notice: null, error: null, canRetry: false };
       const render = (state, open) => renderToStaticMarkup(React.createElement(UpdateChipView, { state, open, onToggle() {}, onUpdate() {}, onLater() {} }));
       const noInterruption = (html) => {
@@ -2059,6 +2110,10 @@ const assistSource = readFileSync('src-tauri/src/assets/watch_assist.js', 'utf8'
       const closed = render(base, false);
       assert.match(closed, /^<div class="update-anchor"><button[^>]*class="update-chip"[^>]*aria-expanded="false"[^>]*>.*새 버전 1\.2\.3<\/button><\/div>$/);
       noInterruption(closed);
+      const cornerHtml = renderToStaticMarkup(React.createElement(UpdateChip, { update: { state: base, update() {}, later() {} }, corner: true }));
+      assert.match(cornerHtml, /^<div class="update-host update-corner"><div class="update-anchor"><button[^>]*class="update-chip"/);
+      noInterruption(cornerHtml);
+      assert.equal(renderToStaticMarkup(React.createElement(UpdateChip, { update: { state: { ...base, hidden: true }, update() {}, later() {} }, corner: true })), '<div class="update-host update-corner"></div>');
       assert.equal(render({ ...base, hidden: true }, false), '', '나중에 hides the chip');
       assert.equal(render({ ...base, phase: 'idle', version: null }, false), '', 'no release: no chip');
       assert.equal(render({ ...base, phase: 'checking', version: null }, false), '', 'a check in progress shows nothing');
@@ -2098,10 +2153,167 @@ const assistSource = readFileSync('src-tauri/src/assets/watch_assist.js', 'utf8'
     assert.equal((chipSource.match(/\.focus\(/g) ?? []).length, 1, 'only Esc inside the panel returns focus to the chip');
     assert.ok(/event\.key !== 'Escape'/.test(chipSource) && /addEventListener\('mousedown'/.test(chipSource), 'Esc and an outside click close the panel');
     assert.ok(/if \(!open\) return undefined;/.test(chipSource), 'the listeners exist only while the panel is open');
-    assert.ok(/<UpdateChip workBusy=\{workBusy\} \/>/.test(readFileSync('src/components/TopBar.tsx', 'utf8')), 'TopBar mounts the chip');
-    assert.ok(!/UpdateChip/.test(readFileSync('src/App.tsx', 'utf8')), 'App only passes workBusy to the top bar');
+    assert.ok(/<UpdateChip update=\{update\} \/>/.test(readFileSync('src/components/TopBar.tsx', 'utf8')), 'TopBar mounts the chip');
+    // One controller for the whole app, created in App above every early return: the check needs
+    // neither the backend nor a session, and "나중에" survives sign-out and sign-in.
+    const appSource = readFileSync('src/App.tsx', 'utf8');
+    assert.equal(readTree('src', ['.ts', '.tsx']).filter((file) => readFileSync(file, 'utf8').includes('useAppUpdate(')).length, 2, 'the hook is defined once and called once');
+    const appFn = appSource.slice(appSource.indexOf('export function App()'));
+    assert.ok(appFn.indexOf('useAppUpdate(') > 0 && appFn.indexOf('useAppUpdate(') < appFn.indexOf('BackendScreen') && appFn.indexOf('useAppUpdate(') < appFn.indexOf('SessionGate'), 'the controller is created before the backend and session branches');
+    assert.equal((appSource.match(/<UpdateChip update=\{update\} corner \/>/g) ?? []).length, 2, 'corner chip on the backend-failure screen and on the login screen');
+    assert.ok(/onWorkBusyChange\(workBusy\)/.test(appSource) && /onWorkBusyChange\(false\)/.test(appSource), 'the workspace reports tracked work up and clears it on sign-out');
     const updateCss = readFileSync('src/styles/update.css', 'utf8');
-    assert.ok(!/position:\s*fixed|inset:\s*0|backdrop/.test(updateCss), 'no full-screen layer');
+    assert.ok(!/inset:\s*0|backdrop/.test(updateCss), 'no full-screen layer');
+    assert.deepEqual(updateCss.match(/[^}]*position:\s*fixed[^}]*/g)?.map((rule) => rule.trim().split('{')[0].trim()), ['.update-host.update-corner'], 'only the small corner chip is fixed');
     assert.ok(readFileSync('src/styles.css', 'utf8').includes("@import './styles/update.css';"));
+  }
+}
+
+// ---------------------------------------------------------------------------
+// AU-UPDATE-UI-BASIC repair: backend recovery after a failed install, and the hook lifecycle.
+// ---------------------------------------------------------------------------
+{
+  const tauriBridge = (handlers) => {
+    const calls = [];
+    const saved = { window: Object.getOwnPropertyDescriptor(globalThis, 'window'), internals: Object.getOwnPropertyDescriptor(globalThis, '__TAURI_INTERNALS__') };
+    globalThis.window = globalThis;
+    globalThis.__TAURI_INTERNALS__ = {
+      transformCallback: () => 1,
+      unregisterCallback() {},
+      invoke: async (command, args) => {
+        calls.push(command);
+        return handlers[command] ? handlers[command](args) : null;
+      },
+    };
+    const restore = () => {
+      if (saved.window) Object.defineProperty(globalThis, 'window', saved.window);
+      else delete globalThis.window;
+      if (saved.internals) Object.defineProperty(globalThis, '__TAURI_INTERNALS__', saved.internals);
+      else delete globalThis.__TAURI_INTERNALS__;
+    };
+    return { calls, restore };
+  };
+  const desktop = await import('../src/lib/desktop.ts');
+  const { recoverBackend, waitForBackendSettled } = await import('../src/lib/updater.ts');
+
+  // After backend_restart the cached connection (old port, old token) must not survive. A request made
+  // while the sidecar is still starting caches the old port with no token, so the reset comes only
+  // after the status left `starting`.
+  {
+    let connections = 0;
+    let statusCalls = 0;
+    const requestedWhileStarting = [];
+    const statuses = ['starting', 'starting', 'ready'];
+    const bridge = tauriBridge({
+      backend_api_connection: () => { connections += 1; return { base_url: `http://127.0.0.1:${9000 + connections}`, token: connections === 1 ? 'old' : 'new' }; },
+      backend_supervision_status: async () => {
+        const state = statuses[Math.min(statusCalls, statuses.length - 1)];
+        statusCalls += 1;
+        if (state === 'starting') requestedWhileStarting.push((await desktop.backendApiConnection()).baseUrl); // a request during the restart
+        return { state, mode: 'managed', error: null, log_path: null };
+      },
+    });
+    try {
+      desktop.resetBackendConnection();
+      assert.equal((await desktop.backendApiConnection()).token, 'old');
+      assert.equal((await desktop.backendApiConnection()).token, 'old');
+      assert.equal(connections, 1, 'the connection is cached');
+      await recoverBackend({ intervalMs: 5, timeoutMs: 2000 });
+      assert.ok(bridge.calls.indexOf('backend_restart') < bridge.calls.indexOf('backend_supervision_status'), 'status is read after the restart');
+      assert.ok(statusCalls >= 3, 'waited until the status was no longer starting');
+      assert.deepEqual(requestedWhileStarting, ['http://127.0.0.1:9001', 'http://127.0.0.1:9001'], 'while the backend is starting nothing new is cached (no reset before it settled)');
+      assert.equal(connections, 1);
+      const next = await desktop.backendApiConnection();
+      assert.equal(connections, 2, 'the next connection request after recovery asks backend_api_connection again');
+      assert.deepEqual(next, { baseUrl: 'http://127.0.0.1:9002', token: 'new' });
+      assert.equal((await desktop.backendApiConnection()).baseUrl, 'http://127.0.0.1:9002');
+      assert.equal(connections, 2);
+    } finally {
+      desktop.resetBackendConnection();
+      bridge.restore();
+    }
+  }
+
+  // A backend that stays down, or never leaves `starting`, makes the recovery reject (bounded wait).
+  {
+    let statusCalls = 0;
+    const bridge = tauriBridge({ backend_supervision_status: () => { statusCalls += 1; return { state: 'failed', mode: 'failed', error: 'x', log_path: null }; } });
+    try {
+      await assert.rejects(recoverBackend({ intervalMs: 5, timeoutMs: 500 }));
+    } finally { bridge.restore(); }
+    let starting = 0;
+    const slow = tauriBridge({ backend_supervision_status: () => { starting += 1; return { state: 'starting', mode: 'checking', error: null, log_path: null }; } });
+    try {
+      assert.equal(await waitForBackendSettled({ intervalMs: 5, timeoutMs: 60 }), null, 'gives up after the timeout');
+      const seen = starting;
+      await new Promise((resolve) => setTimeout(resolve, 40));
+      assert.equal(starting, seen, 'polling stops when the wait ends');
+      await assert.rejects(recoverBackend({ intervalMs: 5, timeoutMs: 30 }));
+    } finally { slow.restore(); }
+    assert.ok(statusCalls >= 1);
+  }
+
+  // The hook (React hooks replaced by a recording fake): it starts the controller under the Tauri
+  // runtime, never outside it, and stops it on unmount.
+  {
+    const { createServer } = await import('vite');
+    const fakeReact = `
+      let slots; let index; let effects;
+      export const __begin = () => { slots = []; index = 0; effects = []; };
+      export const __effects = () => effects;
+      const slot = (init) => { const i = index++; if (!(i in slots)) slots[i] = init(); return i; };
+      export const useRef = (value) => slots[slot(() => ({ current: value }))];
+      export const useState = (init) => [slots[slot(() => (typeof init === 'function' ? init() : init))], () => {}];
+      export const useEffect = (effect) => { effects.push(effect); };
+      export const useSyncExternalStore = (subscribe, getSnapshot) => getSnapshot();
+    `;
+    const server = await createServer({
+      root: process.cwd(),
+      server: { middlewareMode: true, hmr: false, watch: null },
+      appType: 'custom',
+      logLevel: 'error',
+      optimizeDeps: { noDiscovery: true },
+      ssr: { noExternal: ['react'] },
+      plugins: [{ name: 'fake-react', enforce: 'pre', resolveId: (id) => (id === 'react' ? '\0fake-react' : null), load: (id) => (id === '\0fake-react' ? fakeReact : null) }],
+    });
+    try {
+      const fake = await server.ssrLoadModule('\0fake-react');
+      const { useAppUpdate } = await server.ssrLoadModule('/src/hooks/useAppUpdate.ts');
+      const installs = { set: 0, cleared: 0 };
+      const realSet = globalThis.setInterval; const realClear = globalThis.clearInterval;
+      globalThis.setInterval = (callback, ms) => { installs.set += 1; return realSet(callback, ms); };
+      globalThis.clearInterval = (handle) => { installs.cleared += 1; return realClear(handle); };
+      const runHook = async (inTauri) => {
+        const bridge = inTauri ? tauriBridge({}) : null;
+        if (!inTauri) delete globalThis.__TAURI_INTERNALS__;
+        const calls = [];
+        const api = { check: async () => { calls.push('check'); return null; }, installGuard: async () => ({ status: 'allowed' }), prepare: async () => {}, restartBackend: async () => {}, relaunch: async () => {} };
+        fake.__begin();
+        const result = useAppUpdate(false, api);
+        const cleanups = fake.__effects().map((effect) => effect()).filter(Boolean);
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        const checkedAtMount = [...calls];
+        cleanups.forEach((cleanup) => cleanup());
+        bridge?.restore();
+        return { result, checkedAtMount };
+      };
+      try {
+        const outside = await runHook(false);
+        assert.deepEqual(outside.checkedAtMount, [], 'no check outside the Tauri runtime');
+        assert.equal(installs.set, 0);
+        const inside = await runHook(true);
+        assert.deepEqual(inside.checkedAtMount, ['check'], 'checks at mount under the Tauri runtime, without any session or backend');
+        assert.equal(installs.set, 1, 'the 6 h timer is set');
+        assert.equal(installs.cleared, 1, 'and cleared on unmount');
+        assert.equal(inside.result.state.phase === 'idle' || inside.result.state.phase === 'checking', true);
+        assert.equal(typeof inside.result.update, 'function');
+        assert.equal(typeof inside.result.later, 'function');
+      } finally {
+        globalThis.setInterval = realSet;
+        globalThis.clearInterval = realClear;
+      }
+    } finally {
+      await server.close();
+    }
   }
 }

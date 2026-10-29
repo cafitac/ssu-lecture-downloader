@@ -52,7 +52,10 @@ export interface UpdateApi {
   installGuard(): Promise<InstallGuard>;
   /** `prepare_for_update`: rejects with `{ code, reason? }` when it did not stop the sidecar. */
   prepare(): Promise<void>;
-  /** `backend_restart` */
+  /**
+   * `backend_restart`, then waits until the backend has settled and forgets the cached connection
+   * (port and token change). Rejects when the backend did not come back ready.
+   */
   restartBackend(): Promise<void>;
   relaunch(): Promise<void>;
 }
@@ -174,6 +177,38 @@ export function createUpdateController({ api, isWorkBusy, timers = REAL_TIMERS, 
     set({ phase: 'available', progress: null, notice: BUSY_NOTICE, error: null, canRetry: false });
   }
 
+  /**
+   * The guard refused after the download: free the downloaded bytes (close), ask again for the
+   * update and go back to Available (design/05, 06). When the new check finds nothing, the next
+   * click asks again first.
+   */
+  async function discardAndWait(update: PendingUpdate) {
+    release(update);
+    pending = null;
+    try {
+      const again = await api.check();
+      if (again) {
+        pending = again;
+        set({ version: again.version, notes: again.notes });
+      }
+    } catch (error) {
+      log('updater: re-check after the guard refused failed', error);
+    }
+    wait();
+  }
+
+  /** The update to install: the held one, or a fresh one after its bytes were discarded. */
+  async function currentUpdate(): Promise<PendingUpdate | null> {
+    if (pending) return pending;
+    try {
+      pending = await api.check();
+    } catch (error) {
+      log('updater: check before the install failed', error);
+    }
+    if (pending) set({ version: pending.version, notes: pending.notes });
+    return pending;
+  }
+
   /** True when the update may go on: no tracked job and the Rust guard allows. */
   async function mayInstall(): Promise<boolean | 'error'> {
     if (isWorkBusy()) return false;
@@ -204,7 +239,7 @@ export function createUpdateController({ api, isWorkBusy, timers = REAL_TIMERS, 
     set({ phase: 'guarding', progress: null });
     const second = await mayInstall();
     if (second === 'error') return fail(PREPARE_FAILED);
-    if (!second) return wait();
+    if (!second) return discardAndWait(update);
 
     set({ phase: 'installing' });
     try {
@@ -212,12 +247,11 @@ export function createUpdateController({ api, isWorkBusy, timers = REAL_TIMERS, 
     } catch (error) {
       const code = prepareErrorCode(error);
       log('updater: prepare failed', error);
-      if (code === 'refused') return wait();
+      if (code === 'refused') return discardAndWait(update);
       if (code === 'backend_starting') return fail(BACKEND_STARTING);
       if (code === 'backend_unavailable') return fail(PREPARE_FAILED);
       // Unknown failure: it is not certain nothing was stopped, so bring the backend back.
-      await restoreBackend();
-      return fail(PREPARE_FAILED);
+      return (await restoreBackend()) ? fail(PREPARE_FAILED) : fail(INSTALL_FAILED_RESTART, false);
     }
 
     // From here the sidecar is stopped. Only the install result decides what happens next.
@@ -226,7 +260,9 @@ export function createUpdateController({ api, isWorkBusy, timers = REAL_TIMERS, 
     } catch (error) {
       log('updater: install failed', error);
       const restored = await restoreBackend();
-      return fail(restored ? INSTALL_FAILED : INSTALL_FAILED_RESTART);
+      // The "old version keeps working" copy only once the backend is really back; otherwise the
+      // copy asks to reopen the app, and no retry is offered next to it.
+      return restored ? fail(INSTALL_FAILED) : fail(INSTALL_FAILED_RESTART, false);
     }
 
     set({ phase: 'relaunching' });
@@ -278,11 +314,13 @@ export function createUpdateController({ api, isWorkBusy, timers = REAL_TIMERS, 
 
     /** "지금 업데이트" (or "다시 시도"): one flow at a time. */
     async update(): Promise<void> {
-      const update = pending;
       const ready = state.phase === 'available' || (state.phase === 'failed' && state.canRetry);
-      if (!update || !ready || flowInFlight) return;
+      if (!ready || flowInFlight || (!pending && state.version === null)) return;
       flowInFlight = true;
       try {
+        set({ phase: 'guarding', notice: null, error: null, canRetry: false, progress: null });
+        const update = await currentUpdate();
+        if (!update) return fail(DOWNLOAD_FAILED);
         await runInstall(update);
       } finally {
         flowInFlight = false;
@@ -344,7 +382,7 @@ export function chipLabel(state: UpdateState): string {
     case 'relaunching':
       return `${base} · 다시 시작 중`;
     case 'failed':
-      return `${base} · 다시 시도 필요`;
+      return state.canRetry ? `${base} · 다시 시도 필요` : `${base} · 앱을 다시 열어 주세요`;
     default:
       return base;
   }
