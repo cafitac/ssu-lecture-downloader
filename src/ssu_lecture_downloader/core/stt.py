@@ -3,9 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
-import platform
 import shutil
-import sys
 import threading
 from collections.abc import Callable
 from pathlib import Path
@@ -77,21 +75,20 @@ def whisper_cpp_install_hint() -> str:
     return '앱 패키지에 포함된 whisper.cpp CLI를 찾지 못했습니다. 개발 모드에서는 별도 실험 기능으로만 설정하고, 배포 앱에서는 앱을 재설치해 주세요.'
 
 
-def faster_whisper_platform_supported() -> bool:
-    # faster-whisper's CTranslate2 wheels are not published for Intel Macs (see pyproject markers).
-    return not (sys.platform == 'darwin' and platform.machine() == 'x86_64')
-
-
 def _has_faster_whisper() -> bool:
     return importlib.util.find_spec('faster_whisper') is not None
 
 
-def check_stt_provider(provider: str = 'faster_whisper') -> STTProviderStatus:
+def check_stt_provider(provider: str = 'faster_whisper', *, stt_capability: Any) -> STTProviderStatus:
+    """`stt_capability` (an SttCapability handed in by the composition root) says whether this OS can run the local engine.
+
+    Required: core has no knowledge of the OS, so there is deliberately no default.
+    """
     if provider == 'fake':
         return STTProviderStatus(provider='fake', installed=True, available=True, recommended_model='test-only')
     if provider == 'faster_whisper':
         installed = _has_faster_whisper()
-        supported = installed or faster_whisper_platform_supported()
+        supported = installed or stt_capability.local_engine_supported()
         return STTProviderStatus(
             provider='faster_whisper',
             installed=installed,
@@ -276,6 +273,8 @@ def transcribe_audio(
     on_progress: Callable[[dict[str, Any]], None] | None = None,
     should_cancel: Callable[[], bool] | None = None,
     remote: RemoteSTTService | None = None,
+    *,
+    stt_capability: Any,
 ) -> TranscriptionResult:
     audio_path = request.audio_path.expanduser()
     if not audio_path.exists():
@@ -287,7 +286,7 @@ def transcribe_audio(
         from ssu_lecture_downloader.core.stt_remote import transcribe_with_remote
 
         return transcribe_with_remote(request.model_copy(update={'audio_path': audio_path}), remote, on_progress=on_progress, should_cancel=should_cancel)
-    status = check_stt_provider(request.provider)
+    status = check_stt_provider(request.provider, stt_capability=stt_capability)
     if not status.available:
         return TranscriptionResult(ok=False, audio_path=audio_path, error_code='stt_provider_not_installed', message='STT 엔진이 설치되어 있지 않습니다.', install_hint=status.install_hint)
     try:

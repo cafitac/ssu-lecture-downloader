@@ -71,7 +71,7 @@ def build_router(ctx: AppContext) -> APIRouter:
     # -------------------------------------------------------------- STT
 
     def stt_provider_status_payload() -> list[dict[str, object]]:
-        providers = [stt.check_stt_provider(provider).model_dump() for provider in ("faster_whisper", "whisper_cpp")]
+        providers = [stt.check_stt_provider(provider, stt_capability=ctx.platform).model_dump() for provider in ("faster_whisper", "whisper_cpp")]
         return [*providers, ctx.remote_stt.provider_status()]
 
     @router.get("/api/stt/providers/status")
@@ -84,7 +84,7 @@ def build_router(ctx: AppContext) -> APIRouter:
             job.append_progress({"stage": "transcribing", "audio_path": str(request.audio_path), "provider": request.provider, "model": request.model})
             # Only a configured remote server changes the call; the local engine path stays as it was.
             options: dict[str, Any] = {"remote": ctx.remote_stt} if ctx.remote_stt.is_enabled() else {}
-            result = stt.transcribe_audio(request, on_progress=job.append_progress, should_cancel=job.should_cancel, **options)
+            result = stt.transcribe_audio(request, on_progress=job.append_progress, should_cancel=job.should_cancel, stt_capability=ctx.platform, **options)
             payload = result.model_dump(mode="json")
             if not result.ok:
                 return JobOutcome.failed(result.error_code or "stt_failed", result=payload)
@@ -118,7 +118,7 @@ def build_router(ctx: AppContext) -> APIRouter:
 
         def work(job: Job) -> JobOutcome:
             job.append_progress({"stage": "dependency_install_checking", "components": components})
-            result = dependency_installer.install_missing_media_components(components, on_progress=job.append_progress, should_cancel=job.should_cancel)
+            result = dependency_installer.install_missing_media_components(components, on_progress=job.append_progress, should_cancel=job.should_cancel, stt_capability=ctx.platform)
             if not result.get("ok"):
                 return JobOutcome.failed(str(result.get("error_code") or "dependency_install_failed"), result=result)
             return JobOutcome.succeeded(result)

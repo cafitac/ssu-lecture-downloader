@@ -43,3 +43,36 @@ forbidden_modules = [
     "ssu_lecture_downloader.service",
     "ssu_lecture_downloader.cli",
 ]
+
+[[tool.importlinter.contracts]]
+name = "core imports nothing from platforms"
+type = "forbidden"
+source_modules = ["ssu_lecture_downloader.core"]
+forbidden_modules = ["ssu_lecture_downloader.platforms"]
+
+[[tool.importlinter.contracts]]
+name = "platforms import nothing from service or cli"
+type = "forbidden"
+source_modules = ["ssu_lecture_downloader.platforms"]
+forbidden_modules = [
+    "ssu_lecture_downloader.service",
+    "ssu_lecture_downloader.cli",
+]
+
+# Module-level guarantee: nothing but service/app_context.py (and cli.py, which is not listed as a
+# source) imports the platforms package. Re-exports are covered by tests/test_import_boundaries.py,
+# which also fails when any other module imports select_platform/Platform/MacOSPlatform/WindowsPlatform
+# by name (for example through app_context).
+[[tool.importlinter.contracts]]
+name = "only app_context and cli import platforms"
+type = "forbidden"
+source_modules = [
+    "ssu_lecture_downloader.core",
+    "ssu_lecture_downloader.service",
+    "ssu_lecture_downloader.api",
+]
+forbidden_modules = ["ssu_lecture_downloader.platforms"]
+ignore_imports = [
+    "ssu_lecture_downloader.service.app_context -> ssu_lecture_downloader.platforms",
+    "ssu_lecture_downloader.service.app_context -> ssu_lecture_downloader.platforms.base",
+]

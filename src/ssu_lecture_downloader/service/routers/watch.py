@@ -46,7 +46,7 @@ def build_router(ctx: AppContext) -> APIRouter:
     router = APIRouter()
     service = ctx.service
     if ctx.chrome_watch is None:
-        ctx.chrome_watch = ChromeWatchManager(chrome_plan_provider(ctx))
+        ctx.chrome_watch = ChromeWatchManager(chrome_plan_provider(ctx), chrome_locator=ctx.platform, process_tree=ctx.platform, app_paths=ctx.platform)
     chrome = ctx.chrome_watch
 
     @router.post("/api/watch/viewer-plan")

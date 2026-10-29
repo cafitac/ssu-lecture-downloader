@@ -1,4 +1,5 @@
-"""Guards the layer boundary: ``core`` must not import ``service`` or ``cli``.
+"""Guards the layer boundaries: ``core`` must not import ``service``, ``cli`` or ``platforms``, and
+``platforms`` only the composition roots may import.
 
 The same contract runs in CI as ``uv run lint-imports`` (see ``[tool.importlinter]`` in
 pyproject.toml). These tests run it through pytest as well, and prove with a deliberate violation
@@ -38,7 +39,13 @@ def _run_lint_imports(config: Path, cwd: Path, extra_path: Path | None = None) -
 def test_import_linter_contract_is_kept():
     result = _run_lint_imports(REPO_ROOT / "pyproject.toml", REPO_ROOT)
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "core imports nothing from service or cli KEPT" in result.stdout
+    for contract in (
+        "core imports nothing from service or cli",
+        "core imports nothing from platforms",
+        "platforms import nothing from service or cli",
+        "only app_context and cli import platforms",
+    ):
+        assert f"{contract} KEPT" in result.stdout
 
 
 def _imported_modules(path: Path) -> set[str]:
@@ -104,3 +111,113 @@ def test_root_api_shim_resolves_like_the_desktop_shell_launch():
     from ssu_lecture_downloader.service import api as service_api
 
     assert import_from_string("ssu_lecture_downloader.api:app") is service_api.app
+
+
+PLATFORM_NAMES = {"select_platform", "Platform", "MacOSPlatform", "WindowsPlatform"}
+
+
+def _platform_leaks(package_dir: Path, allowed: set[Path]) -> list[str]:
+    """Modules outside `platforms/` and `allowed` that import the package or any adapter name, from anywhere.
+
+    Catches `from ...platforms import X`, `import ...platforms.x` and also the names re-imported
+    through another module (`from ...service.app_context import select_platform`).
+    """
+    root = package_dir.name
+    leaks = []
+    for path in sorted(package_dir.rglob("*.py")):
+        if path in allowed or "platforms" in path.relative_to(package_dir).parts:
+            continue
+        for name in _imported_modules(path):
+            if name == f"{root}.platforms" or name.startswith(f"{root}.platforms."):
+                leaks.append(f"{path.relative_to(package_dir)} imports {name}")
+            elif name.startswith(f"{root}.") and name.rsplit(".", 1)[-1] in PLATFORM_NAMES:
+                leaks.append(f"{path.relative_to(package_dir)} imports {name}")
+    return leaks
+
+
+def test_only_app_context_and_cli_import_platforms_or_its_names():
+    allowed = {PACKAGE_DIR / "service" / "app_context.py", PACKAGE_DIR / "cli.py"}
+    assert _platform_leaks(PACKAGE_DIR, allowed) == []
+
+
+def test_the_platform_name_guard_catches_a_reexport_through_app_context(tmp_path):
+    package = tmp_path / "guard_fixture"
+    (package / "service").mkdir(parents=True)
+    for init in (package / "__init__.py", package / "service" / "__init__.py"):
+        init.write_text("")
+    (package / "service" / "app_context.py").write_text("from guard_fixture.platforms import select_platform\n")
+    (package / "service" / "api.py").write_text("from guard_fixture.service.app_context import select_platform\n")
+    allowed = {package / "service" / "app_context.py"}
+    assert _platform_leaks(package, allowed) == ["service/api.py imports guard_fixture.service.app_context.select_platform"]
+    (package / "service" / "api.py").write_text("from guard_fixture.service.app_context import AppContext\n")
+    assert _platform_leaks(package, allowed) == []
+
+
+def _contract_fixture(tmp_path: Path, contract: str, leak_file: str, leak_source: str) -> tuple[Path, Path]:
+    """A tiny package with core/service/platforms, one contract, and one file that may leak."""
+    package = tmp_path / "boundary_fixture"
+    for sub in ("core", "service", "platforms"):
+        (package / sub).mkdir(parents=True)
+        (package / sub / "__init__.py").write_text("")
+    (package / "__init__.py").write_text("")
+    (package / "platforms" / "macos.py").write_text("VALUE = 1\n")
+    (package / "service" / "app_context.py").write_text("from boundary_fixture.platforms import macos\n")
+    (package / "service" / "api.py").write_text("VALUE = 1\n")
+    (package / leak_file).write_text(leak_source)
+    config = tmp_path / "importlinter.ini"
+    config.write_text("[importlinter]\nroot_package = boundary_fixture\n\n" + textwrap.dedent(contract))
+    return config, package / leak_file
+
+
+CORE_NOT_PLATFORMS = """\
+    [importlinter:contract:core-not-platforms]
+    name = core imports nothing from platforms
+    type = forbidden
+    source_modules = boundary_fixture.core
+    forbidden_modules = boundary_fixture.platforms
+    """
+
+PLATFORMS_NOT_SERVICE = """\
+    [importlinter:contract:platforms-not-service]
+    name = platforms import nothing from service
+    type = forbidden
+    source_modules = boundary_fixture.platforms
+    forbidden_modules = boundary_fixture.service
+    """
+
+ONLY_APP_CONTEXT = """\
+    [importlinter:contract:only-app-context]
+    name = only app_context imports platforms
+    type = forbidden
+    source_modules =
+        boundary_fixture.core
+        boundary_fixture.service
+    forbidden_modules = boundary_fixture.platforms
+    ignore_imports =
+        boundary_fixture.service.app_context -> boundary_fixture.platforms.macos
+    """
+
+
+def _assert_violation_is_caught(tmp_path: Path, contract: str, leak_file: str, leak_source: str, offender: str) -> None:
+    config, leak = _contract_fixture(tmp_path, contract, leak_file, leak_source)
+    result = _run_lint_imports(config, tmp_path, extra_path=tmp_path)
+    assert result.returncode != 0, result.stdout + result.stderr
+    assert "BROKEN" in result.stdout
+    assert offender in result.stdout
+
+    # The same fixture without the leak passes, so the failure comes from the violation alone.
+    leak.write_text("VALUE = 1\n")
+    clean = _run_lint_imports(config, tmp_path, extra_path=tmp_path)
+    assert clean.returncode == 0, clean.stdout + clean.stderr
+
+
+def test_import_linter_fails_on_a_deliberate_core_to_platforms_import(tmp_path):
+    _assert_violation_is_caught(tmp_path, CORE_NOT_PLATFORMS, "core/leak.py", "from boundary_fixture.platforms import macos\n", "boundary_fixture.core.leak")
+
+
+def test_import_linter_fails_on_a_deliberate_platforms_to_service_import(tmp_path):
+    _assert_violation_is_caught(tmp_path, PLATFORMS_NOT_SERVICE, "platforms/leak.py", "from boundary_fixture.service import api\n", "boundary_fixture.platforms.leak")
+
+
+def test_import_linter_fails_when_a_service_module_other_than_app_context_imports_platforms(tmp_path):
+    _assert_violation_is_caught(tmp_path, ONLY_APP_CONTEXT, "service/routers_leak.py", "from boundary_fixture.platforms import macos\n", "boundary_fixture.service.routers_leak")

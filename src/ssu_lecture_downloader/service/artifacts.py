@@ -261,7 +261,7 @@ class ArtifactPipeline:
         stt_request = stt.TranscriptionRequest(audio_path=audio_path, output_dir=paths.video.parent, provider=request.stt_provider, language=request.stt_language, model=request.stt_model, overwrite=request.overwrite_artifacts)
         # Prefer a configured remote server over the local engine; the local path keeps its original call.
         options: dict[str, Any] = {"remote": self.ctx.remote_stt} if use_remote else {}
-        stt_result = stt.transcribe_audio(stt_request, on_progress=self._with_context(context), should_cancel=self.should_cancel, **options)
+        stt_result = stt.transcribe_audio(stt_request, on_progress=self._with_context(context), should_cancel=self.should_cancel, stt_capability=self.ctx.platform, **options)
         self._add_artifact({"kind": "txt", **stt_result.model_dump(mode="json")})
         if not stt_result.ok:
             return stt_result.error_code or "stt_failed"
