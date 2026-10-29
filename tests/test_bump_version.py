@@ -14,14 +14,27 @@ sys.modules[_spec.name] = bump  # dataclasses resolves string annotations throug
 _spec.loader.exec_module(bump)
 
 
-@pytest.fixture
-def repo_copy(tmp_path: Path) -> Path:
-    """A copy of every version-carrying file, so the real formats are exercised."""
+@pytest.fixture(params=["as-committed", "0.2.0"])
+def repo_copy(request, tmp_path: Path) -> Path:
+    """A copy of every version-carrying file, so the real formats are exercised.
+
+    Runs once with the committed version and once after a bump to 0.2.0, so the tests keep
+    passing on a repository that has been bumped.
+    """
     for target in bump.TARGETS:
         destination = tmp_path / target.path
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(REPO_ROOT / target.path, destination)
+    if request.param != "as-committed":
+        bump.set_versions(request.param, tmp_path)
     return tmp_path
+
+
+def start_version(root: Path) -> str:
+    """The single version every file of the copy carries before a test changes it."""
+    flat = {value for values in bump.read_versions(root).values() for value in values}
+    assert len(flat) == 1, flat
+    return flat.pop()
 
 
 def line_diff(before: str, after: str) -> list[tuple[str, str]]:
@@ -40,6 +53,7 @@ def test_repository_versions_agree():
 
 
 def test_set_versions_updates_every_file_and_keeps_formatting(repo_copy: Path):
+    start = start_version(repo_copy)
     before = {t.path: (repo_copy / t.path).read_text(encoding="utf-8") for t in bump.TARGETS}
 
     changed = bump.set_versions("v9.8.7", repo_copy)
@@ -52,7 +66,7 @@ def test_set_versions_updates_every_file_and_keeps_formatting(repo_copy: Path):
         assert diff, path
         for old_line, new_line in diff:
             assert "9.8.7" in new_line and "9.8.7" not in old_line
-            assert old_line.replace("0.1.0", "9.8.7") == new_line, path
+            assert old_line.replace(start, "9.8.7") == new_line, path
     package_lock_changes = line_diff(before["frontend/package-lock.json"], (repo_copy / "frontend/package-lock.json").read_text(encoding="utf-8"))
     assert len(package_lock_changes) == 2
 
@@ -93,7 +107,7 @@ def test_check_reports_each_mismatching_file(repo_copy: Path):
     assert bump.check_versions("v1.2.3", repo_copy) == problems
 
 
-@pytest.mark.parametrize("bad", ["", "1", "1.2", "1.2.3.4", "01.2.3", "1.2.3-rc1", "1.2.3+build", "vv1.2.3", "latest", " 1.2.3"])
+@pytest.mark.parametrize("bad", ["", "1", "1.2", "1.2.3.4", "01.2.3", "1.2.3-rc1", "1.2.3+build", "vv1.2.3", "latest", " 1.2.3", "1.2.3\n", "١.٢.٣"])
 def test_invalid_versions_are_rejected(bad: str, repo_copy: Path):
     with pytest.raises(bump.BumpError):
         bump.normalize(bad)
@@ -103,7 +117,7 @@ def test_invalid_versions_are_rejected(bad: str, repo_copy: Path):
 
 def test_missing_field_aborts_before_writing_anything(repo_copy: Path):
     broken = repo_copy / "pyproject.toml"
-    broken.write_text(broken.read_text(encoding="utf-8").replace('version = "0.1.0"\n', "", 1), encoding="utf-8")
+    broken.write_text(broken.read_text(encoding="utf-8").replace(f'version = "{start_version(repo_copy)}"\n', "", 1), encoding="utf-8")
     snapshot = {t.path: (repo_copy / t.path).read_text(encoding="utf-8") for t in bump.TARGETS}
 
     with pytest.raises(bump.BumpError, match=r"pyproject\.toml: expected 1 version field"):
@@ -121,7 +135,7 @@ def test_missing_file_is_reported(repo_copy: Path):
 def test_cargo_version_must_be_in_package_table(repo_copy: Path):
     cargo = repo_copy / "frontend/src-tauri/Cargo.toml"
     text = cargo.read_text(encoding="utf-8")
-    cargo.write_text(text.replace('version = "0.1.0"\n', "", 1), encoding="utf-8")
+    cargo.write_text(text.replace(f'version = "{start_version(repo_copy)}"\n', "", 1), encoding="utf-8")
     with pytest.raises(bump.BumpError, match=r"Cargo\.toml: expected 1"):
         bump.read_versions(repo_copy)
 

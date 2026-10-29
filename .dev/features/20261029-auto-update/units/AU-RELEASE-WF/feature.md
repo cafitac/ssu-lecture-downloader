@@ -26,7 +26,7 @@ See ../../sprints/sprint-1-v2.md § "AU-RELEASE-WF". Acceptance subset: AC5.
 ## Workflow cursor
 
 - Workflow stage: FEATURE_DEVELOP
-- Next eligible action: CODE_POLISH
+- Next eligible action: CODE_POLISH (review cycle 1 repairs applied)
 - Next action class: LOCAL_CONTINUE
 - Gate state: NONE (AC5 dry run is pre-approved but runs only after merge, by the parent)
 
@@ -44,3 +44,11 @@ See ../../sprints/sprint-1-v2.md § "AU-RELEASE-WF". Acceptance subset: AC5.
 - Not changed: `.github/workflows/ci.yml`, application code, `tauri.conf.json` (no version bump here; the owner picks N).
 - Static validation: actionlint 1.7.x (via actionlint-py, shellcheck integration unavailable locally) clean on release.yml and ci.yml; negative control (undefined `needs` output) is reported. The jq assertions were exercised locally on sample `latest.json` files (ok, api-url form ok, empty signature, missing platform, foreign url, wrong version).
 - AC5 evidence still to collect after merge (pre-approved, draft only): dispatch `version=0.1.0 publish=false` on develop, check the Actions log and the draft's asset list (`.dmg`, `.app.tar.gz`, `.sig`, `latest.json`), dispatch a mismatching version (for example 9.9.9) and confirm `verify-version` refuses it, then delete the draft. Not run by this unit.
+- Review cycle 1 repair batch (second commit):
+  - P2 `tests/test_bump_version.py` no longer hardcodes 0.1.0: every test reads the copy's start version, and the `repo_copy` fixture runs both as committed and after a bump to 0.2.0 (verified by bumping the real tree to 0.2.0 and running the suite, then restoring).
+  - P3 signing-job hardening: every action in release.yml is pinned to a commit at least two weeks old with a version comment (`actions/checkout` v7.0.1 `3d3c42e`, `astral-sh/setup-uv` v7.6.0 `37802ad`, `actions/setup-node` v7.1.0 `949feb2`, `dtolnay/rust-toolchain` `stable` branch commit of 2026-10-09 `e2a55d2` with `toolchain: stable`, `tauri-apps/tauri-action` action-v1.0.0 `1deb371`). Caches are off in the release workflow: `enable-cache: false`, no npm cache, `Swatinem/rust-cache` removed (so releases build Rust from scratch).
+  - P3 README: the contradictory "no auto update yet" and the new line became one conditional Korean paragraph that also names /Applications.
+  - P4 finalize: asserts `darwin-x86_64` and `darwin-x86_64-app` (tauri-action 1.0.0 writes both for a non-universal build), and compares the minisign key id inside each signature with the key id of `plugins.updater.pubkey` (new `scripts/check_updater_signature.py`, tests in `tests/test_check_updater_signature.py`). The decode was verified against signatures made with two throwaway keys generated with `tauri signer generate` (the real key was never used; the test file contains only the throwaway public key and signatures). A signature from the other key fails both platform entries.
+  - P4 concurrency: one workflow-level group per normalized release tag (`push`: ref name; dispatch: `v`-prefixed input), so a tag push and a dispatch for the same version serialize.
+  - P4 `VERSION_RE` uses `re.fullmatch` with `[0-9]` (rejects trailing newline and non-ASCII digits; tests added).
+  - New owned paths: `scripts/check_updater_signature.py`, `tests/test_check_updater_signature.py`.

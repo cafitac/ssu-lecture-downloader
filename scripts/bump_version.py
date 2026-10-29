@@ -28,7 +28,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
-VERSION_RE = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$")
+VERSION_RE = re.compile(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)")
 _VERSION_VALUE = r'(?P<version>[^"\n]+)'
 
 
@@ -76,7 +76,7 @@ class BumpError(Exception):
 
 def normalize(version: str) -> str:
     candidate = version[1:] if version.startswith("v") else version
-    if not VERSION_RE.match(candidate):
+    if not VERSION_RE.fullmatch(candidate):
         raise BumpError(f"invalid version {version!r}: expected x.y.z (optionally prefixed with v), e.g. 0.2.0")
     return candidate
 

@@ -128,7 +128,7 @@ The updater only installs updates signed by the private key that matches the pub
 
 - **If the private key or its password is lost, installed apps can never update again.** They have to be reinstalled by hand from a build that carries a new public key. There is no recovery.
 - Keep the key file and its password in two places (a password manager and an offline copy). Never commit them, paste them into an issue or a log, or put them in a PR. Only the public key belongs in the repository.
-- The workflow reads two Actions secrets on `cafitac/ssu-lecture-downloader`: `TAURI_SIGNING_PRIVATE_KEY` (the key content) and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`. Without both, the build fails in its first step.
+- The workflow reads two Actions secrets on `cafitac/ssu-lecture-downloader`: `TAURI_SIGNING_PRIVATE_KEY` (the key content) and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`. Without both, the build fails in its first step; a key that does not match the committed public key fails `finalize` before anything is published.
 - If the key may have leaked: generate a new key, release a version that carries the new public key while it is still signed with the old key, then replace the secrets.
 
 ### Publishing a version
@@ -141,7 +141,7 @@ The updater only installs updates signed by the private key that matches the pub
    ```
 
    This edits `tauri.conf.json`, `Cargo.toml`, `package.json` and `pyproject.toml`, plus the project's own entry in `Cargo.lock`, `package-lock.json` and `uv.lock` so locked CI builds keep working. `--show` lists the current values and `--check 0.2.0` fails unless all of them agree.
-3. Optional dry run. It builds and signs exactly like a release, uploads a draft, runs the `latest.json` checks, and stops before publishing:
+3. Optional dry run (the workflow file must already be on `develop`). It builds and signs exactly like a release, uploads a draft, runs the `latest.json` checks, and stops before publishing:
 
    ```bash
    gh workflow run release.yml --repo cafitac/ssu-lecture-downloader --ref develop -f version=0.2.0 -f publish=false
@@ -155,7 +155,7 @@ The updater only installs updates signed by the private key that matches the pub
    git push origin v0.2.0
    ```
 
-   The workflow runs `verify-version` (the tag must equal every version file; otherwise nothing is built), `build-macos` (sidecar first, then the signed Tauri build into a draft), and `finalize` (asserts that `latest.json` is for this version and that `platforms.darwin-x86_64` has a signature and a url, then publishes the draft as the latest release).
+   The workflow runs `verify-version` (the tag must equal every version file; otherwise nothing is built), `build-macos` (sidecar first, then the signed Tauri build into a draft), and `finalize` (asserts that `latest.json` is for this version, that `platforms.darwin-x86_64` and `darwin-x86_64-app` each have a signature and a url, and that the signatures were made with the key whose public half is in `tauri.conf.json`, then publishes the draft as the latest release).
 5. Check the run and the published release. Never re-use or move a tag that has been published.
 
 `workflow_dispatch` with `publish` ticked also publishes, but prefer the tag so the release is tied to an exact commit. Dispatch runs for a version that has no tag yet create the tag on publish, pointing at the commit the run used.

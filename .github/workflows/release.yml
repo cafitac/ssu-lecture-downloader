@@ -28,8 +28,9 @@ permissions:
   contents: read
 
 concurrency:
-  # One run per version at a time; a second run waits instead of racing on the same draft.
-  group: release-${{ github.event.inputs.version || github.ref_name }}
+  # One run per release tag at a time, whether it came from a tag push (v0.2.0) or a dispatch
+  # (0.2.0 or v0.2.0); a second run waits instead of racing on the same draft.
+  group: release-${{ github.event_name == 'push' && github.ref_name || (startsWith(github.event.inputs.version, 'v') && github.event.inputs.version || format('v{0}', github.event.inputs.version)) }}
   cancel-in-progress: false
 
 jobs:
@@ -40,7 +41,7 @@ jobs:
       version: ${{ steps.version.outputs.version }}
       tag: ${{ steps.version.outputs.tag }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -72,7 +73,7 @@ jobs:
     outputs:
       release-id: ${{ steps.tauri.outputs.releaseId }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -86,23 +87,23 @@ jobs:
           test -n "$TAURI_SIGNING_PRIVATE_KEY" || { echo "::error::Actions secret TAURI_SIGNING_PRIVATE_KEY is not set"; exit 1; }
           test -n "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD" || { echo "::error::Actions secret TAURI_SIGNING_PRIVATE_KEY_PASSWORD is not set"; exit 1; }
 
-      - uses: astral-sh/setup-uv@v7
+      # Every action below is pinned to a commit at least two weeks old. This job holds the
+      # signing key, so no cache is restored or saved (a poisoned cache could alter the build).
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
         with:
           # Same interpreter family as the local sidecar build (3.12.11), not the runner default.
           python-version: "3.12"
-          enable-cache: true
+          enable-cache: false
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
 
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: Swatinem/rust-cache@v2
+      # Commit of the `stable` branch from 2026-10-09; the toolchain is named because a commit pin
+      # carries no channel.
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # stable
         with:
-          workspaces: frontend/src-tauri
+          toolchain: stable
 
       - name: Install Python dependencies
         run: uv sync
@@ -164,6 +165,11 @@ jobs:
       VERSION: ${{ needs.verify-version.outputs.version }}
       TAG: ${{ needs.verify-version.outputs.tag }}
     steps:
+      # tauri.conf.json carries the public key the signatures are compared with.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
       # latest.json is the one file every installed app trusts: a missing platform or an empty
       # signature in it breaks the update check for everyone. So the draft is read back and checked
       # before it becomes visible.
@@ -181,10 +187,17 @@ jobs:
           jq -e 'type == "object"' latest.json > /dev/null || { echo "::error::latest.json is not a JSON object"; exit 1; }
           jq -e --arg v "$VERSION" '.version == $v' latest.json > /dev/null \
             || { echo "::error::latest.json version is not $VERSION"; exit 1; }
-          jq -e '(.platforms["darwin-x86_64"].signature // "") | type == "string" and length > 0' latest.json > /dev/null \
-            || { echo "::error::latest.json platforms.darwin-x86_64 has no signature"; exit 1; }
-          jq -e --arg repo "$GH_REPO" '(.platforms["darwin-x86_64"].url // "") | ascii_downcase | startswith("https://") and contains("/" + ($repo | ascii_downcase) + "/")' latest.json > /dev/null \
-            || { echo "::error::latest.json platforms.darwin-x86_64 has no url in $GH_REPO"; exit 1; }
+          # darwin-x86_64 is the key the updater reads; darwin-x86_64-app is the per-bundle entry.
+          for PLATFORM in darwin-x86_64 darwin-x86_64-app; do
+            jq -e --arg p "$PLATFORM" '(.platforms[$p].signature // "") | type == "string" and length > 0' latest.json > /dev/null \
+              || { echo "::error::latest.json platforms.$PLATFORM has no signature"; exit 1; }
+            jq -e --arg p "$PLATFORM" --arg repo "$GH_REPO" '(.platforms[$p].url // "") | ascii_downcase | startswith("https://") and contains("/" + ($repo | ascii_downcase) + "/")' latest.json > /dev/null \
+              || { echo "::error::latest.json platforms.$PLATFORM has no url in $GH_REPO"; exit 1; }
+          done
+          # The signatures must come from the key whose public half the app trusts; a wrong
+          # TAURI_SIGNING_PRIVATE_KEY secret fails here, before anything is published.
+          python3 scripts/check_updater_signature.py latest.json frontend/src-tauri/tauri.conf.json darwin-x86_64 darwin-x86_64-app \
+            || { echo "::error::latest.json is not signed with the key in tauri.conf.json"; exit 1; }
           echo "latest.json OK for $VERSION (platforms: $(jq -r '.platforms | keys | join(", ")' latest.json))"
 
       - name: Publish the draft
