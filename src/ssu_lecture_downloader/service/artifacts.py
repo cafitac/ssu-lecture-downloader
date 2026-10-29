@@ -259,6 +259,7 @@ class ArtifactPipeline:
         self.artifacts: list[dict[str, Any]] = []
         self._artifacts_lock = threading.Lock()
         self._emit_lock = threading.Lock()
+        self._last_at = 0.0
         self._hand_off_lock = threading.Lock()
         # Set only when run() itself exits abnormally, so no chain outlives the job. It is never set by a
         # lecture's failure: lectures do not stop each other.
@@ -272,9 +273,15 @@ class ArtifactPipeline:
         return self.job.should_cancel() or self._teardown.is_set()
 
     def emit(self, event: dict[str, Any]) -> None:
-        """Append a progress event stamped with `at` (seconds since the epoch); stamping and appending are ordered together."""
+        """Append a progress event stamped with `at` (seconds since the epoch).
+
+        Stamping and appending are ordered together under one lock, and the stamp never goes backwards even if the
+        wall clock does.
+        """
         with self._emit_lock:
-            self.job.append_progress({**event, "at": event.get("at", time.time())})
+            stamp = max(self._last_at, event["at"] if "at" in event else time.time())
+            self._last_at = stamp
+            self.job.append_progress({**event, "at": stamp})
 
     def on_progress(self, event: dict[str, Any]) -> None:
         self.emit(event)

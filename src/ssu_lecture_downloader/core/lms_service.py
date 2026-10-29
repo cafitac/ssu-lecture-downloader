@@ -1299,7 +1299,7 @@ class SsuLectureService:
             try:
                 on_item_ready(item)
             except Exception:  # noqa: BLE001 - a consumer bug must not abort the downloads
-                logging.getLogger(__name__).exception('on_item_ready callback failed')
+                logging.getLogger(__name__).exception('on_item_ready callback failed (module_item_id=%s)', getattr(item, 'module_item_id', None))
 
         def cancelled() -> bool:
             return bool(should_cancel and should_cancel())

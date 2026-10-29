@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import threading
 import time
+from collections import deque
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -29,8 +30,8 @@ def wav(tmp_path: Path, seconds: float = 3) -> Path:
     return path
 
 
-def pause(seconds: float) -> None:
-    """Simulated latency / staggering (an Event nobody sets: it just waits)."""
+def simulate_work(seconds: float) -> None:
+    """Latency of simulated server work. Never used to wait for a test condition."""
     threading.Event().wait(seconds)
 
 
@@ -322,22 +323,37 @@ def test_response_budget_is_one_slot_per_request_ahead_and_capped():
 
 
 class SerialServer:
-    """A whisper-server stand-in that, like the real one, answers one request at a time in arrival order."""
+    """A whisper-server stand-in that, like the real one, answers one request at a time, strictly in arrival order."""
 
     def __init__(self, work_seconds: float) -> None:
         self.work_seconds = work_seconds
-        self._turn = threading.Lock()
+        self._cond = threading.Condition()
+        self._queue: deque[int] = deque()
+        self.arrived = 0
         self.served = 0
 
     def __call__(self, request: RecordedRequest):
-        with self._turn:
-            pause(self.work_seconds)
+        with self._cond:
+            ticket = self.arrived
+            self.arrived += 1
+            self._queue.append(ticket)
+            self._cond.notify_all()
+            self._cond.wait_for(lambda: self._queue[0] == ticket)
+        simulate_work(self.work_seconds)
+        with self._cond:
+            self._queue.popleft()
             self.served += 1
-        return 200, 'text/plain', srt((0, 2, f'답변 {self.served}'))
+            answer = self.served
+            self._cond.notify_all()
+        return 200, 'text/plain', srt((0, 2, f'답변 {answer}'))
+
+    def wait_arrived(self, count: int, timeout: float = 5.0) -> None:
+        with self._cond:
+            assert self._cond.wait_for(lambda: self.arrived >= count, timeout), f'only {self.arrived} of {count} requests arrived'
 
 
-def staggered_requests(server_url: str, tmp_path: Path, count: int, *, base_timeout: float, use_ahead: bool, gap: float = 0.06) -> list[object]:
-    """`count` requests sent `gap` apart, each with the `ahead` the service counted (or always 0)."""
+def staggered_requests(server_url: str, tmp_path: Path, count: int, *, serial: SerialServer, base_timeout: float, use_ahead: bool) -> list[object]:
+    """`count` requests sent one after another: request n+1 starts only once the server has recorded request n."""
     service = RemoteSTTService(RemoteSTTSettingsStore(tmp_path / 'stt.json', writer=MacOSPlatform()))
     provider = WhisperCppServerProvider(server_url, timeout=base_timeout, idle_timeout=5)
     outcomes: list[object] = [None] * count
@@ -356,7 +372,7 @@ def staggered_requests(server_url: str, tmp_path: Path, count: int, *, base_time
         thread = threading.Thread(target=one, args=(n,))
         thread.start()
         threads.append(thread)
-        pause(gap)
+        serial.wait_arrived(n + 1)
     for thread in threads:
         thread.join(20)
     assert service.in_flight == 0
@@ -365,16 +381,18 @@ def staggered_requests(server_url: str, tmp_path: Path, count: int, *, base_time
 
 def test_requests_queued_behind_each_other_outlive_the_single_request_timeout(tmp_path):
     # Each request needs 0.3 s on the server but the base budget is 0.5 s: the 2nd, 3rd and 4th wait 0.55-1.05 s.
-    with FakeSttServer(SerialServer(0.3)) as server:
-        outcomes = staggered_requests(server.url, tmp_path, 4, base_timeout=0.5, use_ahead=True)
+    serial = SerialServer(0.3)
+    with FakeSttServer(serial) as server:
+        outcomes = staggered_requests(server.url, tmp_path, 4, serial=serial, base_timeout=0.5, use_ahead=True)
 
     assert [type(outcome).__name__ for outcome in outcomes] == ['list'] * 4
     assert all(outcome and outcome[0].text.startswith('답변') for outcome in outcomes)
 
 
 def test_without_the_queue_aware_budget_the_same_queue_times_out(tmp_path):
-    with FakeSttServer(SerialServer(0.3)) as server:
-        outcomes = staggered_requests(server.url, tmp_path, 4, base_timeout=0.5, use_ahead=False)
+    serial = SerialServer(0.3)
+    with FakeSttServer(serial) as server:
+        outcomes = staggered_requests(server.url, tmp_path, 4, serial=serial, base_timeout=0.5, use_ahead=False)
 
     failures = [outcome for outcome in outcomes if isinstance(outcome, RemoteSTTError)]
     assert failures and all(failure.code == 'stt_remote_timeout' for failure in failures)
@@ -500,8 +518,10 @@ def test_pipeline_tells_how_many_requests_are_ahead_and_keeps_the_count_balanced
     for path in audio:
         path.write_bytes(b'mp3')
     both_sent = threading.Barrier(2)
+    first_at_server = threading.Event()
 
     def respond(request: RecordedRequest):
+        first_at_server.set()
         try:
             both_sent.wait(3)  # answer only once both requests are at the server
         except threading.BrokenBarrierError:
@@ -513,11 +533,12 @@ def test_pipeline_tells_how_many_requests_are_ahead_and_keeps_the_count_balanced
     with FakeSttServer(respond) as server:
         service = service_for(tmp_path, server.url)
 
-        def run(path: Path, delay: float) -> None:
-            pause(delay)
+        def run(path: Path, after_first: bool) -> None:
+            if after_first:
+                assert first_at_server.wait(5)  # latch: the second request is sent only once the first one is at the server
             results.append(transcribe_audio(TranscriptionRequest(audio_path=path, output_dir=tmp_path, overwrite=True), on_progress=events.append, remote=service, stt_capability=SUPPORTS_LOCAL_STT))
 
-        threads = [threading.Thread(target=run, args=(audio[0], 0)), threading.Thread(target=run, args=(audio[1], 0.3))]
+        threads = [threading.Thread(target=run, args=(audio[0], False)), threading.Thread(target=run, args=(audio[1], True))]
         for thread in threads:
             thread.start()
         for thread in threads:

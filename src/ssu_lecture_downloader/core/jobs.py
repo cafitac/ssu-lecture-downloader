@@ -41,10 +41,32 @@ def _progress_identity(event: dict[str, Any]) -> tuple[object, object, object, o
     )
 
 
+# Stage-entry events: the first event of a step, which says which step a lecture is in (later ticks only refine it).
+STAGE_ENTRY_PROGRESS_STAGES = frozenset({
+    "downloading",
+    "download_started",
+    "extracting_audio",
+    "transcribing",
+    "transcript_connecting",
+    "transcript_started",
+})
+
+
 def is_milestone_event(event: dict[str, Any]) -> bool:
-    """Events that say where a lecture is: they are the last to be dropped when the list is over its cap."""
+    """Events that say where a lecture is: they are the last to be dropped when the list is over its cap.
+
+    Terminal and waiting notes, the entry event of each step (so a row never falls back to an earlier step once
+    its `audio_done` survives), and a bare `failed`, which a batch emits as an item's final result.
+    """
     stage = str(event.get("stage") or "")
-    return stage.startswith("artifact_item_") or stage == "done" or stage.endswith("_done") or stage.endswith("_waiting") or stage == "transcript_queued"
+    return (
+        stage.startswith("artifact_item_")
+        or stage in ("done", "failed", "transcript_queued")
+        or stage in STAGE_ENTRY_PROGRESS_STAGES
+        or stage.endswith("_done")
+        or stage.endswith("_waiting")
+        or (stage.startswith("video_") and stage.endswith("_started"))
+    )
 
 
 def append_compacted_progress(progress: list[dict[str, Any]], event: dict[str, Any]) -> None:
