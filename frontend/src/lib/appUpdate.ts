@@ -25,6 +25,8 @@ export const BACKEND_STARTING = '앱이 아직 시작하는 중이에요. 잠시
 export const INSTALL_FAILED = '업데이트를 설치하지 못했어요. 지금 쓰던 버전은 그대로 쓸 수 있어요. 다시 시도해 주세요.';
 export const INSTALL_FAILED_RESTART = '업데이트를 설치하지 못했어요. 앱을 한 번 닫았다가 다시 열어 주세요.';
 export const RELAUNCH_FAILED = '업데이트는 설치됐어요. 앱을 닫았다가 다시 열면 새 버전으로 시작해요.';
+/** Login-screen panel: a job from the last workspace may still be running, and only a workspace can tell. */
+export const BUSY_HELD_HINT = '앞에서 하던 작업이 끝났는지 확인하려면 다시 로그인해 주세요';
 export const NO_NOTES = '변경 내용이 따로 적혀 있지 않아요.';
 
 export interface DownloadProgress {
@@ -108,8 +110,8 @@ export interface UpdateControllerDeps {
   isWorkBusy: () => boolean;
   timers?: TimerApi;
   log?: (message: string, detail?: unknown) => void;
-  /** Called after a failed install brought the backend back (the app re-reads its backend status). */
-  onBackendRestored?: () => void;
+  /** Called after every attempt to bring the backend back, successful or not (the app re-reads its backend status). */
+  onRecoveryAttempted?: () => void;
 }
 
 const REAL_TIMERS: TimerApi = {
@@ -130,7 +132,7 @@ function prepareErrorCode(error: unknown): string | null {
   return null;
 }
 
-export function createUpdateController({ api, isWorkBusy, timers = REAL_TIMERS, log = () => {}, onBackendRestored }: UpdateControllerDeps) {
+export function createUpdateController({ api, isWorkBusy, timers = REAL_TIMERS, log = () => {}, onRecoveryAttempted }: UpdateControllerDeps) {
   let state: UpdateState = INITIAL_UPDATE_STATE;
   let pending: PendingUpdate | null = null;
   let running = false;
@@ -277,18 +279,19 @@ export function createUpdateController({ api, isWorkBusy, timers = REAL_TIMERS, 
   }
 
   async function restoreBackend(): Promise<boolean> {
+    let restored = false;
     try {
       await api.restartBackend();
-      try {
-        onBackendRestored?.();
-      } catch (error) {
-        log('updater: backend restored callback failed', error);
-      }
-      return true;
+      restored = true;
     } catch (error) {
       log('updater: backend restart failed', error);
-      return false;
     }
+    try {
+      onRecoveryAttempted?.();
+    } catch (error) {
+      log('updater: recovery callback failed', error);
+    }
+    return restored;
   }
 
   return {

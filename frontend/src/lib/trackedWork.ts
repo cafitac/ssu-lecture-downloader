@@ -16,6 +16,15 @@ export function isTrackedWorkBusy(work: TrackedWork): boolean {
   return work.downloadActive || work.componentsInstalling || work.attachmentSaving;
 }
 
+/**
+ * The busy flag the App holds between workspaces. It survives a workspace unmount (a component
+ * install may still run behind the login screen) but not a backend that is no longer ready:
+ * no job survives a dead sidecar.
+ */
+export function busyAfterBackendStatus(held: boolean, backendState: 'starting' | 'ready' | 'failed'): boolean {
+  return backendState === 'ready' ? held : false;
+}
+
 /** True when any file of any page is still being saved (`transfers` as `usePageAttachments` keeps them). */
 export function anyTransferBusy(pages: Record<string, { transfers: Record<string, string> }>): boolean {
   return Object.values(pages).some((page) => Object.values(page.transfers).includes('busy'));

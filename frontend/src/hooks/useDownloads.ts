@@ -48,6 +48,8 @@ export function useDownloads({ downloadDir, onAuthError, onError }: Options) {
       && isAuthenticationError(new ApiError(next.error_code, next.error_code))
     ) {
       callbacksRef.current.onAuthError(SESSION_EXPIRED_MESSAGE);
+      // The job is over: keep it terminal in state, so `active` (and the app update's busy flag) drops.
+      setJob((current) => (current === null || current.job_id === next.job_id ? next : current));
       return false;
     }
     setJob((current) => (current === null || current.job_id === next.job_id ? next : current));

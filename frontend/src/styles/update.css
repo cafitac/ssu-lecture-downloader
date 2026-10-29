@@ -33,3 +33,4 @@
 .update-go { border-color: var(--accent); background: var(--accent-tint); color: var(--accent-text); }
 .update-go:hover:not(:disabled) { background: var(--bg-selected); }
 .update-host.update-corner { display: block; position: fixed; top: var(--sp-3); right: var(--sp-3); z-index: 15; }
+.update-hint { color: var(--text-muted); font-size: var(--fs-12); }

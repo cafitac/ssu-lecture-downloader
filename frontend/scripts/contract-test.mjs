@@ -1994,19 +1994,19 @@ const assistSource = readFileSync('src-tauri/src/assets/watch_assist.js', 'utf8'
     assert.equal(t.calls.at(-1), 'relaunch');
     t.controller.stop();
 
-    // A restored backend is announced once (the app re-reads its status); a failed restart announces nothing.
+    // Every recovery attempt is announced once, successful or not (the app re-reads its backend status).
     let restored = 0;
-    const announced = au.createUpdateController({ ...{ api: setup({ install: async () => { throw new Error('x'); } }).api, isWorkBusy: () => false, timers: fakeClock().api }, onBackendRestored: () => { restored += 1; } });
+    const announced = au.createUpdateController({ ...{ api: setup({ install: async () => { throw new Error('x'); } }).api, isWorkBusy: () => false, timers: fakeClock().api }, onRecoveryAttempted: () => { restored += 1; } });
     announced.start();
     await flush();
     await announced.update();
     assert.equal(restored, 1);
     announced.stop();
-    const silent = au.createUpdateController({ api: setup({ install: async () => { throw new Error('x'); }, restart: async () => { throw new Error('no'); } }).api, isWorkBusy: () => false, timers: fakeClock().api, onBackendRestored: () => { restored += 1; } });
+    const silent = au.createUpdateController({ api: setup({ install: async () => { throw new Error('x'); }, restart: async () => { throw new Error('no'); } }).api, isWorkBusy: () => false, timers: fakeClock().api, onRecoveryAttempted: () => { restored += 1; } });
     silent.start();
     await flush();
     await silent.update();
-    assert.equal(restored, 1, 'no announcement when the backend did not come back');
+    assert.equal(restored, 2, 'a failed recovery is announced too, so the app shows the real backend state');
     silent.stop();
 
     // The restart itself failing asks for a manual reopen.
@@ -2050,6 +2050,11 @@ const assistSource = readFileSync('src-tauri/src/assets/watch_assist.js', 'utf8'
     assert.equal(isTrackedWorkBusy({ ...idle, downloadActive: true }), true);
     assert.equal(isTrackedWorkBusy({ ...idle, componentsInstalling: true }), true);
     assert.equal(isTrackedWorkBusy({ ...idle, attachmentSaving: true }), true);
+    const { busyAfterBackendStatus } = await import('../src/lib/trackedWork.ts');
+    assert.equal(busyAfterBackendStatus(true, 'ready'), true, 'kept while the backend is ready');
+    assert.equal(busyAfterBackendStatus(true, 'failed'), false, 'no job survives a dead sidecar');
+    assert.equal(busyAfterBackendStatus(true, 'starting'), false);
+    assert.equal(busyAfterBackendStatus(false, 'ready'), false);
     assert.equal(anyTransferBusy({}), false);
     assert.equal(anyTransferBusy({ a: { transfers: { f1: 'done', f2: 'error' } } }), false);
     assert.equal(anyTransferBusy({ a: { transfers: { f1: 'done' } }, b: { transfers: { f2: 'busy' } } }), true);
@@ -2131,6 +2136,9 @@ const assistSource = readFileSync('src-tauri/src/assets/watch_assist.js', 'utf8'
       const closed = render(base, false);
       assert.match(closed, /^<div class="update-anchor"><button[^>]*class="update-chip"[^>]*aria-expanded="false"[^>]*>.*새 버전 1\.2\.3<\/button><\/div>$/);
       noInterruption(closed);
+      const heldView = (state, busyHeld) => renderToStaticMarkup(React.createElement(UpdateChipView, { state, open: true, busyHeld, onToggle() {}, onUpdate() {}, onLater() {} }));
+      assert.ok(heldView(base, true).includes('앞에서 하던 작업이 끝났는지 확인하려면 다시 로그인해 주세요'), 'the login-screen panel says that earlier work may still run');
+      assert.ok(!heldView(base, false).includes('앞에서 하던 작업'), 'no hint when nothing is held');
       const cornerHtml = renderToStaticMarkup(React.createElement(UpdateChip, { update: { state: base, update() {}, later() {} }, corner: true }));
       assert.match(cornerHtml, /^<div class="update-host update-corner"><div class="update-anchor"><button[^>]*class="update-chip"/);
       noInterruption(cornerHtml);
@@ -2181,7 +2189,7 @@ const assistSource = readFileSync('src-tauri/src/assets/watch_assist.js', 'utf8'
     assert.equal(readTree('src', ['.ts', '.tsx']).filter((file) => readFileSync(file, 'utf8').includes('useAppUpdate(')).length, 2, 'the hook is defined once and called once');
     const appFn = appSource.slice(appSource.indexOf('export function App()'));
     assert.ok(appFn.indexOf('useAppUpdate(') > 0 && appFn.indexOf('useAppUpdate(') < appFn.indexOf('BackendScreen') && appFn.indexOf('useAppUpdate(') < appFn.indexOf('SessionGate'), 'the controller is created before the backend and session branches');
-    assert.equal((appSource.match(/<UpdateChip update=\{update\} corner \/>/g) ?? []).length, 2, 'corner chip on the backend-failure screen and on the login screen');
+    assert.equal((appSource.match(/<UpdateChip update=\{update\} corner( busyHeld=\{workBusy\})? \/>/g) ?? []).length, 2, 'corner chip on the backend-failure screen and on the login screen');
     // The workspace reports tracked work up and never clears it on unmount (a job may still run behind the login screen);
     // sign-out waits for tracked work, like it does for downloads.
     assert.ok(/onWorkBusyChange\(workBusy\)/.test(appSource) && !/onWorkBusyChange\(false\)/.test(appSource), 'unmount keeps the last busy value');
@@ -2189,7 +2197,9 @@ const assistSource = readFileSync('src-tauri/src/assets/watch_assist.js', 'utf8'
     assert.ok(/disabled=\{signingOut \|\| busy \|\| workBusy\}/.test(readFileSync('src/components/SettingsDialog.tsx', 'utf8')), 'sign-out waits for component installs and attachment saves');
     // While an update installs, the backend screen's retry would restart the backend under the installer.
     assert.ok(/retryBlockedText=\{installing \? '업데이트하는 중이에요' : undefined\}/.test(appSource) && /isInstalling\(update\.state\.phase\)/.test(appSource), 'backend retry replaced while installing');
-    assert.ok(/useAppUpdate\(workBusy, \{ onBackendRestored: refresh \}\)/.test(appSource), 'a recovered backend makes the app re-read its status');
+    assert.ok(/useAppUpdate\(workBusy, \{ onRecoveryAttempted: refresh \}\)/.test(appSource), 'every recovery attempt makes the app re-read its status');
+    assert.ok(/setWorkBusy\(\(held\) => busyAfterBackendStatus\(held, status\.state\)\)/.test(appSource), 'a held busy flag is dropped when the backend is not ready');
+    assert.ok(/<UpdateChip update=\{update\} corner busyHeld=\{workBusy\} \/>/.test(appSource), 'the login-screen chip explains a held busy flag');
     assert.ok(/const refresh = useCallback\(\(\) => setAttempt/.test(readFileSync('src/hooks/useBackendStatus.ts', 'utf8')));
     const updateCss = readFileSync('src/styles/update.css', 'utf8');
     assert.ok(!/inset:\s*0|backdrop/.test(updateCss), 'no full-screen layer');
@@ -2326,8 +2336,14 @@ const assistSource = readFileSync('src-tauri/src/assets/watch_assist.js', 'utf8'
       export const __begin = () => { slots = []; index = 0; effects = []; };
       export const __effects = () => effects;
       const slot = (init) => { const i = index++; if (!(i in slots)) slots[i] = init(); return i; };
+      export const __rerender = () => { index = 0; effects = []; };
       export const useRef = (value) => slots[slot(() => ({ current: value }))];
-      export const useState = (init) => [slots[slot(() => (typeof init === 'function' ? init() : init))], () => {}];
+      export const useState = (init) => {
+        const i = slot(() => (typeof init === 'function' ? init() : init));
+        return [slots[i], (value) => { slots[i] = typeof value === 'function' ? value(slots[i]) : value; }];
+      };
+      export const useCallback = (callback) => callback;
+      export const useMemo = (compute) => compute();
       export const useEffect = (effect) => { effects.push(effect); };
       export const useSyncExternalStore = (subscribe, getSnapshot) => getSnapshot();
     `;
@@ -2375,6 +2391,41 @@ const assistSource = readFileSync('src-tauri/src/assets/watch_assist.js', 'utf8'
       } finally {
         globalThis.setInterval = realSet;
         globalThis.clearInterval = realClear;
+      }
+
+      // The auth-error path of a download: a running job whose poll comes back "session expired" is made
+      // terminal in state, so `active` (the busy flag the app update reads) drops before the workspace is
+      // replaced by the login screen.
+      const { useDownloads } = await server.ssrLoadModule('/src/hooks/useDownloads.ts');
+      const realFetch = globalThis.fetch;
+      const realTimeout = globalThis.setTimeout;
+      const responses = [{ job_id: 'job-1', status: 'running' }, { job_id: 'job-1', status: 'failed', error_code: 'session_expired' }];
+      globalThis.fetch = async () => ({ ok: true, status: 200, json: async () => responses.shift() });
+      const pollTicks = [];
+      globalThis.setTimeout = (callback, ms, ...rest) => (ms === 1500 ? pollTicks.push(callback) : realTimeout(callback, ms, ...rest));
+      let cleanups = [];
+      try {
+        let authErrors = 0;
+        const options = { downloadDir: '/x', onAuthError: () => { authErrors += 1; }, onError() {} };
+        fake.__begin();
+        const render = () => { fake.__rerender(); return useDownloads(options); };
+        let downloads = useDownloads(options);
+        assert.equal(downloads.active, false);
+        const started = await downloads.start({ courseId: 1, courseName: 'c', kind: 'material', outputs: ['mp4'], items: [{ id: 'a', rawId: 1, title: 't', sizeBytes: null }] });
+        downloads = render();
+        assert.equal(started, true);
+        assert.equal(downloads.active, true, 'a running job is busy');
+        cleanups = fake.__effects().map((effect) => effect()).filter(Boolean);
+        assert.equal(pollTicks.length, 1, 'the job is polled');
+        pollTicks[0]();
+        for (let i = 0; i < 40; i += 1) await Promise.resolve();
+        downloads = render();
+        assert.equal(authErrors, 1, 'the login screen is requested');
+        assert.equal(downloads.active, false, 'the failed job is terminal, so no busy flag is left behind');
+      } finally {
+        cleanups.forEach((cleanup) => cleanup());
+        globalThis.fetch = realFetch;
+        globalThis.setTimeout = realTimeout;
       }
     } finally {
       await server.close();

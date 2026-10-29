@@ -1,11 +1,12 @@
 import { useEffect, useId, useRef, useState } from 'react';
 import type { AppUpdate } from '../hooks/useAppUpdate';
-import { NO_NOTES, chipLabel, isChipVisible, isInstalling, progressPercent, statusText } from '../lib/appUpdate';
+import { BUSY_HELD_HINT, NO_NOTES, chipLabel, isChipVisible, isInstalling, progressPercent, statusText } from '../lib/appUpdate';
 import type { UpdateState } from '../lib/appUpdate';
 
 interface ViewProps {
   state: UpdateState;
   open: boolean;
+  busyHeld?: boolean;
   onToggle: () => void;
   onUpdate: () => void;
   onLater: () => void;
@@ -16,7 +17,7 @@ interface ViewProps {
  * panel the user opens. The panel is not a dialog: nothing is blocked, focus is never moved, no
  * keys are captured, and a click outside or Esc closes it.
  */
-export function UpdateChipView({ state, open, onToggle, onUpdate, onLater }: ViewProps) {
+export function UpdateChipView({ state, open, busyHeld = false, onToggle, onUpdate, onLater }: ViewProps) {
   const panelId = useId();
   if (!isChipVisible(state)) return null;
   const working = isInstalling(state.phase);
@@ -56,6 +57,7 @@ export function UpdateChipView({ state, open, onToggle, onUpdate, onLater }: Vie
               )}
             </div>
           )}
+          {busyHeld && state.phase === 'available' && <p className="update-hint">{BUSY_HELD_HINT}</p>}
           {state.notice && <p className="update-message" role="status">{state.notice}</p>}
           {state.error && <p className="update-message is-error" role="status">{state.error}</p>}
           {!working && (state.phase === 'available' || state.canRetry) && (
@@ -77,9 +79,11 @@ interface Props {
   update: AppUpdate;
   /** A small chip in the window corner, for the screens that have no top bar (login, backend problem). */
   corner?: boolean;
+  /** The last workspace left tracked work running that cannot be seen from here (login screen). */
+  busyHeld?: boolean;
 }
 
-export function UpdateChip({ update: appUpdate, corner = false }: Props) {
+export function UpdateChip({ update: appUpdate, corner = false, busyHeld = false }: Props) {
   const { state, update, later } = appUpdate;
   const [open, setOpen] = useState(false);
   const anchorRef = useRef<HTMLDivElement>(null);
@@ -119,6 +123,7 @@ export function UpdateChip({ update: appUpdate, corner = false }: Props) {
       <UpdateChipView
         state={state}
         open={open}
+        busyHeld={busyHeld}
         onToggle={() => setOpen((current) => !current)}
         onUpdate={() => void update()}
         onLater={() => { later(); setOpen(false); }}

@@ -36,7 +36,7 @@ import { isTauriRuntime, openDownloadedFolder } from './lib/desktop';
 import { friendlyError } from './lib/errors';
 import { formatBytes, shortFolderName } from './lib/format';
 import type { JobPlan, PlannedItem } from './lib/jobItems';
-import { anyTransferBusy, isTrackedWorkBusy } from './lib/trackedWork';
+import { anyTransferBusy, busyAfterBackendStatus, isTrackedWorkBusy } from './lib/trackedWork';
 import type { CourseContentItem, CourseSummary, DeadlineEntryDto, DownloadOutputFormat, WatchMode } from './lib/types';
 
 const AUTO_REFRESH_EVERY_MS = 30 * 60 * 1000;
@@ -471,14 +471,14 @@ function Workspace({ session, update, onWorkBusyChange }: { session: LmsSession;
   );
 }
 
-function SessionGate({ update, onWorkBusyChange }: { update: AppUpdate; onWorkBusyChange: (busy: boolean) => void }) {
+function SessionGate({ update, workBusy, onWorkBusyChange }: { update: AppUpdate; workBusy: boolean; onWorkBusyChange: (busy: boolean) => void }) {
   const session = useLmsSession();
   if (session.phase === 'checking') return <SplashScreen text="로그인 상태를 확인하는 중이에요…" />;
   if (session.phase === 'signed-out') {
     return (
       <>
         <LoginScreen notice={session.notice} busy={session.signingIn} onSubmit={(username, password) => void session.signIn(username, password)} />
-        <UpdateChip update={update} corner />
+        <UpdateChip update={update} corner busyHeld={workBusy} />
       </>
     );
   }
@@ -491,7 +491,11 @@ export function App() {
   // it checks at launch on every screen and "나중에" survives sign-out and sign-in.
   const [workBusy, setWorkBusy] = useState(false);
   const { status, retry, refresh } = useBackendStatus();
-  const update = useAppUpdate(workBusy, { onBackendRestored: refresh });
+  const update = useAppUpdate(workBusy, { onRecoveryAttempted: refresh });
+  // No job survives a dead sidecar: a busy flag held from an earlier workspace is dropped when the backend is not ready.
+  useEffect(() => {
+    setWorkBusy((held) => busyAfterBackendStatus(held, status.state));
+  }, [status.state]);
   if (status.state !== 'ready') {
     // While an update installs, the screen's own retry would restart the backend under the installer.
     const installing = isInstalling(update.state.phase);
@@ -502,5 +506,5 @@ export function App() {
       </>
     );
   }
-  return <SessionGate update={update} onWorkBusyChange={setWorkBusy} />;
+  return <SessionGate update={update} workBusy={workBusy} onWorkBusyChange={setWorkBusy} />;
 }
