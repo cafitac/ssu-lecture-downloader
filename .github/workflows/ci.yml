@@ -1,0 +1,95 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [develop]
+  push:
+    branches: [develop]
+
+concurrency:
+  # Pushes to develop get their own group (per SHA) so a pending run is never dropped.
+  group: ci-${{ github.ref }}-${{ github.event_name == 'push' && github.sha || 'pr' }}
+  # Pull request pushes supersede each other; runs on develop all finish.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  macos:
+    # Intel runner: matches the installed app (x86_64). macos-13 is retired.
+    runs-on: macos-15-intel
+    timeout-minutes: 45
+    env:
+      # Fail instead of silently re-resolving when uv.lock is stale (covers uv sync, uv run and
+      # the `uv run` inside the sidecar build).
+      UV_LOCKED: "1"
+    steps:
+      - uses: actions/checkout@v7
+
+      # Python's HTTPServer.server_bind() calls socket.getfqdn(), a reverse DNS lookup that takes
+      # ~35 s on the hosted runners. pytest (tests/test_http_client.py) and the Rust tests (fake
+      # backend served by `python3 http.server`) both hit it, so every Python process of the job
+      # skips the lookup through a sitecustomize shim. The PyInstaller build is excluded below.
+      - name: Skip slow reverse DNS lookup in Python
+        run: |
+          mkdir -p "$RUNNER_TEMP/pyfix"
+          printf 'import socket\nsocket.getfqdn = lambda name="": name or "localhost"\n' > "$RUNNER_TEMP/pyfix/sitecustomize.py"
+          echo "PYTHONPATH=$RUNNER_TEMP/pyfix" >> "$GITHUB_ENV"
+
+      - uses: astral-sh/setup-uv@v7
+        with:
+          # Same interpreter family as the local sidecar build (3.12.11), not the runner default.
+          python-version: "3.12"
+          enable-cache: true
+
+      - name: Python tests
+        run: |
+          uv sync
+          uv run pytest --durations=15
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Frontend checks
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run typecheck
+          npm run test:contract
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: frontend/src-tauri
+
+      # tauri-build requires resources/backend-sidecar to exist, so the sidecar comes first.
+      # PYTHONPATH is cleared so the shim cannot end up in the PyInstaller bundle.
+      - name: Build backend sidecar
+        working-directory: frontend
+        env:
+          PYTHONPATH: ""
+        run: npm run build:backend-sidecar
+
+      - name: Rust tests
+        working-directory: frontend/src-tauri
+        run: cargo test
+
+      - name: Build macOS app bundle (no dmg, no signing, no upload)
+        working-directory: frontend
+        env:
+          PYTHONPATH: ""
+        run: npm run tauri build -- --bundles app
+
+      - name: Check the sidecar is inside the app bundle
+        run: |
+          APP=$(find frontend/src-tauri/target -type d -name "SSU Lecture Downloader.app" -path "*/bundle/macos/*" | head -n 1)
+          test -n "$APP" || { echo "app bundle not found"; exit 1; }
+          echo "bundle: $APP"
+          SIDECAR="$APP/Contents/Resources/resources/backend-sidecar/ssu-api"
+          test -x "$SIDECAR/ssu-api" || { echo "missing executable $SIDECAR/ssu-api"; exit 1; }
+          test -d "$SIDECAR/_internal" || { echo "missing $SIDECAR/_internal"; exit 1; }

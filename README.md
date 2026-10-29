@@ -219,3 +219,13 @@ uv run pytest -q
 cd frontend && npm run test:contract && npm run build
 cd frontend/src-tauri && cargo test
 ```
+
+### CI
+
+GitHub Actions (`.github/workflows/ci.yml`) runs on every pull request to `develop` and every push
+to `develop`, on an Intel macOS runner (`macos-15-intel`, same architecture as the installed app):
+`uv run pytest`, `npm run typecheck`, `npm run test:contract`, the backend sidecar build,
+`cargo test` and `npm run tauri build -- --bundles app` (no dmg, signing or upload).
+`tests/test_macos_invariants.py` and `frontend/src-tauri/src/invariant_tests.rs` pin the macOS
+behavior (app-data paths, LaunchAgent, Chrome argv, sidecar location, local-STT gate) that
+platform-split changes must keep identical.

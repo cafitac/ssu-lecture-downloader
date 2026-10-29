@@ -1,0 +1,99 @@
+@startuml startup-app-data-handoff
+title Flow 1 — App start: one app-data root, platform adapter selection (PROPOSED)
+actor User
+participant "Tauri shell\n(lib.rs, backend.rs)" as Shell
+participant "PlatformShell\n(cfg macos | windows)" as PS
+participant "Python sidecar\nssu-api[.exe]" as Py
+participant "service/app_context" as Ctx
+participant "platforms.select_platform" as Sel
+participant "core objects" as Core
+
+User -> Shell : open app
+Shell -> PS : app_data_dir()
+note right of PS
+  macOS: ~/Library/Application Support/com.local.ssu-lecture-downloader (unchanged)
+  Windows: %LOCALAPPDATA%\com.local.ssu-lecture-downloader
+end note
+Shell -> Shell : reuse healthy 127.0.0.1:8000 backend? (unchanged)
+Shell -> PS : spawn_sidecar(cmd + env SSU_APP_DATA_DIR, SSU_API_TOKEN)
+note right of PS
+  macOS: process_group(0), killpg on stop (unchanged)
+  Windows: Job Object KILL_ON_JOB_CLOSE + CREATE_NO_WINDOW
+end note
+PS -> Py : start
+Py -> Ctx : build_app()
+Ctx -> Sel : select_platform(env)
+Sel --> Ctx : MacOSPlatform | WindowsPlatform
+Ctx -> Core : construct with AppPaths, ChromeLocator, ProcessTree, SttCapability, SecretFileWriter
+Shell -> Py : GET /api/health (poll)
+Py --> Shell : ok
+note over Shell, Core
+  Failure: sidecar never healthy → existing supervisor error path (unchanged).
+  No retry/state change is introduced by this feature.
+end note
+@enduml
+
+@startuml auto-watch-chrome-lifecycle
+title Flow 2 — Auto-watch: Chrome process tree per OS (PROPOSED)
+participant "routers/watch" as R
+participant "core ChromeWatchManager" as M
+participant "ChromeLocator" as L
+participant "ProcessTree" as T
+participant "Chrome" as C
+
+R -> M : start(queue)
+M -> L : find_chrome()
+alt not found
+  M --> R : error chrome_not_found (existing error shape)
+end
+M -> M : delete stale DevToolsActivePort in profile dir
+M -> T : spawn([chrome, --user-data-dir=<app_data>/chrome-watch-profile, --remote-debugging-port=0, --mute-audio, ...])
+note right of T
+  macOS: Popen(start_new_session=True) — unchanged
+  Windows: Popen + AssignProcessToJobObject(KILL_ON_JOB_CLOSE)
+end note
+T -> C : launch
+M -> M : read DevToolsActivePort → CDP websocket (unchanged)
+M -> C : play lectures via CDP (unchanged)
+...queue finished / stopped / failed / backend shutdown...
+M -> C : CDP Browser.close (graceful)
+M -> T : terminate(handle, grace=5s)
+note right of T
+  macOS: killpg SIGTERM → SIGKILL after grace (unchanged)
+  Windows: wait grace → TerminateJobObject; fallback taskkill /T /F /PID
+end note
+M -> M : remove chrome-watch.pid
+@enduml
+
+@startuml reminder-schedule
+title Flow 3 — Deadline reminders while the app is closed (PROPOSED)
+participant "UI toggle" as UI
+participant "reminders.rs (shared)" as Rem
+participant "PlatformShell" as PS
+participant "OS scheduler" as OS
+participant "app binary --check-reminders" as Bin
+
+UI -> Rem : enable reminders
+Rem -> PS : install_reminder_schedule(exe_path)
+note right of PS
+  macOS: LaunchAgent plist + launchctl (unchanged label/plist)
+  Windows: schtasks /Create /XML /TN "SSU Lecture Downloader\DeadlineCheck" /F
+           (per-user, InteractiveToken, battery restrictions off, StartWhenAvailable)
+end note
+PS -> OS : register
+...interval...
+OS -> Bin : run with check flag
+Bin -> Rem : lock reminders.lock; read deadlines.json + notified.json
+Rem -> PS : notify(title, body) for newly due items
+note right of PS
+  macOS: osascript (unchanged)
+  Windows: tauri-winrt-notification toast with the app identifier
+  (the scheduled run has no Tauri app, so the plugin is not used)
+end note
+Rem -> Rem : append notified.json; unlock
+UI -> Rem : disable reminders
+Rem -> PS : remove_reminder_schedule()
+note over PS, OS
+  Windows uninstall: NSIS_HOOK_PREUNINSTALL runs schtasks /Delete.
+end note
+@enduml

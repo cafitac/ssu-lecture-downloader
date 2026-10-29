@@ -1,0 +1,64 @@
+// Target persisted state (PROPOSED). There is no database: each "table" is a local
+// app-data file or directory. Root = app_data_dir:
+//   macOS   ~/Library/Application Support/com.local.ssu-lecture-downloader   (unchanged)
+//   Windows %LOCALAPPDATA%\com.local.ssu-lecture-downloader                (new)
+// The Rust shell resolves the root and passes it to the Python sidecar as SSU_APP_DATA_DIR.
+
+Project ssu_app_data {
+  database_type: 'local files'
+  Note: 'File formats are unchanged by this feature; only the location provider moves into platform adapters.'
+}
+
+Table app_data_root {
+  path varchar [pk, note: 'resolved once by PlatformShell.app_data_dir(); Python AppPaths.app_data_dir() returns the same value']
+  owner varchar [note: 'Rust shell (creates the directory)']
+}
+
+Table stt_config {
+  file varchar [pk, note: 'stt.json']
+  root varchar [ref: > app_data_root.path]
+  writer varchar [note: 'Python core/stt_remote_config via SecretFileWriter (macOS 0o600, Windows default user ACL)']
+  contains_secret boolean [note: 'API key, write-only, never returned or logged']
+}
+
+Table deadlines_cache {
+  file varchar [pk, note: 'deadlines.json']
+  root varchar [ref: > app_data_root.path]
+  writer varchar [note: 'Rust reminders.rs (UI command)']
+  readers varchar [note: 'in-app checker thread; scheduled CLI run (LaunchAgent / Task Scheduler)']
+}
+
+Table notified_log {
+  file varchar [pk, note: 'notified.json']
+  root varchar [ref: > app_data_root.path]
+  writer varchar [note: 'Rust reminders.rs; guarded by reminders_lock']
+}
+
+Table reminders_lock {
+  file varchar [pk, note: 'reminders.lock']
+  root varchar [ref: > app_data_root.path]
+  mechanism varchar [note: 'macOS unix advisory lock (unchanged); Windows File::try_lock']
+}
+
+Table backend_pid {
+  file varchar [pk, note: 'backend.pid']
+  root varchar [ref: > app_data_root.path]
+  writer varchar [note: 'Rust backend.rs (sidecar supervision)']
+}
+
+Table chrome_watch_state {
+  file varchar [pk, note: 'chrome-watch.pid and chrome-watch-profile/ (Chrome user-data-dir)']
+  root varchar [ref: > app_data_root.path]
+  writer varchar [note: 'Python core ChromeWatchManager; process tree owned by ProcessTree adapter']
+}
+
+Table reminder_schedule {
+  entry varchar [pk, note: 'macOS ~/Library/LaunchAgents/<label>.plist (unchanged) | Windows Task Scheduler task "SSU Lecture Downloader\\DeadlineCheck"']
+  writer varchar [note: 'Rust PlatformShell.install_reminder_schedule()']
+  remover varchar [note: 'macOS: app toggle (unchanged) | Windows: app toggle + NSIS_HOOK_PREUNINSTALL']
+}
+
+Table download_dir {
+  path varchar [pk, note: 'default ~/Downloads/SSU Lecture Downloader on both OSes (Path.home()/Downloads); user may choose another folder']
+  writer varchar [note: 'Python core download jobs']
+}

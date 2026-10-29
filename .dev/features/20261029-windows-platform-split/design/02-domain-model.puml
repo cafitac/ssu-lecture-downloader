@@ -1,0 +1,149 @@
+@startuml layered-module-model
+title SSU Lecture Downloader — target layers and platform interfaces (PROPOSED)
+skinparam packageStyle rectangle
+skinparam classAttributeIconSize 0
+
+package "ssu_lecture_downloader.core (OS calls forbidden)" as core {
+  class SsuLectureService <<core service>> {
+    LMS discovery / download orchestration
+    (moved from service.py → core/lms_service.py)
+  }
+  class LmsParsing <<core>> {
+    auth, login_flow, lms, canvas_files, models
+  }
+  class Downloading <<core>> {
+    download, media, http_client, trace, redaction, cache, jobs, progress, errors
+  }
+  class MediaPostprocess <<core>> {
+    postprocess_media (ffmpeg via imageio_ffmpeg)
+  }
+  class Stt <<core>> {
+    stt, stt_cues, stt_remote, stt_remote_config, ssh_tunnel
+    + local engine availability passed in (SttCapability)
+    + config path passed in (AppPaths.stt_config)
+  }
+  class ChromeWatchManager <<core>> {
+    queue, CDP control (chrome_cdp, chrome_watch_helper)
+    + uses ChromeLocator, ProcessTree (injected)
+    + profile dir passed in (AppPaths.chrome_profile)
+  }
+}
+
+package "ssu_lecture_downloader.platforms" as platforms {
+  interface AppPaths <<Protocol>> {
+    app_data_dir(): Path
+    chrome_profile_dir(): Path
+    stt_config_path(): Path
+    default_download_dir(): Path
+  }
+  interface ChromeLocator <<Protocol>> {
+    find_chrome(): Path | None
+  }
+  interface ProcessTree <<Protocol>> {
+    spawn(argv, env): ProcessHandle
+    terminate(handle, grace): None
+  }
+  interface SttCapability <<Protocol>> {
+    local_engine_supported(): bool
+  }
+  interface SecretFileWriter <<Protocol>> {
+    write_private(path, bytes): None
+  }
+  class MacOSPlatform <<adapter>> {
+    current behavior moved verbatim
+    ~/Library/Application Support/com.local.ssu-lecture-downloader
+    /Applications + ~/Applications Chrome
+    start_new_session + os.killpg
+    0o600 file mode
+    Intel Mac: local STT off
+    MacOSKeychainCredentialStore (unused, kept)
+  }
+  class WindowsPlatform <<adapter>> {
+    %LOCALAPPDATA%\com.local.ssu-lecture-downloader
+    App Paths registry → Program Files → LocalAppData Chrome
+    Job Object KILL_ON_JOB_CLOSE (ctypes) + taskkill /T /F fallback
+    default user ACL for private files
+    local STT on (CPU int8)
+  }
+  class select_platform <<factory>> {
+    sys.platform → MacOSPlatform | WindowsPlatform
+    honors SSU_APP_DATA_DIR from the Tauri shell
+  }
+}
+
+package "ssu_lecture_downloader.service (composition + HTTP)" as service {
+  class AppContext <<composition root>> {
+    builds core objects with platform adapters
+  }
+  class FastApiApp <<service>> {
+    api, routers/*, api_models, api_errors, payloads, security
+  }
+  class DependencyInstaller <<service>>
+}
+
+class Cli <<composition root>> {
+  cli.py (package root)
+}
+
+MacOSPlatform ..|> AppPaths
+MacOSPlatform ..|> ChromeLocator
+MacOSPlatform ..|> ProcessTree
+MacOSPlatform ..|> SttCapability
+MacOSPlatform ..|> SecretFileWriter
+WindowsPlatform ..|> AppPaths
+WindowsPlatform ..|> ChromeLocator
+WindowsPlatform ..|> ProcessTree
+WindowsPlatform ..|> SttCapability
+WindowsPlatform ..|> SecretFileWriter
+select_platform --> MacOSPlatform
+select_platform --> WindowsPlatform
+
+AppContext --> select_platform : only importer of platforms
+Cli --> select_platform : only importer of platforms
+AppContext --> SsuLectureService
+AppContext --> ChromeWatchManager
+AppContext --> Stt
+FastApiApp --> AppContext
+
+ChromeWatchManager ..> ChromeLocator : injected
+ChromeWatchManager ..> ProcessTree : injected
+Stt ..> SttCapability : injected
+Stt ..> SecretFileWriter : injected
+
+note bottom of core
+  Invariant: core imports nothing from platforms or service
+  (import-linter contract + pytest guard in CI).
+end note
+
+package "frontend/src-tauri (Rust shell)" as rust {
+  class Shared <<shared Rust>> {
+    backend.rs supervision, native_download.rs,
+    watch_queue.rs, watch_runtime.rs, watch_external.rs,
+    viewer.rs, reminders.rs (cache + due logic)
+  }
+  interface PlatformShell <<cfg(target_os) module>> {
+    app_data_dir()
+    spawn_sidecar(cmd) / stop_sidecar(child)
+    sidecar_executable_name()
+    install_reminder_schedule() / remove_reminder_schedule()
+    notify(title, body)
+    lock_file(path)
+    open_path(path) / open_url(url)
+    set_tray_status(text) / set_badge(count)
+  }
+  class MacOSShell <<platform/macos.rs>> {
+    launch_agent.rs (LaunchAgent + launchctl), osascript notify,
+    libc killpg/process_group, `open`, tray title, Dock badge,
+    unix O_EXLOCK lock — all unchanged
+  }
+  class WindowsShell <<platform/windows.rs>> {
+    schtasks /XML task, tauri-winrt-notification (works in CLI run),
+    Job Object + CREATE_NO_WINDOW, explorer.exe,
+    tray tooltip + status menu item, overlay icon,
+    File::try_lock
+  }
+  MacOSShell ..|> PlatformShell
+  WindowsShell ..|> PlatformShell
+  Shared --> PlatformShell
+}
+@enduml
