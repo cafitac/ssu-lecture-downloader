@@ -3,8 +3,8 @@ from __future__ import annotations
 import pytest
 from stt_fakes import write_silent_wav
 
-from ssu_lecture_downloader import postprocess_media
-from ssu_lecture_downloader.stt_remote import wav_duration_seconds
+from ssu_lecture_downloader.core import postprocess_media
+from ssu_lecture_downloader.core.stt_remote import wav_duration_seconds
 
 pytestmark = pytest.mark.skipif(postprocess_media.bundled_or_system_ffmpeg() is None, reason='ffmpeg is not available')
 

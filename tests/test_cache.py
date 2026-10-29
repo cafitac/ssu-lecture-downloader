@@ -3,7 +3,7 @@ import time
 
 import pytest
 
-from ssu_lecture_downloader.cache import TtlCache
+from ssu_lecture_downloader.core.cache import TtlCache
 
 
 class Clock:

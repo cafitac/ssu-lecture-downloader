@@ -3,7 +3,7 @@ import base64
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 
-from ssu_lecture_downloader.login_flow import run_http_login_discovery
+from ssu_lecture_downloader.core.login_flow import run_http_login_discovery
 
 
 class FakeResponse:

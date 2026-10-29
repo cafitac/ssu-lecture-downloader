@@ -21,8 +21,9 @@ import pytest
 
 from chrome_fakes import FakeBrowser, FakeClock, FakePopen, KillRecorder, make_chrome_binary
 
-from ssu_lecture_downloader import app_context, stt, stt_remote_config
-from ssu_lecture_downloader import chrome_watch as cw
+from ssu_lecture_downloader.service import app_context
+from ssu_lecture_downloader.core import stt, stt_remote_config
+from ssu_lecture_downloader.core import chrome_watch as cw
 
 pytestmark = pytest.mark.skipif(sys.platform != "darwin", reason="pins macOS behavior; other platforms get their own characterization")
 
@@ -76,7 +77,12 @@ def test_chrome_watch_pid_file_sits_next_to_the_profile_dir(fake_home):
     assert str(manager._pidfile()) == f"{fake_home}/Library/Application Support/{APP_ID}/chrome-watch.pid"
     # Default profile resolution (no profile_dir given), still with inert hooks.
     default_manager = cw.ChromeWatchManager(lambda *a: {}, process_command=lambda p: None, killpg=lambda *a: None)
-    assert default_manager.profile_dir == cw.default_profile_dir()
+    try:
+        assert default_manager.profile_dir == cw.default_profile_dir()
+    finally:
+        # Registered for the atexit sweep with the real (default) profile dir; keep it out of that
+        # sweep so the interpreter exit never reaches the owner's real watch Chrome pidfile.
+        cw._LIVE.discard(default_manager)
 
 
 def test_stt_json_path(fake_home):

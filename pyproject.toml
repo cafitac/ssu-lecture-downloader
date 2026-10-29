@@ -24,9 +24,22 @@ ssu-lecture-downloader = "ssu_lecture_downloader.cli:main"
 [dependency-groups]
 dev = [
     "httpx>=0.28.1",
+    "import-linter>=2.15",
     "pytest>=8",
 ]
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.importlinter]
+root_package = "ssu_lecture_downloader"
+
+[[tool.importlinter.contracts]]
+name = "core imports nothing from service or cli"
+type = "forbidden"
+source_modules = ["ssu_lecture_downloader.core"]
+forbidden_modules = [
+    "ssu_lecture_downloader.service",
+    "ssu_lecture_downloader.cli",
+]

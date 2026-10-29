@@ -10,7 +10,7 @@ import uvicorn
 
 # Import the app directly so PyInstaller sees the project package instead of only
 # a dynamic uvicorn import string.
-from ssu_lecture_downloader.api import app
+from ssu_lecture_downloader.service.api import app
 
 
 def main() -> None:

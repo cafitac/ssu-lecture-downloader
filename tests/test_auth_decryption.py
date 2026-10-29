@@ -4,8 +4,8 @@ import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 
-from ssu_lecture_downloader.auth import decrypt_canvas_token
-from ssu_lecture_downloader.errors import LoginFlowError
+from ssu_lecture_downloader.core.auth import decrypt_canvas_token
+from ssu_lecture_downloader.core.errors import LoginFlowError
 
 
 def test_decrypt_canvas_token_with_page_private_key():

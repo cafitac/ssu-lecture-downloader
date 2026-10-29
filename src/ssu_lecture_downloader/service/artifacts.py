@@ -15,11 +15,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from ssu_lecture_downloader import postprocess_media, stt
-from ssu_lecture_downloader.api_models import ArtifactDownloadRequest
-from ssu_lecture_downloader.app_context import AppContext
-from ssu_lecture_downloader.jobs import Job, JobOutcome
-from ssu_lecture_downloader.payloads import artifact_payload, batch_payload
+from ssu_lecture_downloader.core import postprocess_media, stt
+from ssu_lecture_downloader.service.api_models import ArtifactDownloadRequest
+from ssu_lecture_downloader.service.app_context import AppContext
+from ssu_lecture_downloader.core.jobs import Job, JobOutcome
+from ssu_lecture_downloader.service.payloads import artifact_payload, batch_payload
 
 MAX_ARTIFACT_POSTPROCESS_WORKERS = 1
 

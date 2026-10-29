@@ -7,15 +7,15 @@ from typing import Any
 
 from fastapi import APIRouter
 
-from ssu_lecture_downloader.api_errors import raise_for_result_error
-from ssu_lecture_downloader.api_models import (
+from ssu_lecture_downloader.service.api_errors import raise_for_result_error
+from ssu_lecture_downloader.service.api_models import (
     CanvasFileDownloadRequest,
     validate_canvas_file_request,
     validate_digits,
     validate_page_ref,
 )
-from ssu_lecture_downloader.app_context import AppContext
-from ssu_lecture_downloader.download import find_downloaded_files
+from ssu_lecture_downloader.service.app_context import AppContext
+from ssu_lecture_downloader.core.download import find_downloaded_files
 
 
 def build_router(ctx: AppContext) -> APIRouter:

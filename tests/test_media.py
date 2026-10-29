@@ -11,8 +11,8 @@ import time
 
 import pytest
 
-from ssu_lecture_downloader import postprocess_media
-from ssu_lecture_downloader.postprocess_media import (
+from ssu_lecture_downloader.core import postprocess_media
+from ssu_lecture_downloader.core.postprocess_media import (
     AudioExtractionRequest,
     MediaCancelled,
     _run_ffmpeg,
@@ -44,7 +44,7 @@ def install_fake_ffmpeg(monkeypatch, handler):
         def kill(self):
             pass
 
-    monkeypatch.setattr('ssu_lecture_downloader.postprocess_media.subprocess.Popen', FakeProcess)
+    monkeypatch.setattr('ssu_lecture_downloader.core.postprocess_media.subprocess.Popen', FakeProcess)
     return launched
 
 
@@ -60,7 +60,7 @@ def test_plan_audio_output_path_uses_transcripts_directory(tmp_path: Path):
 def test_extract_audio_reports_missing_ffmpeg(tmp_path: Path, monkeypatch):
     video = tmp_path / 'lecture.mp4'
     video.write_bytes(b'video')
-    monkeypatch.setattr('ssu_lecture_downloader.postprocess_media.bundled_or_system_ffmpeg', lambda: None)
+    monkeypatch.setattr('ssu_lecture_downloader.core.postprocess_media.bundled_or_system_ffmpeg', lambda: None)
 
     result = extract_audio(AudioExtractionRequest(input_path=video))
 
@@ -73,7 +73,7 @@ def test_extract_audio_reports_missing_ffmpeg(tmp_path: Path, monkeypatch):
 def test_extract_audio_runs_ffmpeg_and_writes_output(tmp_path: Path, monkeypatch):
     video = tmp_path / 'lecture.mp4'
     video.write_bytes(b'video')
-    monkeypatch.setattr('ssu_lecture_downloader.postprocess_media.shutil.which', lambda name: '/opt/homebrew/bin/ffmpeg')
+    monkeypatch.setattr('ssu_lecture_downloader.core.postprocess_media.shutil.which', lambda name: '/opt/homebrew/bin/ffmpeg')
 
     def handler(command):
         output_path = Path(command[-1])
@@ -100,7 +100,7 @@ def test_extract_audio_runs_ffmpeg_and_writes_output(tmp_path: Path, monkeypatch
 def test_extract_audio_emits_ffmpeg_progress_percent(tmp_path: Path, monkeypatch):
     video = tmp_path / 'lecture.mp4'
     video.write_bytes(b'video')
-    monkeypatch.setattr('ssu_lecture_downloader.postprocess_media.shutil.which', lambda name: f'/opt/homebrew/bin/{name}')
+    monkeypatch.setattr('ssu_lecture_downloader.core.postprocess_media.shutil.which', lambda name: f'/opt/homebrew/bin/{name}')
 
     def fake_run(command, *, capture_output, text, check, timeout=None):
         assert command[0].endswith('ffprobe')
@@ -113,7 +113,7 @@ def test_extract_audio_emits_ffmpeg_progress_percent(tmp_path: Path, monkeypatch
         output_path.write_bytes(b'audio')
         return 0, 'out_time_ms=2500000\nprogress=continue\nout_time_ms=10000000\nprogress=end\n', ''
 
-    monkeypatch.setattr('ssu_lecture_downloader.postprocess_media.subprocess.run', fake_run)
+    monkeypatch.setattr('ssu_lecture_downloader.core.postprocess_media.subprocess.run', fake_run)
     install_fake_ffmpeg(monkeypatch, handler)
     events = []
 
@@ -134,7 +134,7 @@ def test_extract_audio_uses_inner_media_from_readystream_package(tmp_path: Path,
         archive.writestr('contents/media_root.xml', '<media_root />')
         archive.writestr('contents/media_files/media/(small).mp4', b'small')
         archive.writestr('contents/media_files/media/(large).mp4', b'large media bytes')
-    monkeypatch.setattr('ssu_lecture_downloader.postprocess_media.shutil.which', lambda name: '/opt/homebrew/bin/ffmpeg')
+    monkeypatch.setattr('ssu_lecture_downloader.core.postprocess_media.shutil.which', lambda name: '/opt/homebrew/bin/ffmpeg')
     recorded = {}
 
     def handler(command):
@@ -172,8 +172,8 @@ def test_reconstruct_ready_stream_video_extracts_inner_video_before_slide_rebuil
 </part_list></unit_meta>''',
         )
     output = tmp_path / 'out.mp4'
-    monkeypatch.setattr('ssu_lecture_downloader.postprocess_media.bundled_or_system_ffmpeg', lambda: '/opt/ffmpeg')
-    monkeypatch.setattr('ssu_lecture_downloader.postprocess_media._ffprobe_for_ffmpeg', lambda ffmpeg: '/opt/ffprobe')
+    monkeypatch.setattr('ssu_lecture_downloader.core.postprocess_media.bundled_or_system_ffmpeg', lambda: '/opt/ffmpeg')
+    monkeypatch.setattr('ssu_lecture_downloader.core.postprocess_media._ffprobe_for_ffmpeg', lambda ffmpeg: '/opt/ffprobe')
 
     def fake_run(command, *, capture_output, text, check, timeout=None):
         assert command[0] == '/opt/ffprobe'
@@ -185,7 +185,7 @@ def test_reconstruct_ready_stream_video_extracts_inner_video_before_slide_rebuil
         Path(command[-1]).write_bytes(inner_video)
         return 0, '', ''
 
-    monkeypatch.setattr('ssu_lecture_downloader.postprocess_media.subprocess.run', fake_run)
+    monkeypatch.setattr('ssu_lecture_downloader.core.postprocess_media.subprocess.run', fake_run)
     install_fake_ffmpeg(monkeypatch, handler)
 
     result = reconstruct_ready_stream_video(package, output_path=output, overwrite=True)
@@ -205,8 +205,8 @@ def test_reconstruct_ready_stream_video_normalizes_inner_video_when_decode_warni
         archive.writestr('contents/media_root.xml', '<media_root />')
         archive.writestr('contents/media_files/media/(video).mp4', inner_video)
     output = tmp_path / 'out.mp4'
-    monkeypatch.setattr('ssu_lecture_downloader.postprocess_media.bundled_or_system_ffmpeg', lambda: '/opt/ffmpeg')
-    monkeypatch.setattr('ssu_lecture_downloader.postprocess_media._ffprobe_for_ffmpeg', lambda ffmpeg: '/opt/ffprobe')
+    monkeypatch.setattr('ssu_lecture_downloader.core.postprocess_media.bundled_or_system_ffmpeg', lambda: '/opt/ffmpeg')
+    monkeypatch.setattr('ssu_lecture_downloader.core.postprocess_media._ffprobe_for_ffmpeg', lambda ffmpeg: '/opt/ffprobe')
 
     def fake_run(command, *, capture_output, text, check, timeout=None):
         return subprocess.CompletedProcess(command, 0, stdout='{"streams":[{"codec_type":"video"}]}', stderr='')
@@ -218,7 +218,7 @@ def test_reconstruct_ready_stream_video_normalizes_inner_video_when_decode_warni
         output_path.write_bytes(normalized_video if '-vf' in command else inner_video)
         return 0, '', ''
 
-    monkeypatch.setattr('ssu_lecture_downloader.postprocess_media.subprocess.run', fake_run)
+    monkeypatch.setattr('ssu_lecture_downloader.core.postprocess_media.subprocess.run', fake_run)
     launched = install_fake_ffmpeg(monkeypatch, handler)
 
     result = reconstruct_ready_stream_video(package, output_path=output, overwrite=True)
@@ -255,8 +255,8 @@ def test_reconstruct_ready_stream_video_uses_slides_audio_and_timeline(tmp_path:
         archive.writestr('contents/web_files/navi_thumbnail/large/slide_(two).jpg', b'jpeg two')
     output = tmp_path / 'out.mp4'
     recorded = {}
-    monkeypatch.setattr('ssu_lecture_downloader.postprocess_media.bundled_or_system_ffmpeg', lambda: '/opt/ffmpeg')
-    monkeypatch.setattr('ssu_lecture_downloader.postprocess_media._ffprobe_for_ffmpeg', lambda ffmpeg: '/opt/ffprobe')
+    monkeypatch.setattr('ssu_lecture_downloader.core.postprocess_media.bundled_or_system_ffmpeg', lambda: '/opt/ffmpeg')
+    monkeypatch.setattr('ssu_lecture_downloader.core.postprocess_media._ffprobe_for_ffmpeg', lambda ffmpeg: '/opt/ffprobe')
 
     def fake_run(command, *, capture_output, text, check, timeout=None):
         assert command[0] == '/opt/ffprobe'
@@ -271,7 +271,7 @@ def test_reconstruct_ready_stream_video_uses_slides_audio_and_timeline(tmp_path:
         Path(command[-1]).write_bytes(b'playable mp4')
         return 0, '', ''
 
-    monkeypatch.setattr('ssu_lecture_downloader.postprocess_media.subprocess.run', fake_run)
+    monkeypatch.setattr('ssu_lecture_downloader.core.postprocess_media.subprocess.run', fake_run)
     install_fake_ffmpeg(monkeypatch, handler)
 
     result = reconstruct_ready_stream_video(package, output_path=output, overwrite=True)
@@ -293,14 +293,14 @@ def test_ensure_playable_mp4_replaces_readystream_package_with_backup(tmp_path: 
         return path.name in {'lecture.mp4', 'lecture.readystream-package.zip'} and path.read_bytes().startswith(b'PK')
 
     def fake_reconstruct(input_path, *, output_path, overwrite, on_progress=None):
-        from ssu_lecture_downloader.postprocess_media import VideoReconstructionResult
+        from ssu_lecture_downloader.core.postprocess_media import VideoReconstructionResult
         assert input_path == tmp_path / 'lecture.readystream-package.zip'
         assert output_path == reconstructed
         output_path.write_bytes(b'real mp4')
         return VideoReconstructionResult(ok=True, input_path=input_path, output_path=output_path, file_size=8, reconstructed=True, source_kind='readystream_package')
 
-    monkeypatch.setattr('ssu_lecture_downloader.postprocess_media._is_ready_stream_package', fake_is_ready_stream)
-    monkeypatch.setattr('ssu_lecture_downloader.postprocess_media.reconstruct_ready_stream_video', fake_reconstruct)
+    monkeypatch.setattr('ssu_lecture_downloader.core.postprocess_media._is_ready_stream_package', fake_is_ready_stream)
+    monkeypatch.setattr('ssu_lecture_downloader.core.postprocess_media.reconstruct_ready_stream_video', fake_reconstruct)
 
     result = ensure_playable_mp4(package)
 
@@ -316,7 +316,7 @@ def test_extract_audio_does_not_overwrite_existing_output(tmp_path: Path, monkey
     output = tmp_path / 'transcripts' / 'lecture.wav'
     output.parent.mkdir()
     output.write_bytes(b'existing')
-    monkeypatch.setattr('ssu_lecture_downloader.postprocess_media.shutil.which', lambda name: '/usr/bin/ffmpeg')
+    monkeypatch.setattr('ssu_lecture_downloader.core.postprocess_media.shutil.which', lambda name: '/usr/bin/ffmpeg')
 
     result = extract_audio(AudioExtractionRequest(input_path=video, overwrite=False))
 
@@ -391,7 +391,7 @@ def test_extract_audio_failure_leaves_no_partial_output_and_keeps_previous_file(
     output = tmp_path / 'transcripts' / 'lecture.mp3'
     output.parent.mkdir()
     output.write_bytes(b'previous good audio')
-    monkeypatch.setattr('ssu_lecture_downloader.postprocess_media.shutil.which', lambda name: '/opt/homebrew/bin/ffmpeg')
+    monkeypatch.setattr('ssu_lecture_downloader.core.postprocess_media.shutil.which', lambda name: '/opt/homebrew/bin/ffmpeg')
 
     def handler(command):
         Path(command[-1]).write_bytes(b'trunc')
@@ -411,7 +411,7 @@ def test_extract_audio_failure_leaves_no_partial_output_and_keeps_previous_file(
 def test_extract_audio_cancel_reports_cancelled_and_cleans_partial(tmp_path: Path, monkeypatch):
     video = tmp_path / 'lecture.mp4'
     video.write_bytes(b'video')
-    monkeypatch.setattr('ssu_lecture_downloader.postprocess_media.shutil.which', lambda name: '/opt/homebrew/bin/ffmpeg')
+    monkeypatch.setattr('ssu_lecture_downloader.core.postprocess_media.shutil.which', lambda name: '/opt/homebrew/bin/ffmpeg')
 
     def fake_run_ffmpeg(command, *, on_stdout_line=None, should_cancel=None, check=True):
         Path(command[-1]).write_bytes(b'partial')
@@ -477,10 +477,10 @@ def test_reconstruct_ready_stream_video_reports_failure_when_ffmpeg_fails(tmp_pa
     with zipfile.ZipFile(package, 'w') as archive:
         archive.writestr('contents/media_root.xml', '<media_root />')
         archive.writestr('contents/media_files/media/(video).mp4', b'inner')
-    monkeypatch.setattr('ssu_lecture_downloader.postprocess_media.bundled_or_system_ffmpeg', lambda: '/opt/ffmpeg')
-    monkeypatch.setattr('ssu_lecture_downloader.postprocess_media._ffprobe_for_ffmpeg', lambda ffmpeg: '/opt/ffprobe')
+    monkeypatch.setattr('ssu_lecture_downloader.core.postprocess_media.bundled_or_system_ffmpeg', lambda: '/opt/ffmpeg')
+    monkeypatch.setattr('ssu_lecture_downloader.core.postprocess_media._ffprobe_for_ffmpeg', lambda ffmpeg: '/opt/ffprobe')
     monkeypatch.setattr(
-        'ssu_lecture_downloader.postprocess_media.subprocess.run',
+        'ssu_lecture_downloader.core.postprocess_media.subprocess.run',
         lambda command, **kwargs: subprocess.CompletedProcess(command, 0, stdout='{"streams":[{"codec_type":"video"}]}', stderr=''),
     )
     install_fake_ffmpeg(monkeypatch, lambda command: (1, '', 'Invalid data found when processing input\n'))

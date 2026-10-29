@@ -18,7 +18,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict
 
-from ssu_lecture_downloader.progress import emit_progress
+from ssu_lecture_downloader.core.progress import emit_progress
 
 AudioFormat = Literal['wav', 'm4a', 'mp3']
 SUPPORTED_VIDEO_EXTENSIONS = {'.mp4', '.mov', '.m4v', '.mkv', '.webm'}

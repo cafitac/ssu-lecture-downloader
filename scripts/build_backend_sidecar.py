@@ -34,8 +34,8 @@ CONTENTS_DIRECTORY = "_internal"
 HIDDEN_IMPORTS = [
     # PyInstaller can miss dynamically imported runtime providers.
     "imageio_ffmpeg",
-    # Imported lazily by stt.transcribe_audio.
-    "ssu_lecture_downloader.stt_remote",
+    # Imported lazily by core.stt.transcribe_audio.
+    "ssu_lecture_downloader.core.stt_remote",
     "faster_whisper",
     "ctranslate2",
     "onnxruntime",

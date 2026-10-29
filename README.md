@@ -79,9 +79,11 @@ Run the local API manually for browser/Vite development:
 uv run uvicorn ssu_lecture_downloader.api:app --host 127.0.0.1 --port 8000
 ```
 
+`ssu_lecture_downloader.api:app` is the import string the desktop shell launches and detects; `ssu_lecture_downloader.service.api:app` (where the app actually lives) works too.
+
 When running the Tauri desktop shell, the app first checks `/api/health` on `127.0.0.1:8000`. If a healthy backend is already running there, it reuses that external server. If 8000 is empty or occupied by a non-matching process, Tauri chooses a free random localhost port and starts a managed backend. Packaged (release) builds prefer the bundled `backend-sidecar/ssu-api/ssu-api` executable (a PyInstaller onedir bundle: the executable sits in a directory named `ssu-api` next to its `_internal/` folder); debug Tauri builds always use `uv run uvicorn ... --port <chosen-port>` from the repository root, even when a sidecar has been built. Tauri gives the React app that dynamic base URL through a Tauri command and terminates only its owned child process on app exit. Set `SSU_BACKEND_AUTOSTART=0` before `npm run tauri:dev` to disable autostart while debugging, or set `SSU_BACKEND_EXECUTABLE=/path/to/ssu-api` to smoke-test a custom sidecar.
 
-API access control (all enforced by `ssu_lecture_downloader.security`):
+API access control (all enforced by `ssu_lecture_downloader.service.security`):
 
 - CORS only allows `tauri://localhost`, `http(s)://tauri.localhost`, `http://127.0.0.1:5173` and `http://localhost:5173`.
 - Requests whose `Host` header is not `127.0.0.1[:port]` or `localhost[:port]` are rejected with `invalid_host` (DNS-rebinding guard).
@@ -197,7 +199,7 @@ Manual runtime QA after those gates: restart the Tauri app, use a row-level `시
 
 ## Architecture note
 
-The CLI commands call `ssu_lecture_downloader.service.SsuLectureService`, which owns reusable login/course-discovery/course-detail/media-resolution/download orchestration. The local FastAPI app and React/Vite prototype sit on top of that service layer; future desktop UI should reuse the same boundary instead of duplicating CLI internals. API/UI credential access goes through a writable in-memory runtime store: login values are accepted only through `POST /api/credentials`, ignored from `.env`, not stored in Keychain by default, and cleared by `DELETE /api/credentials` or backend process exit. API/UI responses expose only presence/source booleans, never credential values. In the API process, the service keeps in-memory authenticated session and TTL list-result caches per credential fingerprint so repeated term/course/detail lookups avoid full login and duplicate term scans; these caches are never written to disk and are cleared on credential save/delete.
+The CLI commands call `ssu_lecture_downloader.core.lms_service.SsuLectureService`, which owns reusable login/course-discovery/course-detail/media-resolution/download orchestration. The local FastAPI app and React/Vite prototype sit on top of that service layer; future desktop UI should reuse the same boundary instead of duplicating CLI internals. API/UI credential access goes through a writable in-memory runtime store: login values are accepted only through `POST /api/credentials`, ignored from `.env`, not stored in Keychain by default, and cleared by `DELETE /api/credentials` or backend process exit. API/UI responses expose only presence/source booleans, never credential values. In the API process, the service keeps in-memory authenticated session and TTL list-result caches per credential fingerprint so repeated term/course/detail lookups avoid full login and duplicate term scans; these caches are never written to disk and are cleared on credential save/delete.
 
 ## Download engine boundary
 
@@ -224,7 +226,7 @@ cd frontend/src-tauri && cargo test
 
 GitHub Actions (`.github/workflows/ci.yml`) runs on every pull request to `develop` and every push
 to `develop`, on an Intel macOS runner (`macos-15-intel`, same architecture as the installed app):
-`uv run pytest`, `npm run typecheck`, `npm run test:contract`, the backend sidecar build,
+`uv run pytest`, `uv run lint-imports`, `npm run typecheck`, `npm run test:contract`, the backend sidecar build,
 `cargo test` and `npm run tauri build -- --bundles app` (no dmg, signing or upload).
 `tests/test_macos_invariants.py` and `frontend/src-tauri/src/invariant_tests.rs` pin the macOS
 behavior (app-data paths, LaunchAgent, Chrome argv, sidecar location, local-STT gate) that

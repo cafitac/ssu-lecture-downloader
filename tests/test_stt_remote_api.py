@@ -11,12 +11,12 @@ from fastapi.testclient import TestClient
 from stt_fakes import FakeSttServer, srt, write_silent_wav
 from test_api import FakeCredentialStore, FakeService
 
-from ssu_lecture_downloader import postprocess_media
-from ssu_lecture_downloader.api import create_app
-from ssu_lecture_downloader.credentials import CredentialPair
-from ssu_lecture_downloader.ssh_tunnel import TunnelError
-from ssu_lecture_downloader.stt_remote import RemoteSTTService
-from ssu_lecture_downloader.stt_remote_config import RemoteSTTConfig, RemoteSTTSettingsStore, apply_patch
+from ssu_lecture_downloader.core import postprocess_media
+from ssu_lecture_downloader.service.api import create_app
+from ssu_lecture_downloader.service.credentials import CredentialPair
+from ssu_lecture_downloader.core.ssh_tunnel import TunnelError
+from ssu_lecture_downloader.core.stt_remote import RemoteSTTService
+from ssu_lecture_downloader.core.stt_remote_config import RemoteSTTConfig, RemoteSTTSettingsStore, apply_patch
 
 SECRET = 'sk-test-secret-123'
 MAC_STUDIO = {

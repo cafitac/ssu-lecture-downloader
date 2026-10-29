@@ -6,7 +6,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Any
 
-from ssu_lecture_downloader.redaction import redact_headers, redact_mapping, redact_url
+from ssu_lecture_downloader.core.redaction import redact_headers, redact_mapping, redact_url
 
 
 @dataclass(frozen=True)

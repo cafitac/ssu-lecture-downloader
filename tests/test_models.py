@@ -1,4 +1,4 @@
-from ssu_lecture_downloader.models import CourseSummary, LectureItem
+from ssu_lecture_downloader.core.models import CourseSummary, LectureItem
 
 
 def test_course_summary_counts_uncompleted_lectures_from_typed_items():
@@ -38,7 +38,7 @@ def test_lecture_item_accepts_missing_optional_duration_and_content_type():
 def test_course_summary_reports_the_next_open_deadline_and_missed_lectures():
     from datetime import datetime, timezone
 
-    from ssu_lecture_downloader.models import CourseSummary, LectureItem
+    from ssu_lecture_downloader.core.models import CourseSummary, LectureItem
 
     def lecture(title, completed, due, late=None, lock=None):
         return LectureItem(module_id=1, module_name='m', item_id=title, title=title, completed=completed, due_at=due, late_at=late, lock_at=lock)
@@ -70,7 +70,7 @@ def _video(title, *, completed=False, unlock=None, due=None, late=None, lock=Non
 
 
 def _task(title, kind='assignment', *, completed=False, unlock=None, due=None, lock=None, url=None):
-    from ssu_lecture_downloader.models import CourseContentItem
+    from ssu_lecture_downloader.core.models import CourseContentItem
 
     return CourseContentItem(
         module_id=1, module_name='m', item_id=title, module_item_id=title, title=title, kind=kind, completed=completed,
@@ -126,7 +126,7 @@ def test_course_summary_reports_task_deadlines_and_overdue_tasks():
 
 
 def test_deadline_rows_cover_open_late_upcoming_and_all_missed_items():
-    from ssu_lecture_downloader.models import build_deadline_items, sort_deadline_rows
+    from ssu_lecture_downloader.core.models import build_deadline_items, sort_deadline_rows
 
     items = [
         _task('open', due='2026-10-20T14:59:59Z', lock='2026-10-27T14:59:59Z', url='https://lms/a'),
@@ -156,7 +156,7 @@ def test_deadline_rows_cover_open_late_upcoming_and_all_missed_items():
 
 
 def test_deadline_rows_carry_the_video_length_but_never_for_tasks():
-    from ssu_lecture_downloader.models import CourseContentItem, build_deadline_items
+    from ssu_lecture_downloader.core.models import CourseContentItem, build_deadline_items
 
     video = CourseContentItem(
         module_id=1, module_name='m', item_id='v', module_item_id=11, title='1주차', kind='video', duration=1520.5,

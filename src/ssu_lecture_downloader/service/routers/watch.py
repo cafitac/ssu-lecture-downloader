@@ -6,11 +6,11 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException
 
-from ssu_lecture_downloader.api_errors import AUTHENTICATION_ERROR_CODES, raise_for_result_error
-from ssu_lecture_downloader.api_models import ChromeWatchStartRequest, DownloadPlanRequest
-from ssu_lecture_downloader.app_context import AppContext
-from ssu_lecture_downloader.chrome_watch import ChromeWatchError, ChromeWatchManager, ChromeWatchPlanError
-from ssu_lecture_downloader.payloads import viewer_plan_payload
+from ssu_lecture_downloader.service.api_errors import AUTHENTICATION_ERROR_CODES, raise_for_result_error
+from ssu_lecture_downloader.service.api_models import ChromeWatchStartRequest, DownloadPlanRequest
+from ssu_lecture_downloader.service.app_context import AppContext
+from ssu_lecture_downloader.core.chrome_watch import ChromeWatchError, ChromeWatchManager, ChromeWatchPlanError
+from ssu_lecture_downloader.service.payloads import viewer_plan_payload
 
 
 def _chrome_error(error: ChromeWatchError) -> HTTPException:
