@@ -29,6 +29,11 @@ def wav(tmp_path: Path, seconds: float = 3) -> Path:
     return path
 
 
+def pause(seconds: float) -> None:
+    """Simulated latency / staggering (an Event nobody sets: it just waits)."""
+    threading.Event().wait(seconds)
+
+
 def cue(start: float, end: float, text: str) -> TranscriptSegment:
     return TranscriptSegment(start=start, end=end, text=text)
 
@@ -326,7 +331,7 @@ class SerialServer:
 
     def __call__(self, request: RecordedRequest):
         with self._turn:
-            time.sleep(self.work_seconds)
+            pause(self.work_seconds)
             self.served += 1
         return 200, 'text/plain', srt((0, 2, f'답변 {self.served}'))
 
@@ -351,7 +356,7 @@ def staggered_requests(server_url: str, tmp_path: Path, count: int, *, base_time
         thread = threading.Thread(target=one, args=(n,))
         thread.start()
         threads.append(thread)
-        time.sleep(gap)
+        pause(gap)
     for thread in threads:
         thread.join(20)
     assert service.in_flight == 0
@@ -509,7 +514,7 @@ def test_pipeline_tells_how_many_requests_are_ahead_and_keeps_the_count_balanced
         service = service_for(tmp_path, server.url)
 
         def run(path: Path, delay: float) -> None:
-            time.sleep(delay)
+            pause(delay)
             results.append(transcribe_audio(TranscriptionRequest(audio_path=path, output_dir=tmp_path, overwrite=True), on_progress=events.append, remote=service, stt_capability=SUPPORTS_LOCAL_STT))
 
         threads = [threading.Thread(target=run, args=(audio[0], 0)), threading.Thread(target=run, args=(audio[1], 0.3))]

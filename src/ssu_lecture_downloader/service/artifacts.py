@@ -89,7 +89,7 @@ class LecturePipeline:
         except (GateCancelled, postprocess_media.MediaCancelled, stt.TranscriptionCancelled):
             code = CANCELLED
         except Exception as exc:  # noqa: BLE001 - one lecture's bug must never reach the executor or a sibling
-            logger.exception("lecture pipeline failed unexpectedly")
+            logger.exception("lecture pipeline failed unexpectedly (module_item_id=%s, stage=%s)", self.module_item_id, self.stage)
             code = type(exc).__name__
         if code is None:
             result = LectureResult(self.module_item_id, "done")

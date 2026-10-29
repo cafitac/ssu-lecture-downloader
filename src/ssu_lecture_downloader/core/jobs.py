@@ -26,9 +26,6 @@ COALESCED_PROGRESS_STAGES = {
     "transcript_queued",
     "audio_waiting",
 }
-# Coalesced stages whose newest event moves to the END of the list (it is the lecture's current state), instead of
-# being replaced in place like byte/segment ticks.
-MOVE_TO_END_PROGRESS_STAGES = frozenset({"transcript_waiting", "transcript_queued", "audio_waiting"})
 TERMINAL_STATUSES = frozenset({"succeeded", "failed", "cancelled"})
 # Finished jobs are kept so late polls still resolve, but not forever.
 DEFAULT_MAX_FINISHED_JOBS = 50
@@ -53,6 +50,9 @@ def is_milestone_event(event: dict[str, Any]) -> bool:
 def append_compacted_progress(progress: list[dict[str, Any]], event: dict[str, Any]) -> None:
     """Append progress without retaining every byte-level tick forever.
 
+    A coalesced stage deletes its previous entry (same lecture and file) and appends the new one at the end, so the
+    list stays chronological: `at` never decreases along it.
+
     Over the cap, ticks and other plain events go first (oldest first); milestone events
     (see `is_milestone_event`) are dropped only when nothing else is left.
     """
@@ -61,16 +61,9 @@ def append_compacted_progress(progress: list[dict[str, Any]], event: dict[str, A
         identity = _progress_identity(event)
         for index in range(len(progress) - 1, -1, -1):
             if _progress_identity(progress[index]) == identity:
-                if stage in MOVE_TO_END_PROGRESS_STAGES:
-                    del progress[index]
-                    progress.append(event)
-                else:
-                    progress[index] = event
+                del progress[index]
                 break
-        else:
-            progress.append(event)
-    else:
-        progress.append(event)
+    progress.append(event)
     overflow = len(progress) - MAX_JOB_PROGRESS_EVENTS
     if overflow > 0:
         keep: list[dict[str, Any]] = []

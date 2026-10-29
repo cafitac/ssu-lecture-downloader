@@ -55,10 +55,32 @@ class Spec:
     block_transcribe: bool = False  # the local engine step never finishes on its own; only the cancel ends it
 
 
+class Signal:
+    """A condition the fakes notify on every change a test may wait for (progress appended, worker entered/left, request seen)."""
+
+    def __init__(self) -> None:
+        self._cond = threading.Condition()
+
+    def notify(self) -> None:
+        with self._cond:
+            self._cond.notify_all()
+
+    def wait_for(self, predicate: Callable[[], bool], timeout: float = 5.0, message: str = 'condition') -> None:
+        with self._cond:
+            reached = self._cond.wait_for(predicate, timeout)
+        assert reached, f'timed out waiting for {message}'
+
+
+def pause(seconds: float) -> None:
+    """Simulated work latency inside a fake (an Event nobody sets: it just waits)."""
+    threading.Event().wait(seconds)
+
+
 class Probe:
     """Counts how many fake workers run at the same time."""
 
-    def __init__(self) -> None:
+    def __init__(self, signal: Signal | None = None) -> None:
+        self._signal = signal
         self._lock = threading.Lock()
         self.current = 0
         self.peak = 0
@@ -70,11 +92,15 @@ class Probe:
             self.current += 1
             self.total += 1
             self.peak = max(self.peak, self.current)
+        if self._signal is not None:
+            self._signal.notify()
         try:
             yield
         finally:
             with self._lock:
                 self.current -= 1
+            if self._signal is not None:
+                self._signal.notify()
 
 
 def sleep_unless_cancelled(seconds: float, should_cancel: Callable[[], bool] | None, *, until_cancel: bool = False, limit: float = 30.0) -> bool:
@@ -83,7 +109,7 @@ def sleep_unless_cancelled(seconds: float, should_cancel: Callable[[], bool] | N
     while time.monotonic() < deadline:
         if should_cancel is not None and should_cancel():
             return True
-        time.sleep(0.005)
+        pause(0.005)  # the fake polls the cancel flag the way the real ffmpeg / engine wrappers do
     return False
 
 
@@ -157,8 +183,9 @@ class Rig:
         self.tmp_path = tmp_path
         self.lms = FakeLms(tmp_path, specs, plan_error=plan_error)
         self.lms.prepare_disk()
-        self.media = Probe()
-        self.engine = Probe()
+        self.signal = Signal()
+        self.media = Probe(self.signal)
+        self.engine = Probe(self.signal)
         self.extract_calls: list[int] = []
         self.transcribe_calls: list[int] = []
         self.remote_enabled = False
@@ -172,6 +199,21 @@ class Rig:
         monkeypatch.setattr(stt, 'transcribe_audio', self._transcribe)
         self.registry = JobRegistry()
         self.job: Job | None = None
+        self.job_started = threading.Event()
+        create = self.registry.create
+
+        def create_watched() -> Job:
+            job = create()
+            append = job.append_progress
+
+            def append_and_notify(event: dict[str, Any]) -> None:
+                append(event)
+                self.signal.notify()
+
+            job.append_progress = append_and_notify  # in place before the runner thread starts
+            return job
+
+        self.registry.create = create_watched
 
     # ---- fakes
     def _spec_for(self, path: Path) -> Spec:
@@ -191,7 +233,7 @@ class Rig:
 
     def _ensure_mp4(self, path, *, overwrite=True, on_progress=None, should_cancel=None):
         with self.media.track():
-            time.sleep(0.05)
+            pause(0.05)
         return postprocess_media.VideoReconstructionResult(ok=True, input_path=path, output_path=path, file_size=5, reconstructed=False)
 
     def _transcribe(self, request, on_progress=None, should_cancel=None, remote=None, *, stt_capability, gates=None):
@@ -216,7 +258,11 @@ class Rig:
             return ArtifactPipeline(self.ctx, job, request, outputs, ('u', 'p'), self.tmp_path).run()
 
         self.job = self.ctx.runner.start(self.registry, work)
+        self.job_started.set()
         return self.job
+
+    def wait_for(self, predicate: Callable[[], bool], timeout: float = 5.0, message: str = 'condition') -> None:
+        self.signal.wait_for(predicate, timeout, message)
 
     def run(self, outputs: list[str], **kwargs: Any) -> dict[str, Any]:
         return finish(self.start(outputs, **kwargs))
@@ -227,22 +273,14 @@ class Rig:
 
 
 def finish(job: Job, timeout: float = 15.0) -> dict[str, Any]:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        snapshot = job.snapshot()
-        if snapshot['status'] not in {'queued', 'running'}:
-            return snapshot
-        time.sleep(0.01)
-    raise AssertionError(f'job never finished: {job.snapshot()["status"]}')
-
-
-def wait_for(predicate: Callable[[], bool], timeout: float = 5.0, message: str = 'condition') -> None:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if predicate():
-            return
-        time.sleep(0.005)
-    raise AssertionError(f'timed out waiting for {message}')
+    """Join the job's runner thread (it ends only after the job reached a terminal status) and return the snapshot."""
+    runner = next((thread for thread in threading.enumerate() if thread.name == f'ssu-job-{job.job_id[:8]}'), None)
+    if runner is not None:
+        runner.join(timeout)
+        assert not runner.is_alive(), f'job never finished: {job.snapshot()["status"]}'
+    snapshot = job.snapshot()
+    assert snapshot['status'] in {'succeeded', 'failed', 'cancelled'}, snapshot['status']
+    return snapshot
 
 
 def events(snapshot_or_job, stage: str | None = None, item_id: int | None = None) -> list[dict[str, Any]]:
@@ -263,13 +301,14 @@ def make_rig(tmp_path, monkeypatch):
 
 def test_gate_limits_waits_fifo_and_releases_in_finally():
     gates = StageGates(media=2, poll_seconds=0.01)
+    signal = Signal()
     order: list[int] = []
     waited: list[int] = []
     release = threading.Event()
     started = threading.Barrier(3)
 
     def worker(n: int) -> None:
-        with gates.hold('media', on_wait=lambda: waited.append(n)):
+        with gates.hold('media', on_wait=lambda: (waited.append(n), signal.notify())):
             order.append(n)
             if n < 2:
                 started.wait(2)
@@ -284,7 +323,7 @@ def test_gate_limits_waits_fifo_and_releases_in_finally():
         thread = threading.Thread(target=worker, args=(n,))
         thread.start()
         late.append(thread)
-        wait_for(lambda n=n: n in waited, message=f'worker {n} to wait')
+        signal.wait_for(lambda n=n: n in waited, message=f'worker {n} to wait')
     assert gates.in_use('media') == 2 and gates.waiting('media') == 2 and order == [0, 1]
     release.set()
     for thread in first + late:
@@ -301,19 +340,20 @@ def test_gate_limits_waits_fifo_and_releases_in_finally():
 
 def test_gate_wait_is_cancel_aware_and_a_cancelled_waiter_holds_nothing():
     gates = StageGates(local_stt=1, poll_seconds=0.01)
+    signal = Signal()
     cancel = threading.Event()
     outcome: list[str] = []
     with gates.hold('local_stt'):
         def waiter() -> None:
             try:
-                with gates.hold('local_stt', should_cancel=cancel.is_set):
+                with gates.hold('local_stt', should_cancel=cancel.is_set, on_wait=signal.notify):
                     outcome.append('acquired')
             except GateCancelled:
                 outcome.append('cancelled')
 
         thread = threading.Thread(target=waiter)
         thread.start()
-        wait_for(lambda: gates.waiting('local_stt') == 1, message='waiter')
+        signal.wait_for(lambda: gates.waiting('local_stt') == 1, message='waiter')
         started = time.monotonic()
         cancel.set()
         thread.join(2)
@@ -403,7 +443,7 @@ def test_remote_requests_are_not_gated_and_say_how_many_are_ahead(make_rig, monk
         with lock:
             state['current'] += 1
             state['peak'] = max(state['peak'], state['current'])
-        time.sleep(0.4)
+        pause(0.4)
         with lock:
             state['current'] -= 1
         return 200, 'text/plain', srt((0, 3, '원격 자막'))
@@ -548,7 +588,7 @@ def assert_cancelled_cleanly(rig: Rig, snapshot: dict[str, Any], elapsed: float,
 def test_cancel_while_lectures_are_downloading(make_rig):
     rig = make_rig([Spec(n, download=10.0) for n in range(1, 5)])
     job = rig.start(['mp3'])
-    wait_for(lambda: len(events(job, 'downloading')) == 4, message='downloads to start')
+    rig.wait_for(lambda: len(events(job, 'downloading')) == 4, message='downloads to start')
 
     snapshot, elapsed, cancelled_at = cancel_and_wait(rig, job)
 
@@ -560,7 +600,7 @@ def test_cancel_while_lectures_are_downloading(make_rig):
 def test_cancel_while_lectures_wait_for_the_ffmpeg_limit_and_while_two_extract(make_rig):
     rig = make_rig([Spec(n, has_video=True, block_extract=True) for n in range(1, 6)])
     job = rig.start(['mp3'])
-    wait_for(lambda: rig.media.current == 2 and len(events(job, 'audio_waiting')) == 3, message='2 extracting + 3 waiting')
+    rig.wait_for(lambda: rig.media.current == 2 and len(events(job, 'audio_waiting')) == 3, message='2 extracting + 3 waiting')
 
     snapshot, elapsed, cancelled_at = cancel_and_wait(rig, job)
 
@@ -572,7 +612,7 @@ def test_cancel_while_lectures_wait_for_the_ffmpeg_limit_and_while_two_extract(m
 def test_cancel_while_lectures_wait_for_the_local_engine(make_rig):
     rig = make_rig([Spec(n, has_video=True, block_transcribe=True) for n in range(1, 4)])
     job = rig.start(['txt'], stt_provider='fake')
-    wait_for(lambda: rig.engine.current == 1 and len(events(job, 'transcript_waiting')) == 2, timeout=8, message='1 transcribing + 2 waiting')
+    rig.wait_for(lambda: rig.engine.current == 1 and len(events(job, 'transcript_waiting')) == 2, timeout=8, message='1 transcribing + 2 waiting')
 
     snapshot, elapsed, cancelled_at = cancel_and_wait(rig, job)
 
@@ -589,13 +629,14 @@ def test_cancel_while_remote_requests_are_waiting_on_the_server(make_rig, monkey
     monkeypatch.setattr(postprocess_media, 'convert_to_stt_wav', lambda src, dst, should_cancel=None: write_silent_wav(dst, 5))
 
     def slow(request):
-        time.sleep(6)
+        rig.signal.notify()  # the request is already recorded by the fake server
+        pause(6)
         return 200, 'text/plain', srt((0, 1, 'late'))
 
     with FakeSttServer(slow) as server:
         rig.enable_remote(server.url)
         job = rig.start(['txt'], stt_provider='faster_whisper')
-        wait_for(lambda: len(server.requests) == 2, message='both requests at the server')
+        rig.wait_for(lambda: len(server.requests) == 2, message='both requests at the server')
 
         snapshot, elapsed, cancelled_at = cancel_and_wait(rig, job)
 
@@ -742,7 +783,7 @@ def test_media_waits_inside_the_transcript_stage_are_transcript_waits_not_audio_
     for spec in specs:
         rig.lms.video_path(spec.item_id).with_suffix('.mp3').write_bytes(b'audio')  # only the remote transcript is left
     monkeypatch.setattr(stt, 'transcribe_audio', REAL_TRANSCRIBE_AUDIO)
-    monkeypatch.setattr(postprocess_media, 'convert_to_stt_wav', lambda src, dst, should_cancel=None: (time.sleep(0.15), write_silent_wav(dst, 5)))
+    monkeypatch.setattr(postprocess_media, 'convert_to_stt_wav', lambda src, dst, should_cancel=None: (pause(0.15), write_silent_wav(dst, 5)))
 
     with FakeSttServer(lambda request: (200, 'text/plain', srt((0, 3, '원격 자막')))) as server:
         rig.enable_remote(server.url)
@@ -776,18 +817,20 @@ def test_plain_audio_extraction_waits_carry_step_audio(make_rig):
 def test_over_the_cap_plain_events_go_first_and_every_unfinished_lecture_keeps_its_milestone(make_rig, monkeypatch):
     rig = make_rig([Spec(n, has_video=True, block_extract=True) for n in range(1, 31)])
     inner = rig._extract
-    noisy_done = threading.Event()
+    noisy = {'finished': 0}
+    noisy_lock = threading.Lock()
 
     def chatty(request, on_progress=None, should_cancel=None):
         for tick in range(500):  # 1000 plain events from the two running extractions: far over the 400 cap
             on_progress({'stage': 'audio_note', 'tick': tick})
-        noisy_done.set()
+        with noisy_lock:
+            noisy['finished'] += 1
+        rig.signal.notify()
         return inner(request, on_progress=on_progress, should_cancel=should_cancel)
 
     monkeypatch.setattr(postprocess_media, 'extract_audio', chatty)
     job = rig.start(['mp3'])
-    wait_for(lambda: noisy_done.is_set() and len(events(job, 'audio_waiting')) == 28, message='28 lectures waiting, noise emitted')
-    time.sleep(0.05)
+    rig.wait_for(lambda: noisy['finished'] == 2 and len(events(job, 'audio_waiting')) == 28, message='both noisy extractions done and 28 lectures waiting')
 
     progress = job.progress_events()  # mid-run: nothing has finished
     assert len(progress) <= MAX_JOB_PROGRESS_EVENTS and len(events(job, 'audio_note')) < 1000
@@ -824,7 +867,7 @@ def test_waiting_events_move_to_the_end_instead_of_being_replaced_in_place():
     append_compacted_progress(progress, waiting(1, reason='local_engine'))
     append_compacted_progress(progress, {'stage': 'transcribing', 'module_item_id': 1, 'at': 2.0})
     append_compacted_progress(progress, waiting(3, reason='server_busy', ahead_requests=1))
-    append_compacted_progress(progress, {'stage': 'transcript_progress', 'module_item_id': 1, 'at': 4.0, 'output_path': 'x'})
+    append_compacted_progress(progress, {'stage': 'transcript_progress', 'module_item_id': 1, 'at': 4.0, 'audio_path': 'a.mp3'})
     append_compacted_progress(progress, waiting(5, reason='server_busy', ahead_requests=2))
     append_compacted_progress(progress, waiting(6, stage='audio_waiting'))
     append_compacted_progress(progress, waiting(7, stage='audio_waiting', step='audio'))
@@ -832,6 +875,31 @@ def test_waiting_events_move_to_the_end_instead_of_being_replaced_in_place():
     assert [e['stage'] for e in progress] == ['transcribing', 'transcript_progress', 'transcript_waiting', 'audio_waiting']
     assert progress[2]['ahead_requests'] == 2 and progress[3]['step'] == 'audio'
     assert [e['at'] for e in progress] == sorted(e['at'] for e in progress)  # still monotonic
+
+
+def test_remote_repair_sequence_stays_chronological_in_the_stored_list():
+    """started, progress 60, repair 1/3, waiting, repair 2/3, repair 3/3, progress 99: the last entry is progress 99."""
+    from ssu_lecture_downloader.core.jobs import append_compacted_progress
+
+    base = {'module_item_id': 1, 'index': 1, 'audio_path': 'a.mp3'}
+    sequence = [
+        {'stage': 'transcript_started', **base},
+        {'stage': 'transcript_progress', 'progress_percent': 60, **base},
+        {'stage': 'transcript_repair', 'repair_index': 1, 'repair_total': 3, **base},
+        {'stage': 'transcript_waiting', 'reason': 'server_busy', 'ahead_requests': 1, **base},
+        {'stage': 'transcript_repair', 'repair_index': 2, 'repair_total': 3, **base},
+        {'stage': 'transcript_repair', 'repair_index': 3, 'repair_total': 3, **base},
+        {'stage': 'transcript_progress', 'progress_percent': 99, **base},
+    ]
+    progress: list[dict[str, Any]] = []
+    for n, event in enumerate(sequence):
+        append_compacted_progress(progress, {**event, 'at': float(n)})
+
+    assert progress[-1]['stage'] == 'transcript_progress' and progress[-1]['progress_percent'] == 99
+    assert [e['stage'] for e in progress] == ['transcript_started', 'transcript_waiting', 'transcript_repair', 'transcript_progress']
+    assert progress[2]['repair_index'] == 3
+    stamps = [e['at'] for e in progress]
+    assert stamps == sorted(stamps)
 
 
 def test_waiting_notes_stay_monotonic_through_a_real_run(make_rig):
@@ -852,7 +920,7 @@ def test_a_real_error_stays_a_failure_even_if_the_job_is_cancelled_right_after(m
 
     def fail_then_cancel(request, on_progress=None, should_cancel=None):
         if request.input_path.stem == 'lecture-1':
-            wait_for(lambda: rig.job is not None, message='job handle')
+            assert rig.job_started.wait(5), 'job handle'
             rig.job.mark_cancel_requested()  # the cancel flag is set before this error is reported
             return AudioExtractionResult(ok=False, input_path=request.input_path, error_code='ffmpeg_failed', message='bad input')
         return inner(request, on_progress=on_progress, should_cancel=should_cancel)
