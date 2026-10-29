@@ -123,7 +123,8 @@ def main() -> int:
     OUTPUT.chmod(mode | 0o755)
 
     print(f"Built backend sidecar: {OUTPUT}")
-    print("Next: cd frontend && npm run tauri:build")
+    print("Next: cd frontend && npm run tauri:build  (unsigned local app, no updater artifacts)")
+    print("      Signed updater artifacts: set TAURI_SIGNING_PRIVATE_KEY, then npm run tauri:build:release")
     return 0
 
 

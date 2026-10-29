@@ -207,6 +207,26 @@ impl NativeDownloadJobs {
         }
     }
 
+    /// True while any native download job has not reached a terminal status. A job whose lock
+    /// is held is being updated right now, so it counts as running. Fails closed: a poisoned
+    /// registry or job counts as running.
+    pub(crate) fn has_running_job(&self) -> bool {
+        let Ok(jobs) = self.jobs.lock() else {
+            return true;
+        };
+        jobs.values().any(|job| match job.try_lock() {
+            Ok(guard) => !is_terminal_status(&guard.status),
+            Err(std::sync::TryLockError::WouldBlock) => true,
+            Err(std::sync::TryLockError::Poisoned(_)) => true,
+        })
+    }
+
+    /// Test helper: a registered job that has not started (status `queued`).
+    #[cfg(test)]
+    pub(crate) fn create_queued_for_test(&self) -> SharedNativeDownloadJob {
+        self.create().expect("job")
+    }
+
     fn create(&self) -> Result<SharedNativeDownloadJob, String> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let job = Arc::new(Mutex::new(NativeDownloadJob::new(format!("native-{id}"))));
@@ -796,6 +816,26 @@ fn start_native_batch_job(job: SharedNativeDownloadJob, request: NativeBatchDown
     });
 }
 
+/// Register a job unless an update is being installed. Checked before and after registering:
+/// the update's guard runs after its latch is set, so a job registered before the latch is seen
+/// by the guard, and one registered after it sees the latch here and is cancelled.
+fn create_and_snapshot_unless_updating(
+    state: &NativeDownloadJobs,
+    updating: impl Fn() -> bool,
+) -> Result<(SharedNativeDownloadJob, NativeDownloadJobStatus), String> {
+    if updating() {
+        return Err(crate::update::UPDATE_IN_PROGRESS.to_string());
+    }
+    let (job, snapshot) = create_and_snapshot(state)?;
+    if updating() {
+        if let Ok(mut guard) = job.lock() {
+            guard.request_cancel();
+        }
+        return Err(crate::update::UPDATE_IN_PROGRESS.to_string());
+    }
+    Ok((job, snapshot))
+}
+
 fn create_and_snapshot(
     state: &NativeDownloadJobs,
 ) -> Result<(SharedNativeDownloadJob, NativeDownloadJobStatus), String> {
@@ -809,20 +849,24 @@ fn create_and_snapshot(
 
 #[tauri::command]
 pub(crate) fn native_start_download_job(
+    app: tauri::AppHandle,
     state: tauri::State<'_, NativeDownloadJobs>,
     request: NativeDownloadStartRequest,
 ) -> Result<NativeDownloadJobStatus, String> {
-    let (job, snapshot) = create_and_snapshot(&state)?;
+    let (job, snapshot) =
+        create_and_snapshot_unless_updating(&state, || crate::update::is_update_in_progress(&app))?;
     start_native_single_job(job, request);
     Ok(snapshot)
 }
 
 #[tauri::command]
 pub(crate) fn native_start_batch_download_job(
+    app: tauri::AppHandle,
     state: tauri::State<'_, NativeDownloadJobs>,
     request: NativeBatchDownloadStartRequest,
 ) -> Result<NativeDownloadJobStatus, String> {
-    let (job, snapshot) = create_and_snapshot(&state)?;
+    let (job, snapshot) =
+        create_and_snapshot_unless_updating(&state, || crate::update::is_update_in_progress(&app))?;
     start_native_batch_job(job, request);
     Ok(snapshot)
 }
@@ -1247,5 +1291,49 @@ mod tests {
             .any(|event| event.stage == "download_cancelled"));
         assert!(!output.exists());
         fs::remove_dir_all(dir).ok();
+    }
+    #[test]
+    fn has_running_job_is_true_until_every_job_is_terminal() {
+        let jobs = NativeDownloadJobs::new();
+        assert!(!jobs.has_running_job(), "no jobs");
+        let job = jobs.create().expect("job");
+        assert!(jobs.has_running_job(), "queued counts as running");
+        for (status, running) in [
+            ("running", true),
+            ("succeeded", false),
+            ("failed", false),
+            ("cancelled", false),
+        ] {
+            job.lock().unwrap().status = status.to_string();
+            assert_eq!(jobs.has_running_job(), running, "{status}");
+        }
+        // A job whose lock is held is being updated right now: counts as running.
+        job.lock().unwrap().status = "succeeded".to_string();
+        let held = job.lock().unwrap();
+        assert!(jobs.has_running_job());
+        drop(held);
+        assert!(!jobs.has_running_job());
+    }
+    #[test]
+    fn no_job_starts_while_an_update_is_in_progress() {
+        let jobs = NativeDownloadJobs::new();
+        assert_eq!(
+            create_and_snapshot_unless_updating(&jobs, || true).err(),
+            Some("update_in_progress".to_string())
+        );
+        assert!(!jobs.has_running_job(), "nothing was registered");
+
+        // The latch appears between the first check and the registration: the job that was
+        // registered is cancelled, so the update guard cannot be surprised by it.
+        let calls = std::cell::Cell::new(0);
+        let result = create_and_snapshot_unless_updating(&jobs, || {
+            calls.set(calls.get() + 1);
+            calls.get() > 1
+        });
+        assert_eq!(result.err(), Some("update_in_progress".to_string()));
+        assert!(!jobs.has_running_job(), "the late job was cancelled");
+
+        assert!(create_and_snapshot_unless_updating(&jobs, || false).is_ok());
+        assert!(jobs.has_running_job());
     }
 }
