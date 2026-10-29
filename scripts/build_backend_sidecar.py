@@ -47,6 +47,18 @@ HIDDEN_IMPORTS = [
     # Imported lazily by chrome_cdp (Chrome playback driver).
     "websockets.sync.client",
     "websockets.exceptions",
+    # Imported lazily by core.grades.gateway (GradesService) so the backend starts without the native library.
+    "ssu_lecture_downloader.core.grades.gateway",
+    "rusaint",
+]
+
+# Packages whose native libraries PyInstaller's import analysis cannot see. rusaint (UniFFI) loads
+# `librusaint_ffi.dylib` (`.dll` on Windows) by joining `os.path.dirname(__file__)` with the library name,
+# so the file must be shipped next to the package modules as `_internal/rusaint/librusaint_ffi.*`.
+# `--collect-binaries` keeps that relative layout and takes nothing else (the modules themselves are
+# found through the hidden import; rusaint has no data files), which makes it the smallest option.
+COLLECT_BINARIES = [
+    "rusaint",
 ]
 
 
@@ -88,6 +100,8 @@ def main() -> int:
     ]
     for module in HIDDEN_IMPORTS:
         command.extend(["--hidden-import", module])
+    for package in COLLECT_BINARIES:
+        command.extend(["--collect-binaries", package])
     command.append(str(ENTRYPOINT))
 
     run(command)
