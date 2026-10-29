@@ -4,7 +4,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from ssu_lecture_downloader.service.api import create_app
-from ssu_lecture_downloader.core.credentials import CredentialPair
+from ssu_lecture_downloader.service.credentials import CredentialPair
 from test_api import FakeCredentialStore, FakeService
 
 ALLOWED_ORIGINS = [

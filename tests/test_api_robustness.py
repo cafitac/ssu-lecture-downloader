@@ -10,7 +10,7 @@ from curl_cffi.requests import exceptions as curl_exceptions
 from fastapi.testclient import TestClient
 
 from ssu_lecture_downloader.service.api import create_app
-from ssu_lecture_downloader.core.credentials import CredentialPair
+from ssu_lecture_downloader.service.credentials import CredentialPair
 from ssu_lecture_downloader.core.errors import LoginFlowError
 from ssu_lecture_downloader.core.login_flow import LoginDiscoveryResult
 from ssu_lecture_downloader.core.postprocess_media import AudioExtractionResult

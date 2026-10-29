@@ -5,7 +5,7 @@ from curl_cffi.requests.exceptions import HTTPError
 from fastapi.testclient import TestClient
 
 from ssu_lecture_downloader.service.api import create_app
-from ssu_lecture_downloader.core.credentials import CredentialPair
+from ssu_lecture_downloader.service.credentials import CredentialPair
 from ssu_lecture_downloader.core.models import CourseContentItem, CourseSummary, LectureItem
 from ssu_lecture_downloader.core.lms_service import BatchDownloadItemResult, BatchDownloadResult, CourseDetailResult, CourseDiscoveryResult, DownloadLectureResult, OfficialViewerBridgeCookie, OfficialViewerPlanResult, OfficialViewerSessionBridgeResult
 from ssu_lecture_downloader.core.login_flow import LoginDiscoveryResult

@@ -23,7 +23,7 @@ from ssu_lecture_downloader.service.api_errors import (
 )
 from ssu_lecture_downloader.service.app_context import AppContext, default_download_dir
 from ssu_lecture_downloader.core.chrome_watch import ChromeWatchManager
-from ssu_lecture_downloader.core.credentials import CredentialStore, default_credential_store
+from ssu_lecture_downloader.service.credentials import CredentialStore, default_credential_store
 from ssu_lecture_downloader.core.jobs import JobRunner
 from ssu_lecture_downloader.core.stt_remote import RemoteSTTService
 from ssu_lecture_downloader.service.routers import credentials as credentials_routes

@@ -76,8 +76,10 @@ uv run ssu-lecture-downloader batch-download --course-id 44070 --course-name 'UX
 Run the local API manually for browser/Vite development:
 
 ```bash
-uv run uvicorn ssu_lecture_downloader.service.api:app --host 127.0.0.1 --port 8000
+uv run uvicorn ssu_lecture_downloader.api:app --host 127.0.0.1 --port 8000
 ```
+
+`ssu_lecture_downloader.api:app` is the import string the desktop shell launches and detects; `ssu_lecture_downloader.service.api:app` (where the app actually lives) works too.
 
 When running the Tauri desktop shell, the app first checks `/api/health` on `127.0.0.1:8000`. If a healthy backend is already running there, it reuses that external server. If 8000 is empty or occupied by a non-matching process, Tauri chooses a free random localhost port and starts a managed backend. Packaged (release) builds prefer the bundled `backend-sidecar/ssu-api/ssu-api` executable (a PyInstaller onedir bundle: the executable sits in a directory named `ssu-api` next to its `_internal/` folder); debug Tauri builds always use `uv run uvicorn ... --port <chosen-port>` from the repository root, even when a sidecar has been built. Tauri gives the React app that dynamic base URL through a Tauri command and terminates only its owned child process on app exit. Set `SSU_BACKEND_AUTOSTART=0` before `npm run tauri:dev` to disable autostart while debugging, or set `SSU_BACKEND_EXECUTABLE=/path/to/ssu-api` to smoke-test a custom sidecar.
 

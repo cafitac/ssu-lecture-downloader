@@ -14,7 +14,7 @@ from ssu_lecture_downloader.core.canvas_files import (
     parse_canvas_json,
     wiki_page_ref,
 )
-from ssu_lecture_downloader.core.credentials import CredentialPair
+from ssu_lecture_downloader.service.credentials import CredentialPair
 from ssu_lecture_downloader.core.lms import LearningXLister
 from ssu_lecture_downloader.core.login_flow import LoginDiscoveryResult
 from ssu_lecture_downloader.core.lms_service import SsuLectureService

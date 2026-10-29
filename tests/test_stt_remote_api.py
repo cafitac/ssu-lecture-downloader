@@ -13,7 +13,7 @@ from test_api import FakeCredentialStore, FakeService
 
 from ssu_lecture_downloader.core import postprocess_media
 from ssu_lecture_downloader.service.api import create_app
-from ssu_lecture_downloader.core.credentials import CredentialPair
+from ssu_lecture_downloader.service.credentials import CredentialPair
 from ssu_lecture_downloader.core.ssh_tunnel import TunnelError
 from ssu_lecture_downloader.core.stt_remote import RemoteSTTService
 from ssu_lecture_downloader.core.stt_remote_config import RemoteSTTConfig, RemoteSTTSettingsStore, apply_patch

@@ -94,3 +94,13 @@ def test_import_linter_fails_on_a_deliberate_core_to_service_import(tmp_path):
     (package / "core" / "leak.py").write_text("VALUE = 1\n")
     clean = _run_lint_imports(config, tmp_path, extra_path=tmp_path)
     assert clean.returncode == 0, clean.stdout + clean.stderr
+
+
+def test_root_api_shim_resolves_like_the_desktop_shell_launch():
+    # frontend/src-tauri/src/backend.rs launches (`uv run uvicorn ssu_lecture_downloader.api:app`) and
+    # detects stale backends by that exact string, so this shim must stay until the Rust side changes.
+    from uvicorn.importer import import_from_string
+
+    from ssu_lecture_downloader.service import api as service_api
+
+    assert import_from_string("ssu_lecture_downloader.api:app") is service_api.app

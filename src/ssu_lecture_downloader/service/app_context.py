@@ -15,7 +15,7 @@ from ssu_lecture_downloader.service.api_errors import (
     service_exception_error,
 )
 from ssu_lecture_downloader.core.chrome_watch import ChromeWatchManager
-from ssu_lecture_downloader.core.credentials import CredentialStore
+from ssu_lecture_downloader.service.credentials import CredentialStore
 from ssu_lecture_downloader.core.jobs import Job, JobOutcome, JobRegistry, JobRunner
 from ssu_lecture_downloader.service.security import MediaPathPolicy
 from ssu_lecture_downloader.core.stt_remote import RemoteSTTService
