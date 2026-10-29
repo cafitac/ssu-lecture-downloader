@@ -170,7 +170,9 @@ export interface ProgressEvent {
   /** Seconds since the epoch; present on pipeline events of a backend that has the per-lecture pipeline. */
   at?: number;
   /** `transcript_waiting`: why the transcript is not running yet (unknown values are treated as a plain wait). */
-  reason?: 'local_engine' | 'server_busy' | 'server_deferred' | 'server_queue' | (string & {});
+  reason?: 'local_engine' | 'server_busy' | 'server_deferred' | 'server_queue' | 'media' | (string & {});
+  /** `audio_waiting`: what the lecture waits for, the MP4 check/repair or the audio step itself (missing means audio). */
+  step?: 'mp4' | 'audio' | (string & {});
   /** `transcript_waiting`: requests this app already sent to the subtitle server before this one. */
   ahead_requests?: number;
   retry_after_seconds?: number;

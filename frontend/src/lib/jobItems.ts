@@ -78,6 +78,10 @@ const PHASE_LABEL: Record<RowPhase, string> = {
 };
 
 const REMOTE_TRANSCRIBING_LABEL = '자막 만드는 중 (원격)';
+/** `audio_waiting` with `step: "mp4"`: the lecture waits for its video check, not for audio (matches '영상 확인 중'). */
+const WAITING_MP4_LABEL = '영상 확인 대기 중';
+/** `transcript_waiting` with `reason: "media"`: the audio is still being converted or cut for the subtitles. */
+const WAITING_MEDIA_LABEL = '자막 준비 대기 중';
 
 const ACTIVE_PHASES = new Set<RowPhase>(['preparing', 'downloading', 'verifying', 'waiting_audio', 'extracting', 'waiting_transcript', 'transcribing']);
 
@@ -115,6 +119,8 @@ interface Accumulated {
   estimated?: boolean;
   /** Why the subtitle step is waiting (`transcript_waiting.reason`), and what the server told us about the queue. */
   waitReason?: string;
+  /** `audio_waiting.step`; only meaningful while the row is `waiting_audio`. */
+  audioWaitStep?: string;
   waitAhead?: number;
   waitPosition?: number;
   /** Set by `artifact_item_*` events: later events of this lecture cannot change a final state. */
@@ -134,6 +140,7 @@ function positiveInt(value: unknown): number | undefined {
 
 /** Label and extra text for a row that waits for its subtitles. */
 function waitingTranscriptText(state: Accumulated): { label: string; note?: string } {
+  if (state.waitReason === 'media') return { label: WAITING_MEDIA_LABEL };
   if (state.waitPosition !== undefined) return { label: `${PHASE_LABEL.waiting_transcript} (${state.waitPosition}번째)` };
   if (state.waitReason === 'server_deferred') return { label: `${PHASE_LABEL.waiting_transcript} (서버가 잠시 미룸)` };
   if (state.waitReason === 'server_busy') {
@@ -143,6 +150,16 @@ function waitingTranscriptText(state: Accumulated): { label: string; note?: stri
     };
   }
   return { label: PHASE_LABEL.waiting_transcript };
+}
+
+const AUDIO_REACHED_STAGES = new Set(['extracting_audio', 'audio_probe_done', 'audio_progress', 'audio_done', 'audio_skipped', 'transcript_waiting', 'transcript_queued', 'transcript_done', 'transcript_skipped']);
+
+/** True once audio extraction or any later step began, so an `audio_waiting` can only be stale. */
+function hasReachedAudio(seen: Set<string>): boolean {
+  for (const stage of seen) {
+    if (AUDIO_REACHED_STAGES.has(stage) || TRANSCRIBE_STAGES.has(stage)) return true;
+  }
+  return false;
 }
 
 function applyEvent(state: Accumulated, event: ProgressEvent, ctx: StepContext): void {
@@ -179,8 +196,11 @@ function applyEvent(state: Accumulated, event: ProgressEvent, ctx: StepContext):
   }
   if (stage === 'artifact_item_queued') return;
   if (stage === 'audio_waiting') {
+    // A lecture never goes back: a late or reordered wait (the backend moves coalesced waits to the end) is stale once audio or subtitles started.
+    if (hasReachedAudio(state.seen)) return;
     state.phase = 'waiting_audio';
     state.percent = null;
+    state.audioWaitStep = event.step === 'mp4' ? 'mp4' : undefined;
     return;
   }
   if (stage === 'transcript_waiting' || stage === 'transcript_queued') {
@@ -205,6 +225,7 @@ function applyEvent(state: Accumulated, event: ProgressEvent, ctx: StepContext):
     // The file is complete. When audio is wanted next, the lecture is waiting for its turn, not still downloading.
     state.phase = ctx.wantsAudio ? 'waiting_audio' : 'downloading';
     state.percent = ctx.wantsAudio ? null : 100;
+    state.audioWaitStep = undefined;
     return;
   }
   if (stage.startsWith('download_')) {
@@ -218,6 +239,7 @@ function applyEvent(state: Accumulated, event: ProgressEvent, ctx: StepContext):
     const checked = stage === 'video_playable_check_done' || stage === 'video_reconstructed' || stage === 'video_reconstruction_done';
     state.phase = checked && ctx.wantsAudio ? 'waiting_audio' : 'verifying';
     state.percent = null;
+    state.audioWaitStep = undefined;
     return;
   }
   if (stage === 'extracting_audio' || stage === 'audio_probe_done') {
@@ -402,7 +424,7 @@ export function buildJobRows(plan: JobPlan, job: DownloadJobStatus | null): JobR
       rawId: item.rawId,
       title: item.title,
       phase,
-      label: waiting ? waiting.label : phase === 'transcribing' && state.remote ? REMOTE_TRANSCRIBING_LABEL : PHASE_LABEL[phase],
+      label: waiting ? waiting.label : phase === 'waiting_audio' && state.audioWaitStep === 'mp4' ? WAITING_MP4_LABEL : phase === 'transcribing' && state.remote ? REMOTE_TRANSCRIBING_LABEL : PHASE_LABEL[phase],
       percent,
       overall: weightedProgress(ctx, phase, percent),
       written: state.written,
@@ -417,6 +439,35 @@ export function buildJobRows(plan: JobPlan, job: DownloadJobStatus | null): JobR
       if (reasonCode) row.reasonCode = reasonCode;
     }
     return row;
+  });
+}
+
+/** Phases a row can only leave by finishing; their rank is above every running phase. */
+const FINAL_PHASES = new Set<RowPhase>(['done', 'failed', 'cancelled', 'skipped']);
+/** Order of the running phases; waiting for subtitles and making them are one tier because a media wait can follow transcribing. */
+const PHASE_RANK: Record<RowPhase, number> = {
+  waiting: 0, preparing: 1, downloading: 2, verifying: 3, waiting_audio: 4, extracting: 5,
+  waiting_transcript: 6, transcribing: 6, done: 7, failed: 7, cancelled: 7, skipped: 7,
+};
+
+/**
+ * Keeps each row at its furthest point between polls. The backend caps the event list, so old
+ * events can disappear and a running row would fall back to "대기" or 0%. `marks` is keyed by
+ * job id + row id and holds the last row shown; it is updated in place and is safe to call twice
+ * for the same poll. A final state (`artifact_item_*`, `items_status`, job end) always wins.
+ */
+export function holdFurthestRows(jobId: string | null | undefined, rows: JobRow[], marks: Map<string, JobRow>): JobRow[] {
+  if (!jobId) return rows;
+  return rows.map((row) => {
+    const key = `${jobId}:${row.id}`;
+    const before = marks.get(key);
+    let shown = row;
+    if (before && !FINAL_PHASES.has(row.phase)) {
+      if (FINAL_PHASES.has(before.phase) || PHASE_RANK[row.phase] < PHASE_RANK[before.phase]) shown = before;
+      else if (row.overall < before.overall) shown = { ...row, overall: before.overall };
+    }
+    marks.set(key, shown);
+    return shown;
   });
 }
 

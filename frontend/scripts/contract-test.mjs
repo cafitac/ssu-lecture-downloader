@@ -657,11 +657,66 @@ const progress = await import('../src/lib/progress.ts');
   assert.equal(row.label, '자막 대기 중 (1번째)');
   // A reason this app does not know is a plain wait.
   assert.equal(one(txtPlan, [ev('audio_done'), ev('transcript_waiting', { reason: 'something_new' })]).label, '자막 대기 중');
+  // A row never goes back: a late audio_waiting (the backend moves coalesced waits to the end) is ignored once audio or subtitles started.
+  row = one(txtPlan, [ev('download_done'), ev('audio_done'), ev('transcribing'), ev('transcript_progress', { progress_percent: 50 }), ev('audio_waiting', { at: 9 })]);
+  assert.deepEqual([row.phase, row.label, row.percent], ['transcribing', '자막 만드는 중', 50]);
+  row = one(txtPlan, [ev('download_done'), ev('audio_done'), ev('audio_waiting')]);
+  assert.equal(row.phase, 'waiting_transcript');
+  row = one(txtPlan, [ev('download_done'), ev('extracting_audio'), ev('audio_progress', { progress_percent: 30 }), ev('audio_waiting')]);
+  assert.deepEqual([row.phase, row.percent], ['extracting', 30]);
+  // Media waits inside the subtitle step, and audio_waiting for the MP4 step.
+  row = one(txtPlan, [ev('audio_done'), ev('transcript_waiting', { reason: 'media' })]);
+  assert.deepEqual([row.phase, row.label, row.note], ['waiting_transcript', '자막 준비 대기 중', undefined]);
+  row = one(txtPlan, [ev('audio_done'), ev('transcribing'), ev('transcript_waiting', { reason: 'media' })]);
+  assert.deepEqual([row.phase, row.label], ['waiting_transcript', '자막 준비 대기 중']);
+  row = one(txtPlan, [ev('download_done'), ev('audio_waiting', { step: 'mp4' })]);
+  assert.deepEqual([row.phase, row.label], ['waiting_audio', '영상 확인 대기 중']);
+  row = one(txtPlan, [ev('download_done'), ev('audio_waiting', { step: 'audio' })]);
+  assert.equal(row.label, '음성 추출 대기 중');
+  row = one(txtPlan, [ev('download_done'), ev('audio_waiting', { step: 'mp4' }), ev('download_done')]);
+  assert.equal(row.label, '음성 추출 대기 중', 'a later derived wait is not an mp4 wait');
   // The turn comes: waiting text goes away; estimated percent reads "약 n%" only when flagged.
   row = one(txtPlan, [ev('audio_done'), ev('transcript_waiting', { reason: 'server_busy', ahead_requests: 1 }), ev('transcribing', { remote: true }), ev('transcript_progress', { remote: true, progress_percent: 37.4, progress_estimated: true })]);
   assert.deepEqual([row.phase, row.label, row.note, row.percent, row.estimated], ['transcribing', '자막 만드는 중 (원격)', undefined, 37, true]);
   row = one(txtPlan, [ev('transcript_progress', { remote: true, progress_percent: 60 })]);
   assert.equal(row.estimated, undefined);
+
+  // High-water mark: events dropped by the backend's cap cannot send a running row back to "대기" or 0%.
+  {
+    const { holdFurthestRows } = await import('../src/lib/jobItems.ts');
+    const marks = new Map();
+    const poll = (events, extra) => holdFurthestRows('artifact-1', buildJobRows(txtPlan, job('running', events, extra)), marks);
+    let shown = poll([ev('download_done'), ev('audio_done'), ev('transcribing'), ev('transcript_progress', { progress_percent: 50 })]);
+    assert.deepEqual([shown[0].phase, shown[0].percent, shown[0].overall], ['transcribing', 50, 80]);
+    // Next poll: the oldest events were evicted, only a stale download event is left for lecture 1; lecture 2 has none at all.
+    shown = poll([ev('download_progress', { bytes_written: 10, total_bytes: 100 })]);
+    assert.deepEqual([shown[0].phase, shown[0].label, shown[0].percent, shown[0].overall], ['transcribing', '자막 만드는 중', 50, 80]);
+    shown = poll([]);
+    assert.deepEqual([shown[0].phase, shown[0].overall], ['transcribing', 80]);
+    assert.deepEqual([shown[1].phase, shown[1].overall], ['waiting', 0], 'a row that never advanced stays at the start');
+    // Progress inside a phase still moves forward, and the overall value never drops.
+    shown = poll([ev('transcript_progress', { progress_percent: 70 })]);
+    assert.deepEqual([shown[0].percent, shown[0].overall], [70, 88]);
+    // A media wait inside the subtitle step is shown, but the bar does not drop.
+    shown = poll([ev('transcript_waiting', { reason: 'media' })]);
+    assert.deepEqual([shown[0].phase, shown[0].label, shown[0].overall], ['waiting_transcript', '자막 준비 대기 중', 88]);
+    // Final states win over the mark, from events or from the job's final list.
+    shown = poll([ev('artifact_item_failed', { error_code: 'stt_remote_job_lost' })]);
+    assert.equal(shown[0].phase, 'failed');
+    marks.clear();
+    poll([ev('transcribing')]);
+    shown = holdFurthestRows('artifact-1', buildJobRows(txtPlan, job('failed', [], { result: { ok: false, summary: { total: 3, succeeded: 1, failed: 0, cancelled: 2 }, items_status: [{ module_item_id: 1, state: 'done' }, { module_item_id: 2, state: 'cancelled' }, { module_item_id: 3, state: 'cancelled' }] } })), marks);
+    assert.deepEqual(shown.map((row) => row.phase), ['done', 'cancelled', 'cancelled']);
+    // A row that was finished stays finished when its final event is evicted.
+    marks.clear();
+    poll([ev('artifact_item_done')]);
+    assert.equal(poll([])[0].phase, 'done');
+    // Another job (a retry) starts clean, and no job id means no hold.
+    assert.equal(holdFurthestRows('artifact-2', buildJobRows(txtPlan, job('running', [], { job_id: 'artifact-2' })), marks)[0].phase, 'waiting');
+    assert.equal(holdFurthestRows(null, buildJobRows(txtPlan, null), marks)[0].phase, 'waiting');
+    const hookSource = readFileSync(new URL('../src/hooks/useDownloads.ts', import.meta.url), 'utf8');
+    assert.ok(hookSource.includes('holdFurthestRows(job?.job_id'), 'the hook keeps the furthest row per job');
+  }
 
   // One lecture finishes, one fails (its own copy), the third keeps going.
   rows = rowsOf(txtPlan, [
@@ -738,6 +793,8 @@ const progress = await import('../src/lib/progress.ts');
   assert.ok(/role="status" aria-live="polite"/.test(drawer));
   assert.ok(!drawer.includes('role="alert"') && !drawer.includes('aria-live="assertive"'));
   assert.ok(drawer.includes('aria-valuetext'));
+  // The spoken key is phase|label; the note joins it only while waiting for subtitles, so "반복 구간 다시 인식 중 i/n" is not read out for every i.
+  assert.ok(drawer.includes("`${row.phase}|${row.label}${row.phase === 'waiting_transcript' ? `|${row.note ?? ''}` : ''}`"));
 }
 
 // Pure content helpers.

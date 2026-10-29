@@ -28,7 +28,7 @@ function useStatusAnnouncement(rows: JobRow[]): string {
   const previous = useRef<Map<string, string> | null>(null);
   const [message, setMessage] = useState('');
   useEffect(() => {
-    const next = new Map(rows.map((row) => [row.id, `${row.phase}|${row.label}|${row.note ?? ''}`]));
+    const next = new Map(rows.map((row) => [row.id, `${row.phase}|${row.label}${row.phase === 'waiting_transcript' ? `|${row.note ?? ''}` : ''}`]));
     const before = previous.current;
     previous.current = next;
     if (!before) return;

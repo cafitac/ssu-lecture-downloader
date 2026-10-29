@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ApiError, cancelDownloadJob, fetchDownloadJob, isAuthenticationError, startArtifactDownloadJob, startBatchDownloadJob, startDownloadJob } from '../lib/api';
 import { SESSION_EXPIRED_MESSAGE, friendlyError } from '../lib/errors';
-import { buildJobRows, isExpiredMediaUrlCode, isRetryable, readPipelineSummary, summarizeRows } from '../lib/jobItems';
+import { buildJobRows, holdFurthestRows, isExpiredMediaUrlCode, isRetryable, readPipelineSummary, summarizeRows } from '../lib/jobItems';
 import type { JobPlan, JobRow } from '../lib/jobItems';
 import { TERMINAL_DOWNLOAD_STATUSES } from '../lib/progress';
 import type { DownloadJobStatus } from '../lib/types';
@@ -35,7 +35,12 @@ export function useDownloads({ downloadDir, onAuthError, onError }: Options) {
   });
 
   const active = starting || (job !== null && !isTerminal(job));
-  const rows = useMemo<JobRow[]>(() => (plan ? buildJobRows(plan, job) : []), [plan, job]);
+  // Furthest row seen per job id + row id: the backend drops old events past its cap, and a running row must not fall back.
+  const furthestRef = useRef(new Map<string, JobRow>());
+  const rows = useMemo<JobRow[]>(
+    () => (plan ? holdFurthestRows(job?.job_id, buildJobRows(plan, job), furthestRef.current) : []),
+    [plan, job],
+  );
   const summary = useMemo(() => summarizeRows(rows, readPipelineSummary(job)), [rows, job]);
 
   /** Applies a fresh job snapshot; returns false when the failure sends the user back to login. */
@@ -85,6 +90,7 @@ export function useDownloads({ downloadDir, onAuthError, onError }: Options) {
     if (starting || (job !== null && !isTerminal(job)) || nextPlan.items.length === 0) return false;
     if (!automatic) autoRetryUsedRef.current = false;
     planRef.current = nextPlan;
+    furthestRef.current.clear();
     setPlan(nextPlan);
     setJob(null);
     setStartError(null);
