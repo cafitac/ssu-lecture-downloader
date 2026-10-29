@@ -19,7 +19,8 @@
 //!   under the lock into a [`View`], then applied after it is released.
 
 use crate::backend::{BackendManager, BACKEND_TOKEN_HEADER};
-use crate::reminders::{Notifier, OsascriptNotifier};
+use crate::platform::{set_badge, set_tray_title, PlatformNotifier};
+use crate::reminders::Notifier;
 use crate::viewer::{
     bridge_session_and_navigate, session_bridge_target, watch_debug_event, with_watch_assist,
     OfficialViewerSessionBridgeRequest, VIEWER_USER_AGENT,
@@ -136,7 +137,7 @@ pub(crate) struct WatchRuntime {
 
 impl WatchRuntime {
     pub(crate) fn new() -> Self {
-        Self::with_notifier(Arc::new(OsascriptNotifier))
+        Self::with_notifier(Arc::new(PlatformNotifier))
     }
 
     fn with_notifier(notifier: Arc<dyn Notifier>) -> Self {
@@ -252,7 +253,7 @@ fn apply_badge(app: &AppHandle, badge: Option<i64>) {
         tray.last_badge = Some(badge);
     }
     if let Some(window) = app.get_webview_window("main") {
-        let _ = window.set_badge_count(badge);
+        set_badge(&window, badge);
     }
 }
 
@@ -394,7 +395,7 @@ fn apply_tray(app: &AppHandle, view: &TrayView) {
         state.handles.clone()
     };
     if !view.visible {
-        let _ = tray.set_title(Some(""));
+        set_tray_title(&tray, Some(""));
         let _ = tray.set_visible(false);
         return;
     }
@@ -415,7 +416,7 @@ fn apply_tray(app: &AppHandle, view: &TrayView) {
     for (item, text) in handles.rows.iter().zip(&view.menu.rows) {
         let _ = item.set_text(text);
     }
-    let _ = tray.set_title(Some(view.title.as_str()));
+    set_tray_title(&tray, Some(view.title.as_str()));
     let _ = tray.set_visible(true);
 }
 

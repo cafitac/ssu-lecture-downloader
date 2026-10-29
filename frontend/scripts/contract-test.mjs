@@ -50,7 +50,10 @@ const requiredFiles = [
   'src/lib/remoteStt.ts',
   'src/lib/reminders.ts',
   'src-tauri/src/reminders.rs',
-  'src-tauri/src/launch_agent.rs',
+  'src-tauri/src/platform/mod.rs',
+  'src-tauri/src/platform/macos.rs',
+  'src-tauri/src/platform/windows.rs',
+  'src-tauri/src/platform/macos/launch_agent.rs',
   'src/components/ActionBar.tsx',
   'src/components/DownloadDrawer.tsx',
   'src/components/SettingsDialog.tsx',
@@ -1096,8 +1099,13 @@ console.log('frontend contract ok');
   assert.ok(lib.includes('watch_runtime::shutdown('), 'the playback window, menu bar item and badge go away when the app quits');
   assert.ok(readFileSync(new URL('../src-tauri/Cargo.toml', import.meta.url), 'utf8').includes('"tray-icon"'), 'the menu bar item needs the tauri tray-icon feature');
   const runtime = readFileSync(new URL('../src-tauri/src/watch_runtime.rs', import.meta.url), 'utf8').split('#[cfg(test)]')[0];
-  for (const marker of ['TrayIconBuilder', 'set_badge_count', 'OsascriptNotifier', 'always_on_top(true)', '.focused(false)', 'bottom_right_position', 'window_title(']) {
+  for (const marker of ['TrayIconBuilder', 'PlatformNotifier', 'set_badge(', 'set_tray_title(', 'always_on_top(true)', '.focused(false)', 'bottom_right_position', 'window_title(']) {
     assert.ok(runtime.includes(marker), `watch runtime missing ${marker}`);
+  }
+  // The badge call and the osascript notifier moved behind the platform seam (src-tauri/src/platform/macos.rs).
+  const macosShell = readFileSync(new URL('../src-tauri/src/platform/macos.rs', import.meta.url), 'utf8').split('#[cfg(test)]')[0];
+  for (const marker of ['set_badge_count', '/usr/bin/osascript']) {
+    assert.ok(macosShell.includes(marker), `macOS platform shell missing ${marker}`);
   }
   const queueRs = readFileSync(new URL('../src-tauri/src/watch_queue.rs', import.meta.url), 'utf8').split('#[cfg(test)]')[0];
   assert.ok(!queueRs.includes('tauri::'), 'the queue state machine stays free of Tauri types');

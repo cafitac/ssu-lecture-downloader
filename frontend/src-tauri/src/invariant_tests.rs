@@ -6,11 +6,11 @@
 //! the explicit goal of the PR.
 
 use crate::backend::{
-    backend_launch_command_with, packaged_sidecar_executable, BACKEND_HOST, BACKEND_TOKEN_ENV,
-    BACKEND_TOKEN_HEADER, DEFAULT_BACKEND_PORT,
+    backend_launch_command_with, packaged_sidecar_executable, BACKEND_APP_DATA_DIR_ENV,
+    BACKEND_HOST, BACKEND_TOKEN_ENV, BACKEND_TOKEN_HEADER, DEFAULT_BACKEND_PORT,
 };
-use crate::launch_agent::{self, Launchctl};
-use crate::reminders;
+use crate::platform::launch_agent::{self, Launchctl};
+use crate::{platform, reminders};
 use std::cell::RefCell;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -37,7 +37,7 @@ fn app_identifier_and_data_dir_for_a_given_home() {
         "com.local.ssu-lecture-downloader"
     );
     assert_eq!(
-        reminders::data_dir_for_home(Path::new("/Users/me")),
+        platform::app_data_dir_for_home(Path::new("/Users/me")),
         Path::new("/Users/me/Library/Application Support/com.local.ssu-lecture-downloader")
     );
 }
@@ -258,7 +258,7 @@ fn launchctl_calls_when_the_executable_moved_and_on_uninstall() {
 #[test]
 fn osascript_args_are_exact() {
     assert_eq!(
-        reminders::osascript_args("제목", "내용"),
+        platform::osascript_args("제목", "내용"),
         argv(&[
             "-e",
             "on run argv",
@@ -280,6 +280,26 @@ fn backend_connection_constants() {
     assert_eq!(DEFAULT_BACKEND_PORT, 8000);
     assert_eq!(BACKEND_TOKEN_ENV, "SSU_API_TOKEN");
     assert_eq!(BACKEND_TOKEN_HEADER, "X-SSU-Token");
+}
+
+#[test]
+fn shell_hands_the_app_data_dir_to_the_sidecar_under_a_pinned_name() {
+    // Python ignores it until the unit that reads it; the name and the macOS value are the
+    // contract (design/07, step 3 and 4).
+    assert_eq!(BACKEND_APP_DATA_DIR_ENV, "SSU_APP_DATA_DIR");
+    assert_eq!(
+        platform::app_data_dir_for_home(Path::new("/Users/me")),
+        Path::new("/Users/me/Library/Application Support/com.local.ssu-lecture-downloader")
+    );
+    // The spawn applies it from the shell's own app data dir (the Tauri one, same on macOS).
+    let backend = production_part(BACKEND_RS);
+    assert!(backend.contains("command.env(BACKEND_APP_DATA_DIR_ENV, app_data_dir);"));
+    assert!(backend.contains("if let Some(app_data_dir) = &self.state_dir {"));
+}
+
+#[test]
+fn sidecar_executable_name_on_macos_is_unchanged() {
+    assert_eq!(platform::sidecar_executable_name(), "ssu-api");
 }
 
 #[test]
@@ -358,6 +378,7 @@ fn without_a_sidecar_the_backend_runs_uvicorn_from_the_project_root() {
 // file and any new constant name), not delete it.
 
 const BACKEND_RS: &str = include_str!("backend.rs");
+const MACOS_RS: &str = include_str!("platform/macos.rs");
 const REMINDERS_RS: &str = include_str!("reminders.rs");
 
 /// The production part of a source file: everything before its `#[cfg(test)] mod tests`, so a
@@ -375,14 +396,18 @@ fn backend_private_constants_and_spawn_flags_are_unchanged() {
     let backend = production_part(BACKEND_RS);
     assert!(backend.contains(r#"const BACKEND_PID_FILE: &str = "backend.pid";"#));
     assert!(backend.contains("const BACKEND_TERMINATE_GRACE: Duration = Duration::from_secs(3);"));
-    // Spawn: own process group so the whole tree can be signalled at once.
-    assert!(backend.contains(".process_group(0)"));
     assert!(backend.contains(".env(BACKEND_TOKEN_ENV, &token)"));
-    // Stop: the managed child is terminated with the grace constant, SIGTERM to the group, then
-    // SIGKILL to what is left.
+    // The spawn calls the platform seam for its process-group setup; the managed child is
+    // stopped with the grace constant.
+    assert!(backend.contains("configure_sidecar_command(&mut command);"));
     assert!(backend.contains("terminate_process_group(&mut child, BACKEND_TERMINATE_GRACE)"));
-    assert!(backend.contains("libc::killpg(pgid, libc::SIGTERM);"));
-    assert!(backend.contains("libc::killpg(pgid, libc::SIGKILL);"));
+    // Moved to platform/macos.rs with the code itself: spawn in its own process group so the
+    // whole tree can be signalled at once; stop = SIGTERM to the group, then SIGKILL to what is
+    // left.
+    let macos = production_part(MACOS_RS);
+    assert!(macos.contains(".process_group(0)"));
+    assert!(macos.contains("libc::killpg(pgid, libc::SIGTERM);"));
+    assert!(macos.contains("libc::killpg(pgid, libc::SIGKILL);"));
 }
 
 #[test]
