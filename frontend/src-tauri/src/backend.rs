@@ -79,13 +79,22 @@ struct Inner {
     log_path: Option<PathBuf>,
     child: Option<Child>,
     worker_active: bool,
+    /// Bumped by every `begin_start`; lets a worker release only its own slot at the end.
+    worker_id: u64,
     shutting_down: bool,
+    /// An update is being installed: the sidecar was (or is about to be) stopped on purpose.
+    /// Nothing may start the backend, a download or a watch until the install succeeds (the
+    /// app is replaced) or `restart_clearing_update` (the `backend_restart` command) clears it.
+    update_in_progress: bool,
 }
 
 type Launcher = Box<dyn Fn(u16) -> BackendLaunchCommand + Send + Sync>;
 
 pub(crate) struct BackendManager {
     inner: Mutex<Inner>,
+    /// Serializes `prepare_for_update` (held for its whole run). `backend_restart` refuses while
+    /// a prepare holds it.
+    prepare_lock: Mutex<()>,
     launcher: Launcher,
     log_dir: PathBuf,
     state_dir: Option<PathBuf>,
@@ -136,8 +145,11 @@ impl BackendManager {
                 log_path: None,
                 child: None,
                 worker_active: false,
+                worker_id: 0,
                 shutting_down: false,
+                update_in_progress: false,
             }),
+            prepare_lock: Mutex::new(()),
             launcher,
             log_dir,
             state_dir,
@@ -173,8 +185,12 @@ impl BackendManager {
         }
     }
 
+    /// Publishing the final state also releases the startup slot in the same lock hold, so a
+    /// reader that sees `ready`/`failed` never sees a still-active worker (the update latch would
+    /// otherwise refuse with `backend_starting` right after the UI showed the backend ready).
     fn set_ready(&self, mode: &str, port: u16, token: Option<String>) {
         let mut inner = self.lock();
+        inner.worker_active = false;
         inner.state = BackendState::Ready;
         inner.mode = mode.to_string();
         inner.port = port;
@@ -184,10 +200,25 @@ impl BackendManager {
 
     fn set_failed(&self, message: String) {
         let mut inner = self.lock();
+        inner.worker_active = false;
+        Self::publish_failed(&mut inner, message);
+    }
+
+    fn publish_failed(inner: &mut Inner, message: String) {
         inner.state = BackendState::Failed;
         inner.mode = "failed".to_string();
         inner.token = None;
         inner.error = Some(message);
+    }
+
+    /// A worker's last step: give back its own startup slot. A worker whose slot was already
+    /// released (by publishing its final state) and replaced by a newer `begin_start` must not
+    /// clear the newer worker's slot.
+    fn release_worker_slot(&self, worker_id: u64) {
+        let mut inner = self.lock();
+        if inner.worker_id == worker_id {
+            inner.worker_active = false;
+        }
     }
 
     fn is_shutting_down(&self) -> bool {
@@ -199,10 +230,11 @@ impl BackendManager {
     /// never observes the previous `failed` state.
     fn begin_start(&self) -> bool {
         let mut inner = self.lock();
-        if inner.worker_active || inner.shutting_down {
+        if inner.worker_active || inner.shutting_down || inner.update_in_progress {
             return false;
         }
         inner.worker_active = true;
+        inner.worker_id += 1;
         inner.state = BackendState::Starting;
         inner.mode = "starting".to_string();
         inner.error = None;
@@ -212,6 +244,7 @@ impl BackendManager {
 
     fn spawn_worker(self: &Arc<Self>, terminate_previous: bool) {
         let manager = Arc::clone(self);
+        let worker_id = self.lock().worker_id;
         let spawned = std::thread::Builder::new()
             .name("ssu-backend-supervisor".to_string())
             .spawn(move || {
@@ -225,11 +258,12 @@ impl BackendManager {
                     manager.terminate_child();
                     manager.set_failed("백엔드 시작 중 내부 오류가 발생했습니다.".to_string());
                 }
-                manager.lock().worker_active = false;
+                // Normally the final state already released the slot; this covers a worker that
+                // published nothing (aborted by shutdown). Never clear a newer worker's slot.
+                manager.release_worker_slot(worker_id);
             });
         if let Err(error) = spawned {
             self.set_failed(format!("백엔드 시작 스레드를 만들 수 없습니다: {error}"));
-            self.lock().worker_active = false;
         }
     }
 
@@ -422,6 +456,84 @@ impl BackendManager {
         if let Some(state_dir) = &self.state_dir {
             let _ = fs::remove_file(state_dir.join(BACKEND_PID_FILE));
         }
+    }
+
+    /// True from `begin_update` until `restart_clearing_update` (or the process exits).
+    pub(crate) fn update_in_progress(&self) -> bool {
+        self.lock().update_in_progress
+    }
+
+    /// Latch "an update is being installed". Atomic with the startup-worker check, so a
+    /// concurrent `begin_start`/`restart` either ran before (`Err(backend_starting)`, nothing
+    /// latched) or is refused after. Returns whether THIS call acquired the latch (`Ok(false)`:
+    /// it was already set), so only the owner releases it.
+    pub(crate) fn begin_update(&self) -> Result<bool, String> {
+        let mut inner = self.lock();
+        if inner.update_in_progress {
+            return Ok(false);
+        }
+        if inner.worker_active {
+            return Err("backend_starting".to_string());
+        }
+        inner.update_in_progress = true;
+        Ok(true)
+    }
+
+    /// Release the latch without having stopped anything (the guard refused).
+    pub(crate) fn cancel_update(&self) {
+        self.lock().update_in_progress = false;
+    }
+
+    /// Stop the managed sidecar before an update is installed, but stay restartable:
+    /// unlike `shutdown`, this does not set `shutting_down`, so `backend_restart` can start the
+    /// backend again when the install fails.
+    ///
+    /// The worker check, the update latch and taking the child happen under one lock hold, so
+    /// nothing can start a backend in between. `Err` (nothing stopped, nothing latched) while a
+    /// startup worker is running: it would respawn the child.
+    pub(crate) fn stop_for_update(&self) -> Result<(), String> {
+        let child = {
+            let mut inner = self.lock();
+            if !inner.update_in_progress && inner.worker_active {
+                return Err("backend_starting".to_string());
+            }
+            inner.update_in_progress = true;
+            inner.child.take()
+        };
+        if let Some(mut child) = child {
+            terminate_process_group(&mut child, BACKEND_TERMINATE_GRACE);
+        }
+        if let Some(state_dir) = &self.state_dir {
+            let _ = fs::remove_file(state_dir.join(BACKEND_PID_FILE));
+        }
+        // Publish the note without touching `worker_active`: this call does not own a startup
+        // slot (it refused above while one was active).
+        Self::publish_failed(
+            &mut self.lock(),
+            "업데이트를 설치하기 위해 중지했습니다.".to_string(),
+        );
+        Ok(())
+    }
+
+    /// The prepare mutex (see `prepare_for_update`).
+    pub(crate) fn prepare_lock(&self) -> &Mutex<()> {
+        &self.prepare_lock
+    }
+
+    /// `backend_restart`: clear the update latch (a failed install leaves it set, design 06
+    /// Failed state) and restart. `Err(update_in_progress)` while a prepare is running, so a
+    /// restart cannot slip between its latch and its stop. `Ok(false)` if a startup was already
+    /// running.
+    pub(crate) fn restart_clearing_update(self: &Arc<Self>) -> Result<bool, String> {
+        let _prepare = match self.prepare_lock.try_lock() {
+            Ok(guard) => guard,
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => {
+                return Err(crate::update::UPDATE_IN_PROGRESS.to_string());
+            }
+        };
+        self.lock().update_in_progress = false;
+        Ok(self.restart())
     }
 
     /// App exit: stop supervising and kill the owned process tree. Idempotent.
@@ -754,8 +866,9 @@ pub(crate) fn backend_api_connection(
 
 #[tauri::command]
 pub(crate) fn backend_restart(state: tauri::State<'_, Arc<BackendManager>>) -> Result<(), String> {
-    // Returns immediately; the kill-and-respawn runs on the supervisor thread.
-    Arc::clone(&state).restart();
+    // Also the recovery of a failed update install: it clears the update latch. Returns
+    // immediately; the kill-and-respawn runs on the supervisor thread.
+    Arc::clone(&state).restart_clearing_update()?;
     Ok(())
 }
 
@@ -1267,6 +1380,73 @@ HTTPServer(("127.0.0.1", port), Handler).serve_forever()
     }
 
     #[test]
+    fn stop_for_update_kills_the_tree_and_the_backend_can_be_restarted_afterwards() {
+        let dir = temp_root("e2e-stop-for-update");
+        let manager = fake_backend_manager(&dir, "serve");
+        assert!(manager.start_in_background());
+        wait_while_starting(&manager, Duration::from_secs(30));
+        assert_eq!(manager.status().state, BackendState::Ready);
+        assert!(
+            !manager.lock().worker_active,
+            "Ready and the released startup slot are published together"
+        );
+        let grandchild: libc::pid_t = fs::read_to_string(dir.join("grandchild.pid"))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        let child_pid = manager.lock().child.as_ref().unwrap().id() as libc::pid_t;
+
+        // Right after Ready: the final state and the released startup slot are one step.
+        assert_eq!(manager.stop_for_update(), Ok(()));
+
+        // `stop_for_update` returns only after the group is gone (SIGTERM, then SIGKILL).
+        assert!(!pid_alive(child_pid), "backend leader survived the stop");
+        assert!(!pid_alive(grandchild), "backend grandchild orphaned");
+        assert!(!dir.join("state").join(BACKEND_PID_FILE).exists());
+        let status = manager.status();
+        assert_eq!(status.state, BackendState::Failed, "{status:?}");
+        assert!(
+            manager.connection().token.is_none(),
+            "the token died with the process"
+        );
+        // Stopping again (a retried prepare) is harmless.
+        assert_eq!(manager.stop_for_update(), Ok(()));
+        assert!(manager.update_in_progress());
+
+        // While the update is in progress nothing else may start the backend ...
+        assert!(!manager.restart(), "restart is refused while updating");
+        assert!(!manager.start_in_background());
+        assert_eq!(manager.status().state, BackendState::Failed);
+
+        // ... until `backend_restart` (restart_clearing_update) recovers the failed install:
+        // it clears the latch and brings the old app's backend back.
+        assert_eq!(manager.restart_clearing_update(), Ok(true));
+        assert!(!manager.update_in_progress());
+        wait_while_starting(&manager, Duration::from_secs(30));
+        assert_eq!(manager.status().state, BackendState::Ready);
+        manager.shutdown();
+        fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn stop_for_update_is_refused_while_a_startup_is_running() {
+        let root = temp_root("stop-for-update-guard");
+        let manager = BackendManager::new(root.join("project"), None, root.join("logs"), None);
+        manager.lock().worker_active = true;
+        assert_eq!(
+            manager.stop_for_update(),
+            Err("backend_starting".to_string())
+        );
+        assert_eq!(
+            manager.status().state,
+            BackendState::Starting,
+            "nothing was touched"
+        );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
     fn child_exiting_during_startup_fails_fast_with_log_path() {
         let dir = temp_root("e2e-exit");
         let manager = fake_backend_manager(&dir, "exit");
@@ -1337,6 +1517,88 @@ HTTPServer(("127.0.0.1", port), Handler).serve_forever()
         manager.lock().worker_active = true;
         assert!(!manager.restart());
         assert!(!manager.start_in_background());
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn the_update_latch_blocks_starts_until_cancelled() {
+        let root = temp_root("update-latch");
+        let manager = Arc::new(BackendManager::new(
+            root.join("project"),
+            None,
+            root.join("logs"),
+            None,
+        ));
+        assert!(!manager.update_in_progress());
+        assert_eq!(manager.begin_update(), Ok(true), "acquired by this call");
+        assert_eq!(
+            manager.begin_update(),
+            Ok(false),
+            "already held: not the owner"
+        );
+        assert!(manager.update_in_progress());
+        assert!(!manager.begin_start());
+        assert!(!manager.restart());
+        assert!(!manager.start_in_background());
+
+        // The guard refused: the latch is released without touching the backend.
+        manager.cancel_update();
+        assert!(!manager.update_in_progress());
+        assert!(manager.begin_start(), "starting works again");
+        manager.lock().worker_active = false;
+
+        // A latched update cannot be taken over by a startup that begins after it.
+        assert_eq!(manager.begin_update(), Ok(true));
+        assert!(!manager.begin_start());
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn an_old_workers_release_does_not_clear_a_newer_workers_slot() {
+        let root = temp_root("worker-slot");
+        let manager = BackendManager::new(root.join("project"), None, root.join("logs"), None);
+        assert!(manager.begin_start());
+        let old = manager.lock().worker_id;
+        // The old worker published its final state, which released its slot ...
+        manager.set_failed("x".to_string());
+        assert!(!manager.lock().worker_active);
+        // ... a newer start took the slot ...
+        assert!(manager.begin_start());
+        let newer = manager.lock().worker_id;
+        assert_ne!(old, newer);
+        // ... and the old worker's tail release must leave it alone.
+        manager.release_worker_slot(old);
+        assert!(manager.lock().worker_active);
+        manager.release_worker_slot(newer);
+        assert!(!manager.lock().worker_active);
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn stop_for_update_does_not_touch_the_worker_slot_and_restart_waits_for_prepare() {
+        let root = temp_root("stop-slot");
+        let manager = Arc::new(BackendManager::new(
+            root.join("project"),
+            None,
+            root.join("logs"),
+            None,
+        ));
+        assert_eq!(manager.stop_for_update(), Ok(()));
+        assert_eq!(manager.status().state, BackendState::Failed);
+        assert!(!manager.lock().worker_active);
+
+        // A prepare in progress holds the prepare lock: `backend_restart` is refused and the
+        // latch stays.
+        let prepare = manager.prepare_lock().lock().unwrap();
+        assert_eq!(
+            manager.restart_clearing_update(),
+            Err("update_in_progress".to_string())
+        );
+        assert!(manager.update_in_progress());
+        drop(prepare);
+        assert_eq!(manager.restart_clearing_update(), Ok(true));
+        assert!(!manager.update_in_progress());
+        manager.shutdown();
         fs::remove_dir_all(root).ok();
     }
 }

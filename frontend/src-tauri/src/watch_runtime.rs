@@ -528,6 +528,9 @@ pub(crate) fn watch_queue_start(
     request: WatchQueueStartRequest,
 ) -> Result<Snapshot, String> {
     let items = queue_items(&request)?;
+    if crate::update::is_update_in_progress(&app) {
+        return Err(crate::update::UPDATE_IN_PROGRESS.to_string());
+    }
     // A queue that is still running is replaced; its window goes away first.
     let (previous, _) = update(&app, |state| {
         let label = state.window_label.take();
@@ -546,6 +549,12 @@ pub(crate) fn watch_queue_start(
         state.last_activity = Instant::now();
         state.core.start()
     });
+    // The update's guard runs after its latch is set: a queue that became active before the
+    // latch is seen by the guard, one that became active after it is stopped here.
+    if crate::update::is_update_in_progress(&app) {
+        stop_queue(&app);
+        return Err(crate::update::UPDATE_IN_PROGRESS.to_string());
+    }
     publish(&app, &view);
     run_step(&app, step);
     Ok(view.snapshot)
@@ -674,7 +683,7 @@ fn stop_queue(app: &AppHandle) {
 }
 
 /// Whether a queue is running (the main window then hides instead of closing).
-pub(crate) fn is_queue_active(app: &AppHandle) -> bool {
+pub(crate) fn is_queue_active<R: tauri::Runtime>(app: &AppHandle<R>) -> bool {
     app.try_state::<WatchRuntime>().is_some_and(|runtime| {
         let state = lock(&runtime.state);
         state.core.is_active()
