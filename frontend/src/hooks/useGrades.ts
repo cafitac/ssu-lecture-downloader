@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { fetchGradeClasses, fetchGrades, fetchGradesStatus, grantGradesConsent, revokeGradesConsent } from '../lib/api';
-import { GRADES_CONSENT_SAVE_FAILED, classifyGradesError, semesterKey } from '../lib/grades';
+import { GRADES_CONSENT_SAVE_FAILED, classifyGradesError, createRequestSequence, isInvalidConsentVersion, keepKeys, semesterKey } from '../lib/grades';
 import type { GradesFailureKind } from '../lib/grades';
 import type { GradesClassDto, GradesOverviewResponse, GradesSemesterDto } from '../lib/types';
 
@@ -43,6 +43,8 @@ export function useGrades() {
   // Bumped whenever the data must be forgotten (turn off): late answers are dropped.
   const generation = useRef(0);
   const consentVersion = useRef(1);
+  // Newest request per semester: an older answer (expand vs refresh vs retry) is dropped.
+  const sequence = useRef(createRequestSequence());
   const overviewRef = useRef<GradesOverviewResponse | null>(null);
   const expandedRef = useRef<ReadonlySet<string>>(expanded);
   const phaseRef = useRef<GradesPhase>('idle');
@@ -57,6 +59,7 @@ export function useGrades() {
 
   const forget = useCallback(() => {
     generation.current += 1;
+    sequence.current.clear();
     overviewRef.current = null;
     expandedRef.current = new Set();
     setOverview(null);
@@ -74,19 +77,29 @@ export function useGrades() {
     setPhaseBoth('consent');
   }, [forget, setPhaseBoth]);
 
-  const loadClasses = useCallback(async (semester: GradesSemesterDto, refresh: boolean) => {
+  /**
+   * 'open' reads a semester for the first time (or retries); 'refresh' re-reads one that may be on
+   * screen: its table stays visible meanwhile, and a failure keeps it and only marks the refresh failed.
+   */
+  const loadClasses = useCallback(async (semester: GradesSemesterDto, mode: 'open' | 'refresh') => {
     const key = semesterKey(semester.year, semester.semester);
     const run = generation.current;
-    setClasses((current) => ({ ...current, [key]: { state: 'loading' } }));
+    const ticket = sequence.current.begin(key);
+    const keepTable = mode === 'refresh' && classesRef.current[key]?.state === 'ready';
+    if (!keepTable) setClasses((current) => ({ ...current, [key]: { state: 'loading' } }));
     try {
-      const response = await fetchGradeClasses(semester.year, semester.semester, refresh);
-      if (run !== generation.current) return;
+      const response = await fetchGradeClasses(semester.year, semester.semester, mode === 'refresh');
+      if (run !== generation.current || !sequence.current.isLatest(key, ticket)) return;
       setClasses((current) => ({ ...current, [key]: { state: 'ready', classes: response.classes } }));
     } catch (error) {
-      if (run !== generation.current) return;
+      if (run !== generation.current || !sequence.current.isLatest(key, ticket)) return;
       const kind = classifyGradesError(error);
       if (kind === 'consent_required') {
         requireConsent();
+        return;
+      }
+      if (keepTable) {
+        setRefreshFailed(true);
         return;
       }
       setClasses((current) => ({ ...current, [key]: { state: 'error', kind } }));
@@ -109,11 +122,16 @@ export function useGrades() {
       setOverview(response);
       setPhaseBoth('ready');
       if (refresh) {
-        // The open semesters were read before; read them again so every shown number is current.
+        // Class tables of semesters that are not open would show numbers from before this refresh:
+        // drop them (and any answer still on its way); they are read again when opened.
+        const keep = expandedRef.current;
+        sequence.current.invalidate(sequence.current.keys().filter((key) => !keep.has(key)));
+        setClasses((current) => keepKeys(current, keep));
+        // The open semesters are read again, their tables staying on screen meanwhile.
         const open = response.semesters.filter((semester) => expandedRef.current.has(semesterKey(semester.year, semester.semester)));
         for (const semester of open) {
           if (run !== generation.current) return;
-          await loadClasses(semester, true);
+          await loadClasses(semester, 'refresh');
         }
       }
       if (run === generation.current) setRefreshing(false);
@@ -179,7 +197,15 @@ export function useGrades() {
     setConsentBusy(true);
     setConsentError(null);
     try {
-      await grantGradesConsent(consentVersion.current);
+      try {
+        await grantGradesConsent(consentVersion.current);
+      } catch (error) {
+        if (!isInvalidConsentVersion(error)) throw error;
+        // The copy changed since the status was read: take the current version and try once more.
+        const status = await fetchGradesStatus();
+        consentVersion.current = status.current_consent_version || 1;
+        await grantGradesConsent(consentVersion.current);
+      }
       if (run !== generation.current) return;
       setConsent('on');
       setConsentBusy(false);
@@ -207,11 +233,11 @@ export function useGrades() {
     setExpanded(next);
     if (opening) {
       const entry = classesRef.current[key];
-      if (!entry || entry.state === 'error') void loadClasses(semester, false);
+      if (!entry || entry.state === 'error') void loadClasses(semester, 'open');
     }
   }, [loadClasses]);
   const retryClasses = useCallback((semester: GradesSemesterDto) => {
-    void loadClasses(semester, false);
+    void loadClasses(semester, 'open');
   }, [loadClasses]);
 
   /** Settings: ask the backend about the agreement without touching u-SAINT. */

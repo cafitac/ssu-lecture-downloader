@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { GradesController } from '../hooks/useGrades';
 import type { MediaDependencies } from '../hooks/useMediaDependencies';
 import type { RemoteStt } from '../hooks/useRemoteStt';
@@ -220,6 +220,15 @@ function GradesSection({ grades }: { grades: GradesController }) {
   const { consent, refreshStatus, revoke } = grades;
   const [turningOff, setTurningOff] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const offRef = useRef<HTMLParagraphElement>(null);
+  const [focusOff, setFocusOff] = useState(false);
+  // The 끄기 button disappears when it works; the keyboard moves to the line that replaces it.
+  useEffect(() => {
+    if (focusOff && consent === 'off') {
+      offRef.current?.focus();
+      setFocusOff(false);
+    }
+  }, [focusOff, consent]);
   // Asks only whether the user agreed; nothing is read from u-SAINT here.
   useEffect(() => {
     void refreshStatus();
@@ -231,6 +240,7 @@ function GradesSection({ grades }: { grades: GradesController }) {
     const problem = await revoke();
     setError(problem);
     setTurningOff(false);
+    if (!problem) setFocusOff(true);
   }
 
   return (
@@ -246,7 +256,7 @@ function GradesSection({ grades }: { grades: GradesController }) {
           </div>
         </>
       ) : consent === 'off' ? (
-        <p className="muted small">꺼져 있어요. 상단 ‘성적’에서 켤 수 있어요.</p>
+        <p className="muted small" ref={offRef} tabIndex={-1}>꺼져 있어요. 상단 ‘성적’에서 켤 수 있어요.</p>
       ) : consent === 'error' ? (
         <p className="muted small">성적 보기 상태를 확인하지 못했어요.</p>
       ) : (

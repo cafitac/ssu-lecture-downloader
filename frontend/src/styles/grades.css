@@ -2,7 +2,7 @@
 .grades-pane { grid-template-rows: auto minmax(0, 1fr); }
 .grades-pane.has-note { grid-template-rows: auto auto minmax(0, 1fr); }
 .grades-pane.is-consent { grid-template-rows: minmax(0, 1fr); }
-.grades-pane :is(h1, h2)[tabindex="-1"]:focus { outline: none; }
+.grades-pane :is(h1, h2)[tabindex="-1"]:focus, .setting p[tabindex="-1"]:focus { outline: none; }
 
 /* Consent step: one plain card in the middle of the pane. */
 .grades-consent { display: grid; place-items: center; min-height: 0; padding: var(--sp-6); overflow-y: auto; }

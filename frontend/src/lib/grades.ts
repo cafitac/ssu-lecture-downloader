@@ -19,6 +19,8 @@ export const GRADES_RELEASE_NOTE = '이번 학기 성적은 학교가 공개한 
 export const GRADES_EMPTY_TEXT = '아직 확정된 성적이 없어요. 이번 학기 성적은 공개된 뒤에 보여요.';
 export const GRADES_ERROR_TITLE = '지금 가져올 수 없어요';
 export const GRADES_REFRESH_FAILED = '업데이트하지 못했어요';
+export const GRADES_CERTIFICATED_NOTE = '졸업증명서 등 공식 서류에 쓰는 평점이에요.';
+export const GRADES_LECTURES_OK = '강의 기능은 그대로 쓸 수 있어요.';
 export const GRADES_CONSENT_SAVE_FAILED = '동의를 저장하지 못했어요. 다시 시도해 주세요.';
 
 /** Why the grades could not be read. All of them stay inside the grades tab. */
@@ -44,11 +46,63 @@ export function classifyGradesError(error: unknown): GradesFailureKind {
   return 'unavailable';
 }
 
-/** The one reason line under "지금 가져올 수 없어요". */
+/** True for the 400 a stale consent version gets; the client then re-reads the current version. */
+export function isInvalidConsentVersion(error: unknown): boolean {
+  return codeOf(error) === 'invalid_consent_version';
+}
+
+/** The one reason line under "지금 가져올 수 없어요"; every reason ends with the same reassurance. */
 export function gradesFailureText(kind: GradesFailureKind): string {
-  if (kind === 'login_rejected') return 'u-SAINT가 로그인을 받지 않았어요. u-SAINT 웹에서 직접 로그인되는지 확인해 주세요.';
-  if (kind === 'credentials_missing') return '로그인 정보를 찾지 못했어요. 앱에 다시 로그인한 뒤 시도해 주세요.';
-  return 'u-SAINT에 연결하지 못했어요. 강의 기능은 그대로 쓸 수 있어요.';
+  const head = kind === 'login_rejected'
+    ? 'u-SAINT가 로그인을 받지 않았어요. u-SAINT 웹에서 직접 로그인되는지 확인해 주세요.'
+    : kind === 'credentials_missing'
+      ? '로그인 정보를 찾지 못했어요. 앱에 다시 로그인한 뒤 시도해 주세요.'
+      : 'u-SAINT에 연결하지 못했어요.';
+  return `${head} ${GRADES_LECTURES_OK}`;
+}
+
+/**
+ * Keeps only the newest request per key: `begin` hands out a number, and an answer is applied
+ * only while `isLatest` still holds for it (expand, refresh and retry can overlap).
+ */
+export function createRequestSequence() {
+  const latest = new Map<string, number>();
+  let counter = 0;
+  return {
+    begin(key: string): number {
+      counter += 1;
+      latest.set(key, counter);
+      return counter;
+    },
+    isLatest(key: string, ticket: number): boolean {
+      return latest.get(key) === ticket;
+    },
+    /** Drops every answer still on its way for these keys. */
+    invalidate(keys: Iterable<string>): void {
+      for (const key of keys) {
+        counter += 1;
+        latest.set(key, counter);
+      }
+    },
+    keys(): string[] {
+      return [...latest.keys()];
+    },
+    clear(): void {
+      for (const key of [...latest.keys()]) {
+        counter += 1;
+        latest.set(key, counter);
+      }
+    },
+  };
+}
+
+/** The entries of `record` whose key is in `keep` (class tables of semesters that are not open are dropped). */
+export function keepKeys<T>(record: Readonly<Record<string, T>>, keep: ReadonlySet<string>): Record<string, T> {
+  const next: Record<string, T> = {};
+  for (const key of Object.keys(record)) {
+    if (keep.has(key)) next[key] = record[key];
+  }
+  return next;
 }
 
 const SEMESTER_LABEL: Record<GradesSemesterKind, string> = {

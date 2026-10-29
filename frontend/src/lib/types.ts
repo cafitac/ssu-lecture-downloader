@@ -610,8 +610,8 @@ export interface GradesSummaryDto {
 }
 
 export interface GradesRankDto {
-  rank: number;
-  total: number;
+  rank: number | null;
+  total: number | null;
 }
 
 export interface GradesSemesterDto {
@@ -639,8 +639,6 @@ export interface GradesOverviewResponse {
 }
 
 export interface GradesClassDto {
-  year: number;
-  semester: GradesSemesterKind;
   code: string;
   class_name: string;
   credits: number | null;

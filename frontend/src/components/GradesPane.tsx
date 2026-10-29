@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react';
 import type { ClassesEntry, GradesController } from '../hooks/useGrades';
 import {
+  GRADES_CERTIFICATED_NOTE,
   GRADES_CONSENT_ACCEPT,
   GRADES_CONSENT_LATER,
   GRADES_CONSENT_POINTS,
@@ -102,7 +103,7 @@ function SemesterGroup({ semester, open, entry, onToggle, onRetry }: {
         <button type="button" className="grades-group-toggle" aria-expanded={open} aria-controls={`grades-classes-${key}`} onClick={onToggle}>
           <ChevronIcon open={open} />
           <span className="grades-group-name">{label}</span>
-          {count !== null && <span className="week-count">{count}</span>}
+          {count !== null && <span className="week-count">{count}과목</span>}
           {semester.academic_probation === true && <span className="chip chip-danger">학사경고</span>}
           {stats && <span className="grades-group-stats">{stats}</span>}
         </button>
@@ -123,6 +124,8 @@ export function GradesPane({ grades, now, onLater }: Props) {
 
   // When the button the user pressed disappears (consent -> loading), keep the keyboard in the pane.
   useEffect(() => {
+    // Never pull the keyboard out of an open dialog (e.g. Settings > 끄기 resets this pane underneath it).
+    if (document.querySelector('[aria-modal="true"]')) return;
     const active = document.activeElement;
     if (!active || active === document.body) headingRef.current?.focus();
   }, [phase]);
@@ -208,6 +211,7 @@ export function GradesPane({ grades, now, onLater }: Props) {
               {overview.certificated_summary && (
                 <details className="grades-certificated">
                   <summary>증명 기준 보기</summary>
+                  <p className="muted small">{GRADES_CERTIFICATED_NOTE}</p>
                   <SummaryList summary={overview.certificated_summary} label="증명 기준 요약" />
                 </details>
               )}
