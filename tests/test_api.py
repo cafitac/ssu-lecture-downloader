@@ -777,7 +777,7 @@ def test_audio_extraction_job_succeeds_with_output_path(tmp_path, monkeypatch):
 
 
 def test_stt_status_explains_how_to_install_whisper(monkeypatch):
-    monkeypatch.setattr('ssu_lecture_downloader.core.stt.check_stt_provider', lambda provider='faster_whisper': STTProviderStatus(provider=provider, installed=False, available=False, install_hint='앱 패키지에 포함된 faster-whisper를 찾지 못했습니다.'))
+    monkeypatch.setattr('ssu_lecture_downloader.core.stt.check_stt_provider', lambda provider='faster_whisper', **_: STTProviderStatus(provider=provider, installed=False, available=False, install_hint='앱 패키지에 포함된 faster-whisper를 찾지 못했습니다.'))
     client = TestClient(create_app(service_factory=FakeService, credential_store=FakeCredentialStore()))
 
     response = client.get('/api/stt/providers/status')
@@ -789,7 +789,7 @@ def test_stt_status_explains_how_to_install_whisper(monkeypatch):
 
 def test_media_dependency_status_reports_ffmpeg_and_stt(monkeypatch):
     monkeypatch.setattr('ssu_lecture_downloader.core.postprocess_media.ffmpeg_status', lambda: {'name': 'ffmpeg', 'installed': True, 'available': True, 'source': 'bundled', 'path': '/app/ffmpeg', 'install_hint': None})
-    monkeypatch.setattr('ssu_lecture_downloader.core.stt.check_stt_provider', lambda provider='faster_whisper': STTProviderStatus(provider=provider, installed=provider == 'faster_whisper', available=provider == 'faster_whisper'))
+    monkeypatch.setattr('ssu_lecture_downloader.core.stt.check_stt_provider', lambda provider='faster_whisper', **_: STTProviderStatus(provider=provider, installed=provider == 'faster_whisper', available=provider == 'faster_whisper'))
     client = TestClient(create_app(service_factory=FakeService, credential_store=FakeCredentialStore()))
 
     response = client.get('/api/media/dependencies/status')
@@ -808,7 +808,7 @@ def test_stt_job_writes_transcript(tmp_path, monkeypatch):
     audio = tmp_path / 'lecture.wav'
     audio.write_bytes(b'audio')
 
-    def fake_transcribe(request, on_progress=None, should_cancel=None):
+    def fake_transcribe(request, on_progress=None, should_cancel=None, **_):
         text = tmp_path / 'lecture.transcript.txt'
         text.write_text('[00:00:00] 안녕하세요', encoding='utf-8')
         return TranscriptionResult(ok=True, audio_path=request.audio_path, text_path=text, md_path=None, json_path=None, segments=[TranscriptSegment(start=0, end=1, text='안녕하세요')])
@@ -837,7 +837,7 @@ def test_artifact_download_job_supports_txt_only_selection(tmp_path, monkeypatch
             on_progress({'stage': 'audio_progress', 'progress_percent': 100})
         return AudioExtractionResult(ok=True, input_path=request.input_path, output_path=output, file_size=5)
 
-    def fake_transcribe(request, on_progress=None, should_cancel=None):
+    def fake_transcribe(request, on_progress=None, should_cancel=None, **_):
         text = Path(request.output_dir or tmp_path) / f'{request.audio_path.stem}.transcript.txt'
         text.write_text('[00:00:00] 안녕하세요', encoding='utf-8')
         if on_progress:
@@ -903,7 +903,7 @@ def test_artifact_txt_reuses_existing_mp3_without_downloading_video(tmp_path, mo
         calls['extract'] += 1
         raise AssertionError('existing mp3 should be reused without audio extraction')
 
-    def fake_transcribe(request, on_progress=None, should_cancel=None):
+    def fake_transcribe(request, on_progress=None, should_cancel=None, **_):
         calls['transcribe'] += 1
         assert request.audio_path == existing_mp3
         text = existing_mp3.with_name(f'{existing_mp3.stem}.transcript.txt')

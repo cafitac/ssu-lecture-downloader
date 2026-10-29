@@ -233,7 +233,7 @@ def test_stt_job_that_raises_is_failed_not_stuck_running(tmp_path, monkeypatch):
     audio = tmp_path / 'lecture.wav'
     audio.write_bytes(b'audio')
 
-    def explode(request, on_progress=None, should_cancel=None):
+    def explode(request, on_progress=None, should_cancel=None, **_):
         raise PermissionError('cannot write transcript')
 
     monkeypatch.setattr('ssu_lecture_downloader.core.stt.transcribe_audio', explode)
@@ -291,7 +291,7 @@ def test_stt_job_cancel_endpoint_reaches_the_running_transcription(tmp_path, mon
     audio.write_bytes(b'audio')
     running = threading.Event()
 
-    def slow_transcribe(request, on_progress=None, should_cancel=None):
+    def slow_transcribe(request, on_progress=None, should_cancel=None, **_):
         running.set()
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline and not (should_cancel and should_cancel()):
@@ -454,7 +454,7 @@ def test_artifact_transcript_is_only_reused_when_the_txt_commit_marker_exists(tm
     videos[0].with_name('lecture-1.transcript.json').write_text('{}')
     transcribed = []
 
-    def fake_transcribe(request, on_progress=None, should_cancel=None):
+    def fake_transcribe(request, on_progress=None, should_cancel=None, **_):
         transcribed.append(request.audio_path.name)
         text = request.audio_path.with_suffix('.transcript.txt')
         text.write_text('done')

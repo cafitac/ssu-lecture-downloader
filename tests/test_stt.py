@@ -20,7 +20,6 @@ from ssu_lecture_downloader.core.stt import (
 def test_check_stt_provider_returns_install_help_when_whisper_missing(monkeypatch):
     monkeypatch.setattr('ssu_lecture_downloader.core.stt._has_faster_whisper', lambda: False)
     monkeypatch.setattr('ssu_lecture_downloader.core.stt.shutil.which', lambda name: None)
-    monkeypatch.setattr('ssu_lecture_downloader.core.stt.faster_whisper_platform_supported', lambda: True)
 
     status = check_stt_provider('faster_whisper')
 
@@ -102,7 +101,6 @@ def test_transcribe_audio_returns_install_help_for_missing_whisper(tmp_path: Pat
     audio = tmp_path / 'lecture.wav'
     audio.write_bytes(b'audio')
     monkeypatch.setattr('ssu_lecture_downloader.core.stt._has_faster_whisper', lambda: False)
-    monkeypatch.setattr('ssu_lecture_downloader.core.stt.faster_whisper_platform_supported', lambda: True)
 
     result = transcribe_audio(TranscriptionRequest(audio_path=audio, provider='faster_whisper'))
 
@@ -208,14 +206,16 @@ def test_write_transcript_files_leaves_no_partial_files_when_a_write_fails(tmp_p
 
 def test_faster_whisper_reports_intel_mac_as_unsupported(monkeypatch):
     from ssu_lecture_downloader.core import stt
+    from ssu_lecture_downloader.platforms import macos
 
+    capability = macos.MacOSPlatform()
     monkeypatch.setattr(stt, '_has_faster_whisper', lambda: False)
-    monkeypatch.setattr(stt.sys, 'platform', 'darwin')
-    monkeypatch.setattr(stt.platform, 'machine', lambda: 'x86_64')
-    status = stt.check_stt_provider('faster_whisper')
+    monkeypatch.setattr(macos.sys, 'platform', 'darwin')
+    monkeypatch.setattr(macos.platform, 'machine', lambda: 'x86_64')
+    status = stt.check_stt_provider('faster_whisper', stt_capability=capability)
     assert status.available is False
     assert status.platform_supported is False
     assert 'Intel' in (status.install_hint or '')
 
-    monkeypatch.setattr(stt.platform, 'machine', lambda: 'arm64')
-    assert stt.check_stt_provider('faster_whisper').platform_supported is True
+    monkeypatch.setattr(macos.platform, 'machine', lambda: 'arm64')
+    assert stt.check_stt_provider('faster_whisper', stt_capability=capability).platform_supported is True

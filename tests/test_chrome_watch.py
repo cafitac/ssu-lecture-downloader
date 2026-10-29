@@ -8,6 +8,9 @@ import pytest
 
 from ssu_lecture_downloader.core import chrome_watch as cw
 from ssu_lecture_downloader.core.chrome_cdp import CdpClient, CdpClosed, CdpError, WebSocketTransport
+from ssu_lecture_downloader.platforms import macos
+from ssu_lecture_downloader.platforms.base import PROFILE_DIR_ENV
+from ssu_lecture_downloader.platforms.macos import MacOSPlatform
 
 from chrome_fakes import (
     FRAME_SESSION,
@@ -57,15 +60,21 @@ class Harness:
             self.plans.append((course_id, module_item_id, course_name))
             return plan(course_id, module_item_id, course_name) if plan else plan_for(module_item_id)
 
-        self.manager = cw.ChromeWatchManager(
-            provider,
-            background_launch=False,
-            profile_dir=self.profile,
+        platform = MacOSPlatform(
             candidates=self.candidates,
             popen=FakePopen,
-            connect=lambda url: self.connect(url),
             killpg=self.kills,
             process_command=lambda pid: None,
+            clock=self.clock,
+            sleep=self.clock.sleep,
+        )
+        self.manager = cw.ChromeWatchManager(
+            provider,
+            chrome_locator=platform,
+            process_tree=platform,
+            background_launch=False,
+            profile_dir=self.profile,
+            connect=lambda url: self.connect(url),
             clock=self.clock,
             sleep=self.clock.sleep,
             timings=timings,
@@ -100,25 +109,25 @@ class Harness:
 
 def test_find_chrome_returns_the_first_executable_candidate(tmp_path):
     chrome = make_chrome_binary(tmp_path)
-    assert cw.find_chrome([tmp_path / "nope", chrome]) == chrome
-    assert cw.find_chrome([tmp_path / "nope"]) is None
+    assert macos.find_chrome([tmp_path / "nope", chrome]) == chrome
+    assert macos.find_chrome([tmp_path / "nope"]) is None
     plain = tmp_path / "plain"
     plain.write_text("x", encoding="utf-8")
-    assert cw.find_chrome([plain]) is None
+    assert macos.find_chrome([plain]) is None
 
 
 def test_default_candidates_are_the_system_and_user_applications_folders(monkeypatch):
     monkeypatch.undo()  # conftest hides the real candidates from every test
-    paths = [str(path) for path in cw.chrome_candidates()]
+    paths = [str(path) for path in macos.chrome_candidates()]
     assert paths[0] == "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
     assert paths[1].endswith("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
 
 
 def test_default_profile_dir_is_inside_the_app_support_folder_and_can_be_overridden(monkeypatch, tmp_path):
-    monkeypatch.delenv(cw.PROFILE_DIR_ENV, raising=False)
-    assert str(cw.default_profile_dir()).endswith("Library/Application Support/com.local.ssu-lecture-downloader/chrome-watch-profile")
-    monkeypatch.setenv(cw.PROFILE_DIR_ENV, str(tmp_path / "p"))
-    assert cw.default_profile_dir() == tmp_path / "p"
+    monkeypatch.delenv(PROFILE_DIR_ENV, raising=False)
+    assert str(MacOSPlatform().chrome_profile_dir()).endswith("Library/Application Support/com.local.ssu-lecture-downloader/chrome-watch-profile")
+    monkeypatch.setenv(PROFILE_DIR_ENV, str(tmp_path / "p"))
+    assert MacOSPlatform().chrome_profile_dir() == tmp_path / "p"
 
 
 def test_chrome_args_use_a_private_profile_a_free_debug_port_and_no_visibility_tricks():
@@ -509,13 +518,20 @@ def test_a_chrome_left_by_an_earlier_backend_run_is_killed_by_its_pid_file(tmp_p
         calls.append((pgid, sig))
         alive["yes"] = False
 
-    manager = cw.ChromeWatchManager(
-        lambda *a: {},
-        background_launch=False,
-        profile_dir=profile,
+    clock = FakeClock()
+    platform = MacOSPlatform(
         killpg=killpg,
         process_command=lambda pid: f"/x/Chrome --user-data-dir={profile}" if alive["yes"] else None,
-        clock=FakeClock(),
+        clock=clock,
+        sleep=lambda s: None,
+    )
+    manager = cw.ChromeWatchManager(
+        lambda *a: {},
+        chrome_locator=platform,
+        process_tree=platform,
+        background_launch=False,
+        profile_dir=profile,
+        clock=clock,
         sleep=lambda s: None,
     )
     manager.shutdown()
@@ -528,12 +544,16 @@ def test_a_pid_file_of_an_unrelated_process_is_not_signalled(tmp_path):
     profile.mkdir(parents=True)
     (profile.parent / "chrome-watch.pid").write_text("777", encoding="utf-8")
     calls: list = []
-    manager = cw.ChromeWatchManager(
-        lambda *a: {},
-        background_launch=False,
-        profile_dir=profile,
+    platform = MacOSPlatform(
         killpg=lambda *args: calls.append(args),
         process_command=lambda pid: "/usr/bin/python something-else",
+    )
+    manager = cw.ChromeWatchManager(
+        lambda *a: {},
+        chrome_locator=platform,
+        process_tree=platform,
+        background_launch=False,
+        profile_dir=profile,
     )
     manager.shutdown()
     assert calls == []
@@ -553,7 +573,7 @@ def test_chrome_window_is_minimized_when_each_lecture_starts_playing(tmp_path):
 
 def test_background_launch_uses_open_without_activation_and_a_separate_instance():
     args = cw.build_chrome_args("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", "/tmp/p")
-    launch = cw.build_background_launch("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", args)
+    launch = macos.build_background_launch("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", args)
     assert launch[:6] == ["/usr/bin/open", "-g", "-n", "-W", "-a", "/Applications/Google Chrome.app"]
     assert launch[6] == "--args" and launch[7:] == args[1:]
 
@@ -565,8 +585,8 @@ def test_chrome_main_pid_is_the_browser_process_of_the_dedicated_profile():
         (12, "/Applications/Google Chrome.app/.../Google Chrome Helper --type=renderer --user-data-dir=/tmp/p"),
         (13, "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome --user-data-dir=/Users/me/other"),
     ]
-    assert cw.find_chrome_main_pid(rows, "/tmp/p") == 11
-    assert cw.find_chrome_main_pid(rows, "/tmp/none") is None
+    assert macos.find_chrome_main_pid(rows, "/tmp/p") == 11
+    assert macos.find_chrome_main_pid(rows, "/tmp/none") is None
 
 
 def test_audio_is_silenced_by_chrome_not_by_muting_the_video():

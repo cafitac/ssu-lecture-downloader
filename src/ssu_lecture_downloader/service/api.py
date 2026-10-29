@@ -21,7 +21,7 @@ from ssu_lecture_downloader.service.api_errors import (
     UnhandledErrorMiddleware,
     background_job_error_code,
 )
-from ssu_lecture_downloader.service.app_context import AppContext, default_download_dir
+from ssu_lecture_downloader.service.app_context import AppContext, Platform, build_remote_stt, default_download_dir, select_platform
 from ssu_lecture_downloader.core.chrome_watch import ChromeWatchManager
 from ssu_lecture_downloader.service.credentials import CredentialStore, default_credential_store
 from ssu_lecture_downloader.core.jobs import JobRunner
@@ -61,6 +61,7 @@ def create_app(
     api_token: str | None = None,
     remote_stt: RemoteSTTService | None = None,
     chrome_watch: ChromeWatchManager | None = None,
+    platform: Platform | None = None,
 ) -> FastAPI:
     contexts: list[AppContext] = []
 
@@ -92,15 +93,17 @@ def create_app(
         return JSONResponse(status_code=exc.status_code, content=_json_error_body(exc.detail, exc.status_code))
 
     service = (service_factory or _default_service)()
-    output_dir = default_output_dir or default_download_dir()
+    platform = platform or select_platform()
+    output_dir = default_output_dir or default_download_dir(platform)
     ctx = AppContext(
         service=service,
         credentials=credential_store or default_credential_store(),
         default_output_dir=output_dir,
         media_paths=MediaPathPolicy(output_dir),
         runner=JobRunner(error_code_for=lambda exc: background_job_error_code(exc, service)),
-        remote_stt=remote_stt or RemoteSTTService(),
+        remote_stt=remote_stt or build_remote_stt(platform),
         chrome_watch=chrome_watch,
+        platform=platform,
     )
     contexts.append(ctx)
     for module in (health_routes, credentials_routes, download_routes, media_routes, stt_remote_routes, watch_routes, lms_pages_routes):

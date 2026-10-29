@@ -22,10 +22,7 @@ from __future__ import annotations
 import atexit
 import json
 import logging
-import os
 import queue
-import signal
-import subprocess
 import threading
 import time
 import uuid
@@ -40,9 +37,6 @@ from ssu_lecture_downloader.core.chrome_watch_helper import BINDING_NAME, HELPER
 
 logger = logging.getLogger("ssu_lecture_downloader.chrome_watch")
 
-CHROME_RELATIVE_PATH = "Google Chrome.app/Contents/MacOS/Google Chrome"
-APP_SUPPORT_NAME = "com.local.ssu-lecture-downloader"
-PROFILE_DIR_ENV = "SSU_CHROME_WATCH_PROFILE_DIR"
 MAX_QUEUE_ITEMS = 200
 WINDOW_SIZE = (1000, 700)
 
@@ -99,30 +93,6 @@ class Timings:
 
 
 # --------------------------------------------------------------------- launch helpers
-
-
-def chrome_candidates() -> list[Path]:
-    return [
-        Path("/Applications") / CHROME_RELATIVE_PATH,
-        Path.home() / "Applications" / CHROME_RELATIVE_PATH,
-    ]
-
-
-def find_chrome(candidates: list[Path] | None = None) -> Path | None:
-    for candidate in candidates if candidates is not None else chrome_candidates():
-        try:
-            if candidate.is_file() and os.access(candidate, os.X_OK):
-                return candidate
-        except OSError:
-            continue
-    return None
-
-
-def default_profile_dir() -> Path:
-    override = os.environ.get(PROFILE_DIR_ENV, "").strip()
-    if override:
-        return Path(override).expanduser()
-    return Path.home() / "Library" / "Application Support" / APP_SUPPORT_NAME / "chrome-watch-profile"
 
 
 def build_chrome_args(chrome: Path | str, profile_dir: Path | str, *, window_size: tuple[int, int] = WINDOW_SIZE) -> list[str]:
@@ -211,54 +181,6 @@ def cookie_params(cookie: dict[str, Any]) -> dict[str, Any] | None:
     if same_site:
         params["sameSite"] = same_site
     return params
-
-
-def default_process_command(pid: int) -> str | None:
-    try:
-        completed = subprocess.run(["ps", "-p", str(pid), "-o", "command="], capture_output=True, text=True, timeout=5, check=False)
-    except (OSError, subprocess.SubprocessError):
-        return None
-    text = completed.stdout.strip()
-    return text or None
-
-
-def build_background_launch(chrome: Path | str, chrome_args: list[str]) -> list[str]:
-    """Start Chrome through `open -g` so it does not come to the front and take the keyboard.
-
-    `-n` forces a separate instance (own profile), `-W` keeps `open` alive until that instance
-    quits, so the launcher process still tells whether Chrome is running.
-    """
-    chrome = Path(chrome)
-    bundle = next((parent for parent in chrome.parents if parent.suffix == ".app"), None)
-    if bundle is None:
-        return chrome_args
-    return ["/usr/bin/open", "-g", "-n", "-W", "-a", str(bundle), "--args", *chrome_args[1:]]
-
-
-def default_list_processes() -> list[tuple[int, str]]:
-    try:
-        completed = subprocess.run(["ps", "-axo", "pid=,command="], capture_output=True, text=True, timeout=5, check=False)
-    except (OSError, subprocess.SubprocessError):
-        return []
-    rows: list[tuple[int, str]] = []
-    for line in completed.stdout.splitlines():
-        head, _, command = line.strip().partition(" ")
-        if head.isdigit():
-            rows.append((int(head), command.strip()))
-    return rows
-
-
-def find_chrome_main_pid(processes: list[tuple[int, str]], profile_dir: Path | str) -> int | None:
-    """The browser process of the dedicated profile (helpers carry a --type= flag)."""
-    marker = f"--user-data-dir={profile_dir}"
-    for pid, command in processes:
-        if marker in command and "--type=" not in command and not command.startswith("/usr/bin/open"):
-            return pid
-    return None
-
-
-def default_killpg(pgid: int, sig: int) -> None:
-    os.killpg(pgid, sig)
 
 
 # ----------------------------------------------------------------------------- queue
@@ -360,26 +282,24 @@ class ChromeWatchManager:
         self,
         plan_provider: PlanProvider,
         *,
+        chrome_locator: Any,
+        process_tree: Any,
+        app_paths: Any | None = None,
         profile_dir: Path | None = None,
-        candidates: list[Path] | None = None,
-        popen: Callable[..., Any] | None = None,
         connect: Callable[[str], Transport] | None = None,
-        killpg: Callable[[int, int], None] | None = None,
-        process_command: Callable[[int], str | None] | None = None,
-        list_processes: Callable[[], list[tuple[int, str]]] | None = None,
         background_launch: bool = True,
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
         timings: Timings | None = None,
     ) -> None:
         self._plan_provider = plan_provider
+        # Injected by the composition root (core never imports the platform adapters):
+        # a ChromeLocator, a ProcessTree and (unless profile_dir is given) an AppPaths.
+        self._chrome_locator = chrome_locator
+        self._process_tree = process_tree
+        self._app_paths = app_paths
         self._profile_dir = profile_dir
-        self._candidates = candidates
-        self._popen = popen or subprocess.Popen
         self._connect = connect or WebSocketTransport
-        self._killpg = killpg or default_killpg
-        self._process_command = process_command or default_process_command
-        self._list_processes = list_processes or default_list_processes
         self._background_launch = background_launch
         self._chrome_pid: int | None = None
         self._clock = clock
@@ -393,10 +313,14 @@ class ChromeWatchManager:
 
     @property
     def profile_dir(self) -> Path:
-        return self._profile_dir or default_profile_dir()
+        if self._profile_dir is not None:
+            return self._profile_dir
+        if self._app_paths is None:
+            raise ValueError("ChromeWatchManager needs profile_dir or app_paths")
+        return self._app_paths.chrome_profile_dir()
 
     def chrome_path(self) -> Path | None:
-        return find_chrome(self._candidates)
+        return self._chrome_locator.find_chrome()
 
     def start(self, raw_items: list[dict[str, Any]]) -> dict[str, Any]:
         items = _clean_items(raw_items)
@@ -623,13 +547,7 @@ class ChromeWatchManager:
             pass
         try:
             args = build_chrome_args(chrome, profile)
-            proc = self._popen(
-                build_background_launch(chrome, args) if self._background_launch else args,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                start_new_session=True,
-            )
+            proc = self._process_tree.spawn(chrome, args, background=self._background_launch)
         except OSError as exc:
             raise ChromeWatchError("chrome_launch_failed", "Chrome을 실행하지 못했어요.") from exc
         self._chrome_pid = None if self._background_launch else proc.pid
@@ -650,7 +568,7 @@ class ChromeWatchManager:
                 raise _Stopped() from exc
             raise
         if self._background_launch:
-            self._chrome_pid = find_chrome_main_pid(self._list_processes(), profile)
+            self._chrome_pid = self._process_tree.find_main_pid(profile)
             if self._chrome_pid is not None:
                 self._write_pidfile(self._chrome_pid)
         events: "queue.Queue[tuple[str, dict[str, Any], str | None]]" = queue.Queue()
@@ -682,49 +600,18 @@ class ChromeWatchManager:
             pass
 
     def _terminate(self, proc: Any) -> None:
-        """SIGTERM the whole process group, then SIGKILL what is left. The profile stays."""
+        """Stop the Chrome process tree (the platform's ProcessTree decides how). The profile stays."""
+        self._process_tree.terminate(
+            proc,
+            chrome_pid=self._chrome_pid,
+            profile_dir=self.profile_dir,
+            background=self._background_launch,
+            grace=self.timings.terminate_grace,
+        )
         if self._background_launch:
-            # `proc` is the `open -W` launcher; Chrome itself is a separate process group.
-            pid = self._chrome_pid or find_chrome_main_pid(self._list_processes(), self.profile_dir)
-            if pid is not None:
-                self._signal_group(pid, signal.SIGTERM)
-                deadline = self._clock() + self.timings.terminate_grace
-                while self._process_command(pid) and self._clock() < deadline:
-                    self._sleep(0.1)
-                if self._process_command(pid):
-                    self._signal_group(pid, signal.SIGKILL)
-            try:
-                proc.wait(timeout=5)
-            except Exception:  # noqa: BLE001
-                pass
             self._chrome_pid = None
-            try:
-                self._pidfile().unlink()
-            except OSError:
-                pass
-            return
-        pgid = getattr(proc, "pid", None)
-        if isinstance(pgid, int) and pgid > 0:
-            self._signal_group(pgid, signal.SIGTERM)
-            deadline = self._clock() + self.timings.terminate_grace
-            while proc.poll() is None and self._clock() < deadline:
-                self._sleep(0.05)
-            if proc.poll() is None:
-                self._signal_group(pgid, signal.SIGKILL)
-                try:
-                    proc.wait(timeout=2)
-                except Exception:  # noqa: BLE001
-                    pass
         try:
             self._pidfile().unlink()
-        except OSError:
-            pass
-
-    def _signal_group(self, pgid: int, sig: int) -> None:
-        try:
-            self._killpg(pgid, sig)
-        except (ProcessLookupError, PermissionError):
-            pass
         except OSError:
             pass
 
@@ -735,14 +622,7 @@ class ChromeWatchManager:
             pid = int(pidfile.read_text(encoding="utf-8").strip())
         except (OSError, ValueError):
             return
-        command = self._process_command(pid)
-        if command and str(self.profile_dir) in command:
-            self._signal_group(pid, signal.SIGTERM)
-            deadline = self._clock() + self.timings.terminate_grace
-            while self._process_command(pid) and self._clock() < deadline:
-                self._sleep(0.1)
-            if self._process_command(pid):
-                self._signal_group(pid, signal.SIGKILL)
+        self._process_tree.kill_stale(pid, self.profile_dir, self.timings.terminate_grace)
         try:
             pidfile.unlink()
         except OSError:

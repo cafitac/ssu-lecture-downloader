@@ -1,25 +1,20 @@
 from __future__ import annotations
 
 import os
-import subprocess
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
 
 from dotenv import load_dotenv
 
+from ssu_lecture_downloader.core.credentials import CredentialPair, CredentialStore
 
-@dataclass(frozen=True)
-class CredentialPair:
-    username: str
-    password: str
-
-
-class CredentialStore(Protocol):
-    def get(self) -> CredentialPair | None: ...
-    def status(self) -> dict[str, object]: ...
-    def save(self, pair: CredentialPair) -> None: ...
-    def delete(self) -> None: ...
+__all__ = [
+    "CompositeCredentialStore",
+    "CredentialPair",
+    "CredentialStore",
+    "EnvCredentialStore",
+    "InMemoryCredentialStore",
+    "default_credential_store",
+]
 
 
 class EnvCredentialStore:
@@ -70,67 +65,6 @@ class InMemoryCredentialStore:
 
     def delete(self) -> None:
         self._pair = None
-
-
-class MacOSKeychainCredentialStore:
-    def __init__(self, *, service_name: str = "ssu-lecture-downloader", runner=None) -> None:
-        self.service_name = service_name
-        self.runner = runner or self._run_security
-
-    @staticmethod
-    def _run_security(args: list[str]) -> str:
-        completed = subprocess.run(args, check=True, text=True, capture_output=True)
-        return completed.stdout.strip()
-
-    def _find(self, account: str) -> str | None:
-        try:
-            value = self.runner(["security", "find-generic-password", "-w", "-s", self.service_name, "-a", account])
-        except Exception:
-            return None
-        value = str(value).strip()
-        return value or None
-
-    def get(self) -> CredentialPair | None:
-        username = self._find("SSU_USERNAME")
-        password = self._find("SSU_PASSWORD")
-        if not username or not password:
-            return None
-        return CredentialPair(username=username, password=password)
-
-    def status(self) -> dict[str, object]:
-        return {
-            "source": "keychain",
-            "username_present": self._find("SSU_USERNAME") is not None,
-            "password_present": self._find("SSU_PASSWORD") is not None,
-            "can_write": True,
-        }
-
-    def save(self, pair: CredentialPair) -> None:
-        self._save_value("SSU_USERNAME", pair.username)
-        self._save_value("SSU_PASSWORD", pair.password)
-
-    def _save_value(self, account: str, value: str) -> None:
-        self.runner([
-            "security",
-            "add-generic-password",
-            "-U",
-            "-s",
-            self.service_name,
-            "-a",
-            account,
-            "-w",
-            value,
-        ])
-
-    def delete(self) -> None:
-        self._delete_value("SSU_USERNAME")
-        self._delete_value("SSU_PASSWORD")
-
-    def _delete_value(self, account: str) -> None:
-        try:
-            self.runner(["security", "delete-generic-password", "-s", self.service_name, "-a", account])
-        except Exception:
-            pass
 
 
 class CompositeCredentialStore:

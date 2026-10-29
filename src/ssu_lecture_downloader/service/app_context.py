@@ -9,6 +9,8 @@ from typing import Any, TypeVar
 
 from fastapi import APIRouter, HTTPException
 
+from ssu_lecture_downloader.platforms import select_platform
+from ssu_lecture_downloader.platforms.base import Platform
 from ssu_lecture_downloader.service.api_errors import (
     background_job_error_code,
     missing_credentials_error,
@@ -19,19 +21,21 @@ from ssu_lecture_downloader.service.credentials import CredentialStore
 from ssu_lecture_downloader.core.jobs import Job, JobOutcome, JobRegistry, JobRunner
 from ssu_lecture_downloader.service.security import MediaPathPolicy
 from ssu_lecture_downloader.core.stt_remote import RemoteSTTService
+from ssu_lecture_downloader.core.stt_remote_config import RemoteSTTSettingsStore
 
-APP_DOWNLOAD_FOLDER_NAME = "SSU Lecture Downloader"
+__all__ = ["AppContext", "Platform", "build_remote_stt", "default_download_dir", "select_platform"]
 
 T = TypeVar("T")
 
 
-def default_download_dir() -> Path:
-    """Where downloads go when the request names no folder.
+def default_download_dir(platform: Platform | None = None) -> Path:
+    """Where downloads go when the request names no folder (the platform adapter decides)."""
+    return (platform or select_platform()).default_download_dir()
 
-    Deliberately not relative to the working directory: a packaged app starts with
-    its cwd inside the .app bundle, which is read-only or discarded on update.
-    """
-    return Path.home() / "Downloads" / APP_DOWNLOAD_FOLDER_NAME
+
+def build_remote_stt(platform: Platform) -> RemoteSTTService:
+    """The remote-STT service whose settings file lives where the platform says, written privately."""
+    return RemoteSTTService(RemoteSTTSettingsStore(path_provider=platform.stt_config_path, writer=platform))
 
 
 @dataclass
@@ -46,9 +50,15 @@ class AppContext:
     stt_jobs: JobRegistry = field(default_factory=JobRegistry)
     dependency_jobs: JobRegistry = field(default_factory=JobRegistry)
     artifact_jobs: JobRegistry = field(default_factory=JobRegistry)
-    remote_stt: RemoteSTTService = field(default_factory=RemoteSTTService)
+    remote_stt: RemoteSTTService | None = None
     # Built by the watch router (it needs the credentials/service helpers above) unless injected.
     chrome_watch: ChromeWatchManager | None = None
+    # The OS adapter handed to core objects (AppPaths, ChromeLocator, ProcessTree, SttCapability, SecretFileWriter).
+    platform: Platform = field(default_factory=select_platform)
+
+    def __post_init__(self) -> None:
+        if self.remote_stt is None:
+            self.remote_stt = build_remote_stt(self.platform)
 
     def require_credentials(self) -> tuple[str, str]:
         pair = self.credentials.get()

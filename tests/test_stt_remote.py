@@ -17,6 +17,7 @@ from ssu_lecture_downloader.core.stt_remote import (
     WhisperCppServerProvider,
     repair_repeated_cues,
 )
+from ssu_lecture_downloader.platforms.macos import MacOSPlatform
 from ssu_lecture_downloader.core.stt_remote_config import RemoteSTTSettingsStore
 
 
@@ -207,7 +208,7 @@ def fake_ffmpeg(monkeypatch):
 
 
 def service_for(tmp_path: Path, url: str, **config) -> RemoteSTTService:
-    service = RemoteSTTService(RemoteSTTSettingsStore(tmp_path / 'stt.json'))
+    service = RemoteSTTService(RemoteSTTSettingsStore(tmp_path / 'stt.json', writer=MacOSPlatform()))
     service.update({'enabled': True, 'kind': 'whisper_cpp_server', 'base_url': url, **config})
     return service
 
@@ -275,8 +276,8 @@ def test_pipeline_empty_transcript_is_an_error(tmp_path, fake_ffmpeg):
 def test_fake_provider_and_disabled_remote_keep_the_local_path(tmp_path):
     audio = tmp_path / 'lecture.wav'
     audio.write_bytes(b'audio')
-    disabled = RemoteSTTService(RemoteSTTSettingsStore(tmp_path / 'stt.json'))
-    enabled_url_service = RemoteSTTService(RemoteSTTSettingsStore(tmp_path / 'other.json'))
+    disabled = RemoteSTTService(RemoteSTTSettingsStore(tmp_path / 'stt.json', writer=MacOSPlatform()))
+    enabled_url_service = RemoteSTTService(RemoteSTTSettingsStore(tmp_path / 'other.json', writer=MacOSPlatform()))
     enabled_url_service.update({'enabled': True, 'base_url': 'http://127.0.0.1:9'})
 
     local = transcribe_audio(TranscriptionRequest(audio_path=audio, provider='fake', overwrite=True), remote=disabled)
@@ -297,5 +298,5 @@ def test_check_reports_reachability_and_remembers_it(tmp_path):
     assert status['reachable'] is False and status['error_code'] == 'stt_remote_unreachable'
     assert down.provider_status()['available'] is False and down.provider_status()['installed'] is True
 
-    unconfigured = RemoteSTTService(RemoteSTTSettingsStore(tmp_path / 'none.json'))
+    unconfigured = RemoteSTTService(RemoteSTTSettingsStore(tmp_path / 'none.json', writer=MacOSPlatform()))
     assert unconfigured.check()['error_code'] == 'stt_remote_not_configured'

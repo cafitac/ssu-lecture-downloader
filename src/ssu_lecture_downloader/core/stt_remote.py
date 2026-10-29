@@ -264,8 +264,8 @@ class OpenAICompatibleProvider:
 class RemoteSTTService:
     """Settings + managed SSH tunnel + provider construction for the one configured remote server."""
 
-    def __init__(self, store: RemoteSTTSettingsStore | None = None, tunnel: SshTunnel | None = None) -> None:
-        self.store = store or RemoteSTTSettingsStore()
+    def __init__(self, store: RemoteSTTSettingsStore, tunnel: SshTunnel | None = None) -> None:
+        self.store = store
         self.tunnel = tunnel or SshTunnel()
         self._lock = threading.RLock()
         self._last_check: dict[str, Any] = {'reachable': None, 'last_error': None, 'error_code': None, 'checked_at': None}
