@@ -5,13 +5,13 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from ssu_lecture_downloader import chrome_watch as cw
-from ssu_lecture_downloader.api import create_app
-from ssu_lecture_downloader.app_context import AppContext
-from ssu_lecture_downloader.credentials import CredentialPair
-from ssu_lecture_downloader.jobs import JobRunner
-from ssu_lecture_downloader.routers.watch import chrome_plan_provider
-from ssu_lecture_downloader.security import MediaPathPolicy
+from ssu_lecture_downloader.core import chrome_watch as cw
+from ssu_lecture_downloader.service.api import create_app
+from ssu_lecture_downloader.service.app_context import AppContext
+from ssu_lecture_downloader.core.credentials import CredentialPair
+from ssu_lecture_downloader.core.jobs import JobRunner
+from ssu_lecture_downloader.service.routers.watch import chrome_plan_provider
+from ssu_lecture_downloader.service.security import MediaPathPolicy
 from test_api import ExpiredSessionFakeService, FakeCredentialStore, FakeService
 
 from chrome_fakes import FakeBrowser, FakePlayer, FakePopen, make_chrome_binary

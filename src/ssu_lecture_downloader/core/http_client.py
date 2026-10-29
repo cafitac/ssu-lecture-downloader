@@ -5,7 +5,7 @@ from typing import Any
 
 from curl_cffi import requests
 
-from ssu_lecture_downloader.trace import NetworkTrace, TraceEntry
+from ssu_lecture_downloader.core.trace import NetworkTrace, TraceEntry
 
 DEFAULT_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36",

@@ -2,8 +2,8 @@ from dataclasses import dataclass
 
 import pytest
 
-from ssu_lecture_downloader.auth import SsuHttpLoginClient
-from ssu_lecture_downloader.errors import LoginFlowError
+from ssu_lecture_downloader.core.auth import SsuHttpLoginClient
+from ssu_lecture_downloader.core.errors import LoginFlowError
 
 
 @dataclass

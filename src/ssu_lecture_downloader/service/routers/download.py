@@ -6,8 +6,8 @@ from typing import Any
 
 from fastapi import APIRouter
 
-from ssu_lecture_downloader.api_errors import raise_for_result_error
-from ssu_lecture_downloader.api_models import (
+from ssu_lecture_downloader.service.api_errors import raise_for_result_error
+from ssu_lecture_downloader.service.api_models import (
     ArtifactDownloadRequest,
     BatchDownloadRequest,
     DownloadPlanRequest,
@@ -15,10 +15,10 @@ from ssu_lecture_downloader.api_models import (
     validate_artifact_request,
     validate_batch_request,
 )
-from ssu_lecture_downloader.app_context import AppContext, add_job_routes
-from ssu_lecture_downloader.artifacts import ArtifactPipeline
-from ssu_lecture_downloader.jobs import Job, JobOutcome, ProgressCollector
-from ssu_lecture_downloader.payloads import (
+from ssu_lecture_downloader.service.app_context import AppContext, add_job_routes
+from ssu_lecture_downloader.service.artifacts import ArtifactPipeline
+from ssu_lecture_downloader.core.jobs import Job, JobOutcome, ProgressCollector
+from ssu_lecture_downloader.service.payloads import (
     batch_payload,
     download_payload,
     native_download_payload,

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from ssu_lecture_downloader.app_context import AppContext
+from ssu_lecture_downloader.service.app_context import AppContext
 
 
 def build_router(ctx: AppContext) -> APIRouter:

@@ -6,15 +6,16 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException
 
-from ssu_lecture_downloader import dependency_installer, postprocess_media, stt
-from ssu_lecture_downloader.api_models import (
+from ssu_lecture_downloader.service import dependency_installer
+from ssu_lecture_downloader.core import postprocess_media, stt
+from ssu_lecture_downloader.service.api_models import (
     MediaDependencyInstallRequest,
     VideoEnsurePlayableRequest,
 )
-from ssu_lecture_downloader.app_context import AppContext, add_job_routes
-from ssu_lecture_downloader.jobs import Job, JobOutcome, ProgressCollector
-from ssu_lecture_downloader.postprocess_media import AudioExtractionRequest
-from ssu_lecture_downloader.stt import TranscriptionRequest
+from ssu_lecture_downloader.service.app_context import AppContext, add_job_routes
+from ssu_lecture_downloader.core.jobs import Job, JobOutcome, ProgressCollector
+from ssu_lecture_downloader.core.postprocess_media import AudioExtractionRequest
+from ssu_lecture_downloader.core.stt import TranscriptionRequest
 
 # Quick jobs report their final state in the start response when they finish this fast.
 QUICK_JOB_WAIT_SECONDS = 0.2

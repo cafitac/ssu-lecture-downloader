@@ -13,11 +13,11 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, ConfigDict
 
-from ssu_lecture_downloader.progress import emit_progress
-from ssu_lecture_downloader.stt_cues import TranscriptSegment, format_srt
+from ssu_lecture_downloader.core.progress import emit_progress
+from ssu_lecture_downloader.core.stt_cues import TranscriptSegment, format_srt
 
 if TYPE_CHECKING:
-    from ssu_lecture_downloader.stt_remote import RemoteSTTService
+    from ssu_lecture_downloader.core.stt_remote import RemoteSTTService
 
 STTProvider = Literal['fake', 'faster_whisper', 'whisper_cpp']
 DEFAULT_STT_LANGUAGE = 'ko'
@@ -284,7 +284,7 @@ def transcribe_audio(
         return TranscriptionResult(ok=False, audio_path=audio_path, error_code='audio_not_file', message='입력 경로가 파일이 아닙니다.')
     if remote is not None and request.provider != 'fake' and remote.is_enabled():
         # A configured remote server wins over the local engine (which may not even run on this Mac).
-        from ssu_lecture_downloader.stt_remote import transcribe_with_remote
+        from ssu_lecture_downloader.core.stt_remote import transcribe_with_remote
 
         return transcribe_with_remote(request.model_copy(update={'audio_path': audio_path}), remote, on_progress=on_progress, should_cancel=should_cancel)
     status = check_stt_provider(request.provider)

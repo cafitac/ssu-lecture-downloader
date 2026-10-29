@@ -1,6 +1,6 @@
 import pytest
 
-from ssu_lecture_downloader.auth import (
+from ssu_lecture_downloader.core.auth import (
     CanvasLoginForm,
     LoginCryption,
     extract_canvas_login_form,
@@ -8,7 +8,7 @@ from ssu_lecture_downloader.auth import (
     extract_login_cryption,
     extract_sso_redirect,
 )
-from ssu_lecture_downloader.errors import LoginFlowError
+from ssu_lecture_downloader.core.errors import LoginFlowError
 
 
 def test_extract_sso_redirect_builds_lms_callback_url_from_smartid_script():

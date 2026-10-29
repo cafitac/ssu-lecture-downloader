@@ -4,8 +4,8 @@ from pathlib import Path
 import pytest
 from curl_cffi.requests import exceptions as curl_exceptions
 
-from ssu_lecture_downloader import download as download_mod
-from ssu_lecture_downloader.download import DownloadCancelled, DownloadPlan, IncompleteDownload, download_to_plan
+from ssu_lecture_downloader.core import download as download_mod
+from ssu_lecture_downloader.core.download import DownloadCancelled, DownloadPlan, IncompleteDownload, download_to_plan
 
 
 class StreamingResponse:
@@ -46,7 +46,7 @@ def make_plan(tmp_path: Path) -> DownloadPlan:
 
 
 def test_plan_download_path_maps_commons_movie_content_type_to_playable_mp4_extension(tmp_path: Path):
-    from ssu_lecture_downloader.download import plan_download_path
+    from ssu_lecture_downloader.core.download import plan_download_path
 
     plan = plan_download_path(
         output_dir=tmp_path,

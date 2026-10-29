@@ -1,7 +1,7 @@
 import threading
 import time
 
-from ssu_lecture_downloader.jobs import JobCancelled, JobOutcome, JobRegistry, JobRunner, ProgressCollector, append_compacted_progress
+from ssu_lecture_downloader.core.jobs import JobCancelled, JobOutcome, JobRegistry, JobRunner, ProgressCollector, append_compacted_progress
 
 
 def wait_for(job, statuses=('succeeded', 'failed', 'cancelled'), timeout=5):

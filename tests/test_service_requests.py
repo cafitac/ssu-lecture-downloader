@@ -5,9 +5,9 @@ import time
 from collections import Counter
 from pathlib import Path
 
-from ssu_lecture_downloader.auth import SessionState
-from ssu_lecture_downloader.login_flow import LoginDiscoveryResult
-from ssu_lecture_downloader.service import SsuLectureService
+from ssu_lecture_downloader.core.auth import SessionState
+from ssu_lecture_downloader.core.login_flow import LoginDiscoveryResult
+from ssu_lecture_downloader.core.lms_service import SsuLectureService
 
 COURSE_IDS = (101, 102, 103)
 

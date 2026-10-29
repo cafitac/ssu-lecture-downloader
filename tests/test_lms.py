@@ -1,5 +1,5 @@
-from ssu_lecture_downloader.lms import LearningXLister, is_video_item
-from ssu_lecture_downloader.models import LectureItem
+from ssu_lecture_downloader.core.lms import LearningXLister, is_video_item
+from ssu_lecture_downloader.core.models import LectureItem
 
 
 class FakeResponse:

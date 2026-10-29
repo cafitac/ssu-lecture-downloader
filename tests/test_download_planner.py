@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from ssu_lecture_downloader.download import (
+from ssu_lecture_downloader.core.download import (
     DownloadPlan,
     download_to_plan,
     plan_download_path,
@@ -116,7 +116,7 @@ def test_download_to_plan_creates_course_dir_and_writes_response_bytes(tmp_path:
 
 
 def test_skip_reuses_a_file_saved_earlier_under_another_title(tmp_path):
-    from ssu_lecture_downloader.download import plan_download_path
+    from ssu_lecture_downloader.core.download import plan_download_path
 
     course_dir = tmp_path / 'UI디자인'
     course_dir.mkdir()

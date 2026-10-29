@@ -1,7 +1,7 @@
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Thread
 
-from ssu_lecture_downloader.http_client import HttpClient
+from ssu_lecture_downloader.core.http_client import HttpClient
 
 
 class RecordingHandler(BaseHTTPRequestHandler):

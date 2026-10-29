@@ -47,6 +47,7 @@ jobs:
         run: |
           uv sync
           uv run pytest --durations=15
+          uv run lint-imports
 
       - uses: actions/setup-node@v7
         with:

@@ -6,15 +6,15 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException
 
-from ssu_lecture_downloader.api_errors import (
+from ssu_lecture_downloader.service.api_errors import (
     authentication_failed_error,
     clear_service_cache,
     raise_for_result_error,
 )
-from ssu_lecture_downloader.api_models import CredentialRequest
-from ssu_lecture_downloader.app_context import AppContext
-from ssu_lecture_downloader.credentials import CredentialPair
-from ssu_lecture_downloader.download import find_downloaded_files
+from ssu_lecture_downloader.service.api_models import CredentialRequest
+from ssu_lecture_downloader.service.app_context import AppContext
+from ssu_lecture_downloader.core.credentials import CredentialPair
+from ssu_lecture_downloader.core.download import find_downloaded_files
 
 
 def build_router(ctx: AppContext) -> APIRouter:

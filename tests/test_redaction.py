@@ -1,4 +1,4 @@
-from ssu_lecture_downloader.redaction import redact_headers, redact_url, redact_mapping
+from ssu_lecture_downloader.core.redaction import redact_headers, redact_url, redact_mapping
 
 
 def test_redacts_sensitive_headers_without_dropping_safe_context():

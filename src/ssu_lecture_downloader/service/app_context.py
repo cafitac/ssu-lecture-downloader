@@ -9,16 +9,16 @@ from typing import Any, TypeVar
 
 from fastapi import APIRouter, HTTPException
 
-from ssu_lecture_downloader.api_errors import (
+from ssu_lecture_downloader.service.api_errors import (
     background_job_error_code,
     missing_credentials_error,
     service_exception_error,
 )
-from ssu_lecture_downloader.chrome_watch import ChromeWatchManager
-from ssu_lecture_downloader.credentials import CredentialStore
-from ssu_lecture_downloader.jobs import Job, JobOutcome, JobRegistry, JobRunner
-from ssu_lecture_downloader.security import MediaPathPolicy
-from ssu_lecture_downloader.stt_remote import RemoteSTTService
+from ssu_lecture_downloader.core.chrome_watch import ChromeWatchManager
+from ssu_lecture_downloader.core.credentials import CredentialStore
+from ssu_lecture_downloader.core.jobs import Job, JobOutcome, JobRegistry, JobRunner
+from ssu_lecture_downloader.service.security import MediaPathPolicy
+from ssu_lecture_downloader.core.stt_remote import RemoteSTTService
 
 APP_DOWNLOAD_FOLDER_NAME = "SSU Lecture Downloader"
 

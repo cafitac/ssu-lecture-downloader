@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from ssu_lecture_downloader.stt import (
+from ssu_lecture_downloader.core.stt import (
     DEFAULT_STT_BEAM_SIZE,
     DEFAULT_STT_INITIAL_PROMPT,
     DEFAULT_STT_MODEL,
@@ -18,9 +18,9 @@ from ssu_lecture_downloader.stt import (
 
 
 def test_check_stt_provider_returns_install_help_when_whisper_missing(monkeypatch):
-    monkeypatch.setattr('ssu_lecture_downloader.stt._has_faster_whisper', lambda: False)
-    monkeypatch.setattr('ssu_lecture_downloader.stt.shutil.which', lambda name: None)
-    monkeypatch.setattr('ssu_lecture_downloader.stt.faster_whisper_platform_supported', lambda: True)
+    monkeypatch.setattr('ssu_lecture_downloader.core.stt._has_faster_whisper', lambda: False)
+    monkeypatch.setattr('ssu_lecture_downloader.core.stt.shutil.which', lambda name: None)
+    monkeypatch.setattr('ssu_lecture_downloader.core.stt.faster_whisper_platform_supported', lambda: True)
 
     status = check_stt_provider('faster_whisper')
 
@@ -101,8 +101,8 @@ def test_transcribe_audio_fake_provider_emits_progress(tmp_path: Path):
 def test_transcribe_audio_returns_install_help_for_missing_whisper(tmp_path: Path, monkeypatch):
     audio = tmp_path / 'lecture.wav'
     audio.write_bytes(b'audio')
-    monkeypatch.setattr('ssu_lecture_downloader.stt._has_faster_whisper', lambda: False)
-    monkeypatch.setattr('ssu_lecture_downloader.stt.faster_whisper_platform_supported', lambda: True)
+    monkeypatch.setattr('ssu_lecture_downloader.core.stt._has_faster_whisper', lambda: False)
+    monkeypatch.setattr('ssu_lecture_downloader.core.stt.faster_whisper_platform_supported', lambda: True)
 
     result = transcribe_audio(TranscriptionRequest(audio_path=audio, provider='faster_whisper'))
 
@@ -123,7 +123,7 @@ def install_fake_faster_whisper(monkeypatch, segments, constructed):
     import sys
     import types
 
-    from ssu_lecture_downloader import stt
+    from ssu_lecture_downloader.core import stt
 
     class FakeWhisperModel:
         def __init__(self, size, device='auto', compute_type='auto'):
@@ -140,7 +140,7 @@ def install_fake_faster_whisper(monkeypatch, segments, constructed):
 
 
 def test_faster_whisper_model_is_loaded_once_per_size_device_and_compute_type(tmp_path: Path, monkeypatch):
-    from ssu_lecture_downloader import stt
+    from ssu_lecture_downloader.core import stt
 
     constructed = []
     install_fake_faster_whisper(monkeypatch, [FakeWhisperSegment(0, 2, '안녕')], constructed)
@@ -160,7 +160,7 @@ def test_faster_whisper_model_is_loaded_once_per_size_device_and_compute_type(tm
 
 
 def test_faster_whisper_segment_loop_stops_when_cancel_is_requested(tmp_path: Path, monkeypatch):
-    from ssu_lecture_downloader import stt
+    from ssu_lecture_downloader.core import stt
 
     constructed = []
     install_fake_faster_whisper(monkeypatch, [FakeWhisperSegment(0, 1, 'one'), FakeWhisperSegment(1, 2, 'two'), FakeWhisperSegment(2, 3, 'three')], constructed)
@@ -183,7 +183,7 @@ def test_faster_whisper_segment_loop_stops_when_cancel_is_requested(tmp_path: Pa
 
 
 def test_write_transcript_files_leaves_no_partial_files_when_a_write_fails(tmp_path: Path, monkeypatch):
-    from ssu_lecture_downloader import stt
+    from ssu_lecture_downloader.core import stt
 
     audio = tmp_path / 'lecture.wav'
     audio.write_bytes(b'audio')
@@ -207,7 +207,7 @@ def test_write_transcript_files_leaves_no_partial_files_when_a_write_fails(tmp_p
 
 
 def test_faster_whisper_reports_intel_mac_as_unsupported(monkeypatch):
-    from ssu_lecture_downloader import stt
+    from ssu_lecture_downloader.core import stt
 
     monkeypatch.setattr(stt, '_has_faster_whisper', lambda: False)
     monkeypatch.setattr(stt.sys, 'platform', 'darwin')

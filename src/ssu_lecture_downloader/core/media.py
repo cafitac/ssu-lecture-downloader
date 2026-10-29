@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from ssu_lecture_downloader.errors import LoginFlowError
+from ssu_lecture_downloader.core.errors import LoginFlowError
 
 
 @dataclass(frozen=True)

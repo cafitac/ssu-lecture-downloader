@@ -13,22 +13,22 @@ from time import monotonic
 from typing import Any, TypeVar
 from urllib.parse import quote, urljoin
 
-from ssu_lecture_downloader.cache import TtlCache
-from ssu_lecture_downloader.canvas_files import (
+from ssu_lecture_downloader.core.cache import TtlCache
+from ssu_lecture_downloader.core.canvas_files import (
     CANVAS_ORIGIN,
     MAX_PAGE_FILES,
     extract_file_links,
     parse_canvas_json,
 )
-from ssu_lecture_downloader.download import (
+from ssu_lecture_downloader.core.download import (
     DownloadCancelled,
     DownloadPlan,
     download_to_plan,
     plan_download_path,
 )
-from ssu_lecture_downloader.errors import is_session_lost, is_signed_url_failure, response_status
-from ssu_lecture_downloader.http_client import HttpClient
-from ssu_lecture_downloader.lms import (
+from ssu_lecture_downloader.core.errors import is_session_lost, is_signed_url_failure, response_status
+from ssu_lecture_downloader.core.http_client import HttpClient
+from ssu_lecture_downloader.core.lms import (
     DEFAULT_TERM_ID_CANDIDATES,
     LearningXLister,
     _optional_int,
@@ -36,22 +36,22 @@ from ssu_lecture_downloader.lms import (
     latest_current_term,
     learningx_api_headers,
 )
-from ssu_lecture_downloader.login_flow import LoginDiscoveryResult
-from ssu_lecture_downloader.media import (
+from ssu_lecture_downloader.core.login_flow import LoginDiscoveryResult
+from ssu_lecture_downloader.core.media import (
     AttendanceItemMedia,
     extract_lti_launch_form,
     parse_attendance_item_media,
     parse_commons_download,
 )
-from ssu_lecture_downloader.models import (
+from ssu_lecture_downloader.core.models import (
     CourseSummary,
     DeadlineItem,
     build_deadline_items,
     is_task,
     sort_deadline_rows,
 )
-from ssu_lecture_downloader.progress import emit_progress
-from ssu_lecture_downloader.redaction import redact_url
+from ssu_lecture_downloader.core.progress import emit_progress
+from ssu_lecture_downloader.core.redaction import redact_url
 
 MEDIA_DOWNLOAD_MAX_ATTEMPTS = 8
 # A login older than this is renewed even without an auth failure, so long-lived
@@ -82,7 +82,7 @@ LoginFunc = Callable[[str, str, object], LoginDiscoveryResult]
 def _default_login_func(username: str, password: str, http: object) -> LoginDiscoveryResult:
     # Imported lazily: the login flow pulls in bs4 and cryptography, which the API
     # does not need until the first login.
-    from ssu_lecture_downloader.login_flow import run_http_login_discovery
+    from ssu_lecture_downloader.core.login_flow import run_http_login_discovery
 
     return run_http_login_discovery(username, password, http)
 

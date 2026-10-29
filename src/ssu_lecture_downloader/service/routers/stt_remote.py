@@ -7,8 +7,8 @@ from typing import Any
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from ssu_lecture_downloader.app_context import AppContext
-from ssu_lecture_downloader.stt_remote_config import ConfigError
+from ssu_lecture_downloader.service.app_context import AppContext
+from ssu_lecture_downloader.core.stt_remote_config import ConfigError
 
 
 class TunnelConfigRequest(BaseModel):

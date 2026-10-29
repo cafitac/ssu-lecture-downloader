@@ -1,6 +1,6 @@
 import json
 
-from ssu_lecture_downloader.trace import NetworkTrace, TraceEntry
+from ssu_lecture_downloader.core.trace import NetworkTrace, TraceEntry
 
 
 def test_trace_entry_exports_redacted_request_response_context():
