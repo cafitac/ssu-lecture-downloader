@@ -1,233 +1,58 @@
-# ssu-lecture-downloader
+# SSU Lecture Downloader
 
-Terminal-first groundwork for a local Soongsil LMS lecture discovery/downloader app.
+숭실대 LMS(canvas.ssu.ac.kr) 강의를 내려받고 자막을 만들어 주는 데스크톱 앱입니다.
 
-Current implementation target: pure HTTP login/network discovery with `curl-cffi`, a reusable service layer, local FastAPI API, React/Vite UI prototype, Tauri desktop shell, native Finder download-folder picker, session-first UX, explicit term selection, cancellable auto-polled background download jobs, selected/uncompleted batch planning/download, streaming byte progress, temp-file/atomic-write downloads, retry/resume support, redacted traces, and compact CLI output plus `--json`.
+## 할 수 있는 것
 
-## Local development
+- 강의 영상(MP4) 다운로드. 여러 개를 골라 한 번에 받을 수 있습니다.
+- 영상에서 음성(MP3) 추출
+- 음성을 글로 옮긴 자막(TXT) 만들기. 앱이 직접 만드는 방식(Apple 실리콘 빌드)과 따로 띄운 자막 서버에 맡기는 방식이 있습니다.
+- 안 본 강의를 순서대로 자동 재생. 앱 안의 작은 창이나 Chrome 창에서 재생합니다.
+- 영상, 과제, 퀴즈 마감 알림. 마감 하루 전과 3시간 전에 알려 줍니다.
+- 성적 보기(u-SAINT). 처음 쓸 때 동의 화면이 나옵니다.
 
-1. Copy `.env.example` to `.env` only for terminal CLI commands.
-2. Fill in `SSU_USERNAME` and `SSU_PASSWORD` locally for CLI fallback. The API/UI login flow ignores `.env`, does not use Keychain by default, and keeps entered credentials only in the running backend process memory.
-3. Do not commit `.env` or `.local/` artifacts.
+## 설치
 
-## Commands
+macOS만 지원합니다. Intel Mac용으로 빌드되고, Apple 실리콘 Mac에서는 Rosetta로 실행됩니다. Windows는 준비 중입니다.
 
-Login only:
+앱에 서명이 없어서 처음 열 때 "확인되지 않은 개발자" 경고가 뜹니다. 아래 둘 중 하나로 열면 됩니다.
+
+- 시스템 설정 → 개인정보 보호 및 보안에서 "그래도 열기"를 누릅니다.
+- 터미널에서 아래 명령을 한 번 실행합니다.
 
 ```bash
-uv run ssu-lecture-downloader login --trace .local/traces/login.json
-uv run ssu-lecture-downloader login --trace .local/traces/login.json --json
+xattr -dr com.apple.quarantine "/Applications/SSU Lecture Downloader.app"
 ```
 
-Login and summarize LearningX courses/modules/lecture-like items:
+자동 업데이트는 아직 없습니다. 새 버전은 직접 받아서 바꿔 주세요.
+
+자막은 Intel 빌드에 자막 엔진이 들어 있지 않아서, 설정의 "원격 자막 서버"를 지정해야 만들어집니다. 자세한 내용은 [docs/stt.md](docs/stt.md)에 있습니다.
+
+## 쓰기 전에
+
+- 본인 계정으로만, 개인 학습용으로만 쓰세요. 다른 사람에게 나눠 주면 안 됩니다.
+- 학번과 비밀번호는 앱이 켜져 있는 동안 메모리에만 있습니다. 파일이나 키체인에 저장하지 않고, 로그아웃하거나 앱을 끄면 사라집니다.
+- 성적은 메모리에만 30분 보관합니다. 디스크에 남는 것은 성적 보기에 동의했다는 기록뿐입니다.
+- 마감 알림을 켜면 과목 이름과 마감 시각이 앱 데이터 폴더에 저장됩니다. 앱이 꺼져 있어도 알림을 보내려는 것입니다.
+
+## 개발
+
+Tauri(Rust) 셸 + React/Vite 화면 + Python FastAPI 백엔드로 되어 있습니다. 백엔드는 배포본에서 PyInstaller 사이드카로 앱에 들어갑니다.
 
 ```bash
-uv run ssu-lecture-downloader discover-lms --trace .local/traces/discover-lms.json
-uv run ssu-lecture-downloader discover-lms --trace .local/traces/discover-lms.json --json
-```
-
-`discover-lms` now defaults to the latest active/current term by scanning LearningX term ids and selecting courses where `ended=False`. Use repeated `--term-id` flags only when you intentionally want to inspect older completed terms, for example `--term-id 43 --term-id 40`.
-
-Login and list lecture rows for one course so a UI/user can choose lectures without manually discovering raw module item ids:
-
-```bash
-uv run ssu-lecture-downloader course-detail --course-id 44070 --course-name 'UX방법론' --json
-```
-
-Resolve one Canvas module item to Commons download metadata without downloading bytes:
-
-```bash
-uv run ssu-lecture-downloader resolve-media --course-id 42045 --module-item-id 3206622 --trace .local/traces/resolve-media.json --json
-```
-
-This performs login, launches the LTI context, fetches LearningX/Commons metadata, and performs a HEAD request against the Commons download URL.
-
-Plan a download path without writing bytes:
-
-```bash
-uv run ssu-lecture-downloader download --course-id 42045 --module-item-id 3206622 --course-name '데이터사이언스' --output-dir .local/downloads --dry-run --json
-```
-
-Download a lecture video to a selected output directory:
-
-```bash
-uv run ssu-lecture-downloader download --course-id 42045 --module-item-id 3206622 --course-name '데이터사이언스' --output-dir .local/downloads --trace .local/traces/download-live.json --json
-```
-
-`download` creates a safe course folder and filename, avoids overwriting existing files by adding numbered suffixes, streams bytes through a `.part` temp file, atomically renames the temp file only after success, reports byte-progress events, and resumes partial files with `Range` when Commons supports it. If a server ignores `Range`, the partial file is discarded and the download restarts from byte 0.
-
-Plan selected lectures without writing bytes:
-
-```bash
-uv run ssu-lecture-downloader batch-download --course-id 44070 --course-name 'UX방법론' --module-item-id 3268578 --output-dir .local/downloads --dry-run --json
-```
-
-Plan or download all currently uncompleted lectures in a course:
-
-```bash
-uv run ssu-lecture-downloader batch-download --course-id 44070 --course-name 'UX방법론' --uncompleted --output-dir .local/downloads --dry-run --json
-uv run ssu-lecture-downloader batch-download --course-id 44070 --course-name 'UX방법론' --uncompleted --output-dir .local/downloads --json
-```
-
-`batch-download` emits progress events (`resolving`, `planned`, `downloading`, `download_started`, `download_progress`, `download_done`, `done`, `failed`, `download_retrying`) in JSON and compact progress lines in human output. Repeat `--module-item-id` for multi-select downloads.
-
-## Local API and UI prototype
-
-Run the local API manually for browser/Vite development:
-
-```bash
-uv run uvicorn ssu_lecture_downloader.api:app --host 127.0.0.1 --port 8000
-```
-
-`ssu_lecture_downloader.api:app` is the import string the desktop shell launches and detects; `ssu_lecture_downloader.service.api:app` (where the app actually lives) works too.
-
-When running the Tauri desktop shell, the app first checks `/api/health` on `127.0.0.1:8000`. If a healthy backend is already running there, it reuses that external server. If 8000 is empty or occupied by a non-matching process, Tauri chooses a free random localhost port and starts a managed backend. Packaged (release) builds prefer the bundled `backend-sidecar/ssu-api/ssu-api` executable (a PyInstaller onedir bundle: the executable sits in a directory named `ssu-api` next to its `_internal/` folder); debug Tauri builds always use `uv run uvicorn ... --port <chosen-port>` from the repository root, even when a sidecar has been built. Tauri gives the React app that dynamic base URL through a Tauri command and terminates only its owned child process on app exit. Set `SSU_BACKEND_AUTOSTART=0` before `npm run tauri:dev` to disable autostart while debugging, or set `SSU_BACKEND_EXECUTABLE=/path/to/ssu-api` to smoke-test a custom sidecar.
-
-API access control (all enforced by `ssu_lecture_downloader.service.security`):
-
-- CORS only allows `tauri://localhost`, `http(s)://tauri.localhost`, `http://127.0.0.1:5173` and `http://localhost:5173`.
-- Requests whose `Host` header is not `127.0.0.1[:port]` or `localhost[:port]` are rejected with `invalid_host` (DNS-rebinding guard).
-- If the backend process is started with `SSU_API_TOKEN=<secret>`, every `/api/*` request except `GET /api/health` (and CORS preflights) must send `X-SSU-Token: <secret>`; otherwise it gets `401 {"ok": false, "error_code": "api_token_invalid"}`. Without the variable (plain `uvicorn`/Vite development) no token is enforced.
-- `POST /api/media/video/ensure-playable` only accepts `.mp4` files under the default or user-chosen download folder (or files the app produced); anything else gets `400 media_path_not_allowed`.
-- With no `output_dir` in a request, downloads go to `~/Downloads/SSU Lecture Downloader`.
-- Unexpected failures are returned as `{"ok": false, "error_code": ...}` JSON: `network_error` (502), `network_timeout` (504), `internal_error` (500), or the LMS flow's own code. Network failures are never reported as rejected credentials.
-
-Useful endpoints:
-
-- `GET /api/health`
-- `GET /api/credentials/status`
-- `POST /api/credentials`
-- `DELETE /api/credentials`
-- `GET /api/terms`
-- `GET /api/courses`
-- `GET /api/courses?term_id=46`
-- `GET /api/courses/{course_id}?course_name=...`
-- `GET /api/courses/{course_id}/pages/{page_url_or_id}/files?course_name=...&output_dir=...` (files linked in a wiki page: `file_id`, `display_name`, `size`, `download_url`, `downloaded_path`)
-- `POST /api/download/canvas-file` (`course_id`, `file_id`, `course_name`, `output_dir`, `conflict_strategy`: saves one Canvas file into the course folder through a `.part` file, an existing file is kept with `skip`)
-- `POST /api/lms/session-bridge` (LMS cookies for an in-app page window; protected like the watch session bridge)
-- `POST /api/watch/chrome/start`, `GET /api/watch/chrome/status`, `POST /api/watch/chrome/next|stop|show` (auto playback queue in a dedicated Google Chrome window driven over CDP; error codes such as `chrome_not_found`, `chrome_launch_timeout`, `chrome_window_closed`)
-- `POST /api/download/plan`
-- `POST /api/download`
-- `POST /api/download/jobs`
-- `GET /api/download/jobs/{job_id}`
-- `POST /api/download/jobs/{job_id}/cancel`
-- `POST /api/download/batch/plan`
-- `POST /api/download/batch`
-- `POST /api/media/audio/jobs`
-- `GET /api/media/audio/jobs/{job_id}`
-- `POST /api/media/audio/jobs/{job_id}/cancel`
-- `GET /api/stt/providers/status`
-- `GET /api/media/dependencies/status`
-- `GET /api/stt/remote/status`, `PUT /api/stt/remote/config`, `POST /api/stt/remote/check` (remote subtitle server, below)
-- `POST /api/stt/jobs`
-- `GET /api/stt/jobs/{job_id}`
-- `POST /api/stt/jobs/{job_id}/cancel`
-
-Run the React/Vite prototype:
-
-```bash
+uv sync
 cd frontend
 npm install
-npm run dev
-```
-
-The Vite dev server proxies `/api` to `http://127.0.0.1:8000` for browser-only development. Inside Tauri, API calls use the dynamic backend base URL exposed by the desktop shell, so Tauri-managed backend ports do not have to be 8000. The prototype currently shows a session-first login/status panel, current-term courses, explicit current/past term selection from `/api/terms`, lecture rows, API server supervision status, automatic download folder default, native Finder folder picker in Tauri, primary background single-download start/cancel with 1.5s auto-polling, advanced path preview/diagnostic actions, selected-lecture batch planning/download, and uncompleted-lecture batch planning.
-
-Run the Tauri desktop shell for app QA:
-
-```bash
-cd frontend
 npm run tauri:dev
 ```
 
-Tauri now manages the Python API automatically for desktop QA: it reuses an existing healthy `127.0.0.1:8000` backend when present, otherwise starts the backend on a free random localhost port and cleans up that owned child process when the app exits. In development, the fallback command is still `uv run uvicorn ...`; for distributable builds, build the bundled sidecar first:
+`tauri:dev`가 백엔드도 같이 띄웁니다. 테스트는 루트에서 `uv run pytest -q`, `frontend`에서 `npm run test:contract`, `frontend/src-tauri`에서 `cargo test`입니다.
 
-```bash
-cd frontend
-npm run build:backend-sidecar
-npm run tauri:build
-```
+자세한 내용은 아래 문서에 나눠 두었습니다.
 
-`build:backend-sidecar` runs PyInstaller (`--onedir`, so there is no unpack-to-temp step on every launch) from the repo root and writes `frontend/src-tauri/resources/backend-sidecar/ssu-api/ssu-api` plus its `_internal/` directory, which are included as a Tauri bundle resource. A leftover single-file `backend-sidecar/ssu-api` from older builds is removed by the script. The sidecar contains the Python runtime/backend and packaged media dependencies such as `imageio-ffmpeg`; `faster-whisper` is bundled when target-compatible wheels are available for the build machine/target.
-
-### Audio extraction and STT transcripts
-
-The desktop UI includes two related paths:
-
-- In the main `다운로드` panel, `저장할 파일 선택` lets users multi-select `MP4`, `MP3`, and `TXT` before starting the selected lecture download. `MP4` keeps the source video, `MP3` extracts audio, and `TXT` runs STT after audio extraction. If `MP4` is unchecked, the temporary source video is removed after MP3/TXT artifacts are produced.
-- The separate `후처리` card still supports a local already-downloaded video path for manual audio/STT work.
-
-Audio extraction uses system `ffmpeg` when available, otherwise it uses the `imageio-ffmpeg` binary bundled in the Python runtime. For a distributed desktop app this must be included in the app package; end users should not have to install Homebrew or run terminal setup commands. The UI checks `/api/media/dependencies/status` and shows whether ffmpeg is available from the app bundle or the system.
-
-STT uses packaged `faster-whisper` when available. The default is `large-v3` with Korean language forced, beam search, VAD, and a Korean lecture prompt because Korean lecture accuracy is prioritized over speed. This is the local/offline path closest to a Clova-class experience without sending lecture audio to an external API. It writes sibling transcript files:
-
-- `.transcript.txt` for direct AI paste/upload
-- `.transcript.md` with metadata and timestamps
-- `.transcript.json` with structured segments
-
-If Whisper/faster-whisper is missing, `/api/stt/providers/status`, `/api/media/dependencies/status`, and the UI return an explicit packaged-component reinstall/development-sync hint instead of silently falling back. In non-frozen development/runtime environments the UI also shows `필요한 구성요소 설치`, which calls `/api/media/dependencies/install/jobs` and installs only missing supported components through the backend (`imageio-ffmpeg` for ffmpeg fallback and `faster-whisper` for STT). Distributed frozen sidecars should still bundle target-compatible wheels up front; if the sidecar cannot safely self-modify, the app reports the reinstall path. The first model run can take longer because the Whisper model is downloaded/prepared locally.
-
-### Remote subtitle server
-
-Where faster-whisper cannot run (Intel Macs) subtitles come from a remote STT server configured in Settings, under "원격 자막 서버". Two kinds are supported: `whisper_cpp_server` (whisper.cpp `whisper-server`, `POST {base}/inference`) and `openai_compatible` (`POST {base}/v1/audio/transcriptions`, optional Bearer key). The settings live in `~/Library/Application Support/com.local.ssu-lecture-downloader/stt.json` (mode 0600, override with `SSU_STT_CONFIG_PATH`); the API key is write-only and never returned or logged. An optional SSH tunnel (`ssh -N -L <local>:127.0.0.1:<remote> <host alias>`) is opened on demand, reused while alive and closed with the backend. When a remote server is enabled it is preferred over the local engine for every transcription.
-
-The audio is converted to 16 kHz mono WAV and sent to the server. Windows where Whisper looped (4 or more identical consecutive cues) are cut out with a 10 s pad, re-transcribed at a higher temperature and spliced back; then filler-only cues are dropped and repeated cues are collapsed. Besides the `.transcript.txt/.md/.json` files above, `<name>.srt` is written next to the video.
-
-### Official viewer QA boundary
-
-Browser/Vite QA and Tauri app QA are intentionally different for lecture watching:
-
-- Browser/Vite runs in the user's normal browser, so it can verify React rendering, FastAPI calls, course/detail loading, and official watch URL planning.
-- Tauri opens a separate macOS WKWebView, so it must separately verify native `invoke` wiring, WebKit cookie injection, iframe/LTI initialization, and WebKit media/autoplay policy.
-
-Do not treat Chrome browser success as proof that the Tauri official viewer or autoplay works. The row-level `시청` button is deliberately the minimal official flow: create one `official-viewer` window, set the Python-authenticated LMS cookies in WebKit, then navigate to the validated Canvas module-item launch URL. It must not inject autoplay helpers, debug custom-scheme navigation, `on_navigation` intercepts, or WebKit autoplay policy overrides; those previously caused a blank white official-player window. Autoplay and ended-event capture belong only to the experimental `표시된 영상 순차 시청` assisted path.
-
-Tauri official-viewer regression checks:
-
-```bash
-cd frontend/src-tauri
-cargo fmt --check
-cargo check
-cargo test manual_official_viewer_stays_minimal_without_assist_or_debug_hooks
-cargo test
-cd ..
-npm run test:contract
-npm run build
-```
-
-Manual runtime QA after those gates: restart the Tauri app, use a row-level `시청` button to confirm the official player opens without a white screen, then use `표시된 영상 순차 시청` if testing best-effort autoplay. If autoplay still fails there, inspect the in-app `공식 플레이어 재생 진단 로그`; common causes are no detected video/iframe yet, WebKit `NotAllowedError`, or Commons intro-video-to-main-video handoff.
-
-## Architecture note
-
-The CLI commands call `ssu_lecture_downloader.core.lms_service.SsuLectureService`, which owns reusable login/course-discovery/course-detail/media-resolution/download orchestration. The local FastAPI app and React/Vite prototype sit on top of that service layer; future desktop UI should reuse the same boundary instead of duplicating CLI internals. API/UI credential access goes through a writable in-memory runtime store: login values are accepted only through `POST /api/credentials`, ignored from `.env`, not stored in Keychain by default, and cleared by `DELETE /api/credentials` or backend process exit. API/UI responses expose only presence/source booleans, never credential values. In the API process, the service keeps in-memory authenticated session and TTL list-result caches per credential fingerprint so repeated term/course/detail lookups avoid full login and duplicate term scans; these caches are never written to disk and are cleared on credential save/delete.
-
-## Download engine boundary
-
-The current byte writer is Python (`download_to_plan`) and uses the same authenticated `HttpClient` session that resolved the Commons URL. It now streams with `curl-cffi` `stream=True`, writes to `.part`, atomically renames on success, emits byte-progress events, retries interrupted streams, and uses `Range` to resume partial temp files when Commons returns `206 Partial Content`. Tauri uses Rust native transfer jobs for the desktop primary download path after Python returns a native plan. Python remains responsible for LMS login, course/media resolution, credentials, and trace redaction; Rust is responsible only for final byte streaming in the app path.
-
-Recommended Rust module contract:
-
-- input: already-resolved direct download URL, output path, optional `Referer`, timeout, and redacted display metadata;
-- output: final file path, bytes written, elapsed time, and progress events;
-- responsibilities: streaming write, temp-file + atomic rename, retry/resume/range support if supported by Commons, cancellation safety;
-- non-responsibilities: LMS login, cookies, course discovery, Commons metadata resolution, credential handling, or trace redaction.
-
-This keeps the risky authenticated LMS flow in the tested Python service and makes Rust an optional acceleration module for file transfer only.
-
-## Verification
-
-```bash
-uv run pytest -q
-cd frontend && npm run test:contract && npm run build
-cd frontend/src-tauri && cargo test
-```
-
-### CI
-
-GitHub Actions (`.github/workflows/ci.yml`) runs on every pull request to `develop` and every push
-to `develop`, on an Intel macOS runner (`macos-15-intel`, same architecture as the installed app):
-`uv run pytest`, `uv run lint-imports`, `npm run typecheck`, `npm run test:contract`, the backend sidecar build,
-`cargo test` and `npm run tauri build -- --bundles app` (no dmg, signing or upload).
-`tests/test_macos_invariants.py` and `frontend/src-tauri/src/invariant_tests.rs` pin the macOS
-behavior (app-data paths, LaunchAgent, Chrome argv, sidecar location, local-STT gate) that
-platform-split changes must keep identical.
+- [개발 가이드](docs/development.md): CLI 명령, 실행, 빌드, 검증, CI
+- [구조](docs/architecture.md): 서비스 계층, 다운로드 엔진 경계
+- [로컬 API](docs/api.md): 접근 제한과 엔드포인트
+- [음성 추출과 자막](docs/stt.md): ffmpeg, Whisper, 원격 자막 서버
+- [프론트엔드](docs/frontend.md): 화면 구성, 시청 모드, 백엔드 감독
+- [공식 플레이어 QA 경계](docs/qa.md)
