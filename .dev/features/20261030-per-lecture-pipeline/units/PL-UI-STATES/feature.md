@@ -27,3 +27,4 @@ Also touched, outside the sprint-owned list: `frontend/src/hooks/useDownloads.ts
 
 Test fixtures (new): `frontend/scripts/fixtures/backend-3b1a6e7-remote-run.json`, `frontend/scripts/fixtures/backend-3b1a6e7-over-cap.json`, `frontend/scripts/fixtures/capture_backend_progress.py`.
 - 2026-10-30: fixtures re-captured from backend 3b1a6e7 (cap keeps stage-entry events); the over-cap run now shows the two slot-holding lectures as "음성 추출 중".
+- 2026-10-30 (review cycle 3 repair): the high-water hold also keeps the higher percent (and its "약" flag) of a row in the same step when the tick was evicted, except while a note (repair i/n) reports its own progress; a server queue place replaces an earlier media wait label; capture script uses context managers; `inEventOrder` comment names no backend version. Fixtures unchanged.

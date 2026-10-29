@@ -222,6 +222,9 @@ function applyEvent(state: Accumulated, event: ProgressEvent, ctx: StepContext):
     state.estimated = false;
     state.derived = false;
     if (stage === 'transcript_queued') {
+      // The server queue position replaces an earlier media or busy wait.
+      state.waitReason = undefined;
+      state.waitAhead = undefined;
       state.waitPosition = positiveInt(event.queue_position);
     } else {
       state.waitReason = event.reason;
@@ -387,10 +390,9 @@ const PHASE_RANK: Record<RowPhase, number> = {
 };
 
 /**
- * Events of one lecture in the order they happened, by `at`. Since backend 35a3352 the stored list is
- * already chronological (a coalesced stage is removed and appended at the end), so this only matters
- * for older backend builds (f367be8 moved waits to the end but replaced ticks in place) and as a guard.
- * Events without `at` keep their slot; ties keep list order.
+ * Events of one lecture in the order they happened, by `at`. A defensive guard: the backend normally
+ * sends a chronological list, but a list that is out of order must not make a lecture look as if it
+ * went back. Events without `at` keep their slot; ties keep list order.
  */
 function inEventOrder(events: ProgressEvent[]): ProgressEvent[] {
   const slots: number[] = [];
@@ -510,7 +512,14 @@ export function holdFurthestRows(jobId: string | null | undefined, rows: JobRow[
       else if (PHASE_RANK[row.phase] < PHASE_RANK[before.phase]) shown = before;
       // A guessed wait (only audio_done is left after eviction) must not pull a transcribing row back.
       else if (row.derivedWait && PHASE_RANK[row.phase] <= PHASE_RANK[before.phase]) shown = before;
-      else if (row.overall < before.overall) shown = { ...row, overall: before.overall };
+      else {
+        shown = row.overall < before.overall ? { ...row, overall: before.overall } : row;
+        // Same step, the tick that carried the higher percent was evicted: keep it with its "약" flag.
+        // A note (repair pass i/n, connecting) means the step reports its own progress, so it is not held.
+        if (row.phase === before.phase && !row.note && before.percent !== null && (row.percent === null || row.percent < before.percent)) {
+          shown = { ...shown, percent: before.percent, estimated: before.estimated };
+        }
+      }
     }
     marks.set(key, shown);
     return shown;

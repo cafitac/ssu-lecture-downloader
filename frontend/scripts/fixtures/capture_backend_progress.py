@@ -15,8 +15,10 @@ from stt_fakes import FakeSttServer, srt, write_silent_wav
 OUT = Path(sys.argv[1])
 
 def scenario_remote():
-    mp = pytest.MonkeyPatch()
-    tmp = Path(tempfile.mkdtemp())
+    with pytest.MonkeyPatch.context() as mp, tempfile.TemporaryDirectory() as tmpdir:
+        return run_remote(mp, Path(tmpdir))
+
+def run_remote(mp, tmp):
     specs = [t.Spec(n, has_video=True) for n in range(1, 5)]
     rig = t.Rig(tmp, mp, specs)
     for s in specs:
@@ -40,8 +42,10 @@ def scenario_remote():
     return snap
 
 def scenario_cap():
-    mp = pytest.MonkeyPatch()
-    tmp = Path(tempfile.mkdtemp())
+    with pytest.MonkeyPatch.context() as mp, tempfile.TemporaryDirectory() as tmpdir:
+        return run_cap(mp, Path(tmpdir))
+
+def run_cap(mp, tmp):
     rig = t.Rig(tmp, mp, [t.Spec(n, has_video=True, block_extract=True) for n in range(1, 31)])
     inner = rig._extract
     noisy = {'finished': 0}; lock = threading.Lock()
@@ -59,7 +63,9 @@ def scenario_cap():
     return prog
 
 snap = scenario_remote()
-json.dump(snap['progress'], open(OUT / 'remote.json', 'w'), ensure_ascii=False)
+with open(OUT / 'remote.json', 'w') as handle:
+    json.dump(snap['progress'], handle, ensure_ascii=False)
 cap = scenario_cap()
-json.dump(cap, open(OUT / 'cap.json', 'w'), ensure_ascii=False)
+with open(OUT / 'cap.json', 'w') as handle:
+    json.dump(cap, handle, ensure_ascii=False)
 print(len(snap['progress']), len(cap))

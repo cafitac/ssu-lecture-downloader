@@ -655,6 +655,11 @@ const progress = await import('../src/lib/progress.ts');
   assert.equal(row.label, '자막 대기 중 (3번째)');
   row = one(txtPlan, [ev('audio_done'), ev('transcript_queued', { queue_position: 3 }), ev('transcript_queued', { queue_position: 1 })]);
   assert.equal(row.label, '자막 대기 중 (1번째)');
+  // A media wait followed by a place in the server queue shows the place.
+  row = one(txtPlan, [ev('audio_done'), ev('transcript_waiting', { reason: 'media', at: 1 }), ev('transcript_queued', { queue_position: 2, at: 2 })]);
+  assert.equal(row.label, '자막 대기 중 (2번째)');
+  row = one(txtPlan, [ev('audio_done'), ev('transcript_waiting', { reason: 'media', at: 1 }), ev('transcript_queued', { queue_position: 2, at: 2 }), ev('transcript_waiting', { reason: 'media', at: 3 })]);
+  assert.equal(row.label, '자막 준비 대기 중', 'a later media wait replaces the queue place');
   // A reason this app does not know is a plain wait.
   assert.equal(one(txtPlan, [ev('audio_done'), ev('transcript_waiting', { reason: 'something_new' })]).label, '자막 대기 중');
   // A row never goes back: a late audio_waiting (the backend moves coalesced waits to the end) is ignored once audio or subtitles started.
@@ -796,6 +801,25 @@ const progress = await import('../src/lib/progress.ts');
     marks.clear();
     shown = poll([ev('download_failed', { error_code: 'network_error', at: 1 })]);
     assert.deepEqual([shown[0].phase, shown[0].final], ['failed', false]);
+  }
+
+  // The tick that carried the higher percent can be evicted: the row keeps it (and its "약" flag) inside the same step, but a repair pass reports its own progress.
+  {
+    const { holdFurthestRows } = await import('../src/lib/jobItems.ts');
+    const marks = new Map();
+    const poll = (events) => holdFurthestRows('artifact-1', buildJobRows(txtPlan, job('running', events)), marks);
+    let shown = poll([ev('audio_done', { at: 1 }), ev('transcribing', { remote: true, at: 2 }), ev('transcript_progress', { remote: true, progress_percent: 62, progress_estimated: true, at: 3 })]);
+    assert.deepEqual([shown[0].percent, shown[0].estimated], [62, true]);
+    shown = poll([ev('audio_done', { at: 1 }), ev('transcribing', { remote: true, at: 2 })]);
+    assert.deepEqual([shown[0].phase, shown[0].percent, shown[0].estimated, shown[0].label], ['transcribing', 62, true, '자막 만드는 중 (원격)'], 'the poll that lost the 62% tick still shows 62');
+    shown = poll([ev('transcript_progress', { remote: true, progress_percent: 70, at: 4 })]);
+    assert.deepEqual([shown[0].percent, shown[0].estimated], [70, undefined], 'a higher tick wins, with its own flag');
+    shown = poll([ev('transcript_repair', { remote: true, progress_percent: 40, repair_index: 1, repair_total: 3, at: 5 })]);
+    assert.deepEqual([shown[0].percent, shown[0].note], [40, '반복 구간 다시 인식 중 1/3'], 'a repair pass is not held');
+    // The same inside audio extraction.
+    marks.clear();
+    poll([ev('download_done', { at: 1 }), ev('extracting_audio', { at: 2 }), ev('audio_progress', { progress_percent: 45, at: 3 })]);
+    assert.equal(poll([ev('download_done', { at: 1 }), ev('extracting_audio', { at: 2 })])[0].percent, 45);
   }
 
   // A wait guessed from audio_done (no transcript_waiting event) must not pull a transcribing row back after eviction.
