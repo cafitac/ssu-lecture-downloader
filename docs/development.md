@@ -115,3 +115,59 @@ to `develop`, on an Intel macOS runner (`macos-15-intel`, same architecture as t
 `tests/test_macos_invariants.py` and `frontend/src-tauri/src/invariant_tests.rs` pin the macOS
 behavior (app-data paths, LaunchAgent, Chrome argv, sidecar location, local-STT gate) that
 platform-split changes must keep identical.
+
+## Releasing
+
+Releases are published only by the repository owner, from `.github/workflows/release.yml`. The workflow builds the Intel macOS app, signs the updater artifacts and uploads them to a **draft** GitHub release (drafts are invisible to `releases/latest/download/latest.json`, the updater endpoint in `frontend/src-tauri/tauri.conf.json`). A final job reads the draft's `latest.json` back, checks it, and only then publishes the release. Installed apps see the new version from that moment on. `ci.yml` is separate and never publishes anything.
+
+Local builds are unaffected: `npm run tauri:build` stays unsigned and does not produce updater artifacts. `npm run tauri:build:release` signs and needs `TAURI_SIGNING_PRIVATE_KEY` (and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` if the key has a password); it is what the workflow's build corresponds to.
+
+### Signing key (read this first)
+
+The updater only installs updates signed by the private key that matches the public key committed in `tauri.conf.json` (`plugins.updater.pubkey`).
+
+- **If the private key or its password is lost, installed apps can never update again.** They have to be reinstalled by hand from a build that carries a new public key. There is no recovery.
+- Keep the key file and its password in two places (a password manager and an offline copy). Never commit them, paste them into an issue or a log, or put them in a PR. Only the public key belongs in the repository.
+- The workflow reads two Actions secrets on `cafitac/ssu-lecture-downloader`: `TAURI_SIGNING_PRIVATE_KEY` (the key content) and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`. Without both, the build fails in its first step.
+- If the key may have leaked: generate a new key, release a version that carries the new public key while it is still signed with the old key, then replace the secrets.
+
+### Publishing a version
+
+1. Pick the next version `x.y.z`. It must be higher than the last published one (the updater only offers a strictly higher version). Pre-release suffixes are not supported.
+2. Set it everywhere with one command, then review the diff and merge it to `develop` through a PR:
+
+   ```bash
+   python3 scripts/bump_version.py 0.2.0
+   ```
+
+   This edits `tauri.conf.json`, `Cargo.toml`, `package.json` and `pyproject.toml`, plus the project's own entry in `Cargo.lock`, `package-lock.json` and `uv.lock` so locked CI builds keep working. `--show` lists the current values and `--check 0.2.0` fails unless all of them agree.
+3. Optional dry run. It builds and signs exactly like a release, uploads a draft, runs the `latest.json` checks, and stops before publishing:
+
+   ```bash
+   gh workflow run release.yml --repo cafitac/ssu-lecture-downloader --ref develop -f version=0.2.0 -f publish=false
+   ```
+
+   Open the draft under Releases and look for the `.dmg`, the `.app.tar.gz`, its `.sig` and `latest.json`. Then delete the draft on the Releases page; the real tag creates it again.
+4. Tag the merged commit and push the tag. The tag pins the commit that is released:
+
+   ```bash
+   git tag v0.2.0 <commit-on-develop>
+   git push origin v0.2.0
+   ```
+
+   The workflow runs `verify-version` (the tag must equal every version file; otherwise nothing is built), `build-macos` (sidecar first, then the signed Tauri build into a draft), and `finalize` (asserts that `latest.json` is for this version and that `platforms.darwin-x86_64` has a signature and a url, then publishes the draft as the latest release).
+5. Check the run and the published release. Never re-use or move a tag that has been published.
+
+`workflow_dispatch` with `publish` ticked also publishes, but prefer the tag so the release is tied to an exact commit. Dispatch runs for a version that has no tag yet create the tag on publish, pointing at the commit the run used.
+
+If a run fails after the upload, the draft stays unpublished and clients never see it: delete it and re-run (or fix and tag again). If a published release turns out to be bad, un-publish or delete it (clients then fall back to the previous release) or publish a higher fixed version. The updater never downgrades.
+
+### First install into /Applications
+
+Apps installed before the updater existed cannot update themselves. Install the first updater-enabled release by hand, once:
+
+1. Quit the app and make sure no auto-watch run is active.
+2. Download the `.dmg` from the release, open it and drag `SSU Lecture Downloader.app` into `/Applications`, replacing the old copy. The updater needs the app to live there and to be writable by the user; an app run from the Downloads folder or the mounted DMG cannot replace itself.
+3. The app is not notarized, so the first launch needs the Gatekeeper "Open anyway" step (see the README install section). macOS may ask again for app permissions after an update.
+
+From then on, newer versions arrive through the in-app update chip.
