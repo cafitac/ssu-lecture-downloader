@@ -21,6 +21,7 @@ from ssu_lecture_downloader.core.grades.consent import CONSENT_FILE_NAME, Grades
 from ssu_lecture_downloader.core.grades.gateway import RusaintGateway
 from ssu_lecture_downloader.core.grades.service import GradesService
 from ssu_lecture_downloader.service.credentials import CredentialStore
+from ssu_lecture_downloader.service.pipeline_gates import StageGates
 from ssu_lecture_downloader.core.jobs import Job, JobOutcome, JobRegistry, JobRunner
 from ssu_lecture_downloader.service.security import MediaPathPolicy
 from ssu_lecture_downloader.core.stt_remote import RemoteSTTService
@@ -104,6 +105,8 @@ class AppContext:
     platform: Platform = field(default_factory=select_platform)
     # u-SAINT grades (opt-in, read-only); built from the platform's app-data folder unless injected.
     grades: GradesService | None = None
+    # Process-wide work limits shared by every artifact job (ffmpeg-class work 2, local STT 1).
+    gates: StageGates = field(default_factory=StageGates)
 
     def __post_init__(self) -> None:
         if self.remote_stt is None:

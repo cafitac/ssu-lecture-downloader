@@ -1,0 +1,117 @@
+// Target state for the per-lecture pipeline (PROPOSED).
+// There is no database. Every table below is an in-process record of the Python sidecar
+// (lost on exit), a progress-event / API payload shape, or the existing stt.json settings file.
+
+Project per_lecture_pipeline_state {
+  database_type: 'process memory + existing stt.json'
+  Note: 'No new file is written by this feature. Output files (mp4/mp3/txt/md/json/srt) keep their CURRENT atomic write rules.'
+}
+
+Enum lecture_state {
+  queued [note: 'planned, input not ready yet (waiting for its own download)']
+  downloading
+  waiting_audio [note: 'media gate busy']
+  extracting
+  waiting_transcript [note: 'local_stt gate busy, or remote server queue / busy']
+  transcribing
+  done
+  failed
+  cancelled
+}
+
+Enum gate_name {
+  media [note: 'limit 2: extract_audio, ensure_playable_mp4 reconstruction, convert_to_stt_wav, cut_audio_segment']
+  local_stt [note: 'limit 1: faster-whisper transcription']
+}
+
+Enum remote_kind {
+  whisper_cpp_server [note: 'CURRENT; interim path; response wait = queue-aware budget']
+  openai_compatible [note: 'CURRENT; same budget rule']
+  stt_job [note: 'PROPOSED (STT-JOB-PROVIDER); job protocol, see remote-stt-job-protocol.md']
+}
+
+Enum waiting_reason {
+  local_engine [note: 'local_stt gate']
+  server_queue [note: 'job kind reports queued']
+  server_busy [note: 'legacy kind: request sent, no response yet, ahead_requests > 0']
+  server_deferred [note: 'job kind got 429 BACKGROUND_DEFERRED; Retry-After seconds']
+}
+
+Table stage_gates_memory {
+  name gate_name [pk]
+  limit int [not null, note: 'media 2, local_stt 1 (module constants)']
+  in_use int [not null, note: '0..limit']
+  Note: 'One instance in AppContext; shared by all artifact jobs of the process.'
+}
+
+Table artifact_job_memory {
+  job_id varchar [pk, note: 'CURRENT Job id']
+  outputs varchar [note: 'subset of mp4, mp3, txt (CURRENT request)']
+  planned_count int
+  executor_size int [note: '= planned lecture count']
+  Note: 'ArtifactPipeline. CURRENT Job snapshot keys stay unchanged.'
+}
+
+Table lecture_pipeline_memory {
+  job_id varchar [ref: > artifact_job_memory.job_id]
+  module_item_id varchar [not null]
+  index int [not null, note: '1-based, CURRENT event context']
+  state lecture_state [not null]
+  failed_stage varchar [note: 'download | mp4 | audio | transcript | cleanup']
+  error_code varchar
+  started_at float
+  finished_at float
+  indexes {
+    (job_id, module_item_id) [pk]
+  }
+  Note: 'Written only by its own LecturePipeline thread (I2). Read by the result builder after all lectures are terminal.'
+}
+
+Table remote_request_memory {
+  module_item_id varchar [not null]
+  kind remote_kind [not null]
+  idempotency_key varchar [note: 'stt_job only: UUID per transcript attempt or repair window']
+  job_id varchar [note: 'stt_job only: server job id']
+  ahead_requests int [note: 'legacy only: in-flight remote requests of this process when sent']
+  response_budget_seconds int [note: 'legacy: 1200 * (1 + ahead), cap 14400; job: running-time budget']
+  Note: 'Held by the provider call; dropped when the call returns. Never persisted.'
+}
+
+Table progress_event {
+  stage varchar [not null, note: 'CURRENT stages + PROPOSED: artifact_item_queued, audio_waiting, transcript_waiting, transcript_queued, artifact_item_done, artifact_item_failed, artifact_item_cancelled']
+  index int
+  total int
+  module_item_id varchar
+  title varchar
+  at float [note: 'PROPOSED: epoch seconds on pipeline events']
+  reason waiting_reason [note: 'transcript_waiting only']
+  queue_position int [note: 'only when the provider reports it (1 = next)']
+  ahead_requests int [note: 'legacy server_busy only']
+  retry_after_seconds int [note: 'server_deferred only']
+  progress_percent int
+  progress_estimated bool [note: 'true when the server says the percent is an estimate']
+  error_code varchar
+  failed_stage varchar
+  Note: 'Additive keys only. Coalesced stages (CURRENT) add transcript_waiting and transcript_queued so position updates replace each other.'
+}
+
+Table artifact_job_result {
+  ok bool [note: 'CURRENT key']
+  error_code varchar [note: 'CURRENT key']
+  download json [note: 'CURRENT key (batch payload)']
+  artifacts json [note: 'CURRENT key']
+  progress json [note: 'CURRENT key']
+  summary json [note: 'PROPOSED additive: {total, succeeded, failed, cancelled}']
+  items_status json [note: 'PROPOSED additive: [{module_item_id, state, error_code, failed_stage}] — survives progress compaction']
+}
+
+Table stt_settings_file {
+  path varchar [pk, note: 'CURRENT stt.json in app data (0600)']
+  enabled bool
+  kind remote_kind [note: 'PROPOSED allowed value stt_job (STT-JOB-PROVIDER only)']
+  base_url varchar
+  tunnel json
+  model varchar
+  api_key varchar [note: 'CURRENT write-only; reused as the per-caller bearer token for stt_job']
+  Note: 'No schema version change. An older build that reads kind=stt_job falls back to defaults (remote off) without rewriting the file.'
+}
