@@ -61,12 +61,14 @@ export function LoginScreen({ notice, busy, onSubmit }: LoginProps) {
 }
 
 interface BackendProps {
+  /** Set while an app update runs: the retry is replaced by this status line, so it cannot restart the backend under the installer. */
+  retryBlockedText?: string;
   status: BackendSupervisionStatus;
   onRetry: () => void;
 }
 
 /** Shown until the bundled API server is ready, or when it could not start. */
-export function BackendScreen({ status, onRetry }: BackendProps) {
+export function BackendScreen({ status, onRetry, retryBlockedText }: BackendProps) {
   if (status.state === 'failed') {
     return (
       <CenterCard>
@@ -81,7 +83,9 @@ export function BackendScreen({ status, onRetry }: BackendProps) {
             <pre>{status.error}</pre>
           </details>
         )}
-        <button type="button" className="btn btn-lg" onClick={onRetry}>다시 시도</button>
+        {retryBlockedText
+          ? <p className="center-status" role="status"><Spinner />{retryBlockedText}</p>
+          : <button type="button" className="btn btn-lg" onClick={onRetry}>다시 시도</button>}
       </CenterCard>
     );
   }

@@ -9,7 +9,7 @@ const STARTING: BackendSupervisionStatus = { state: 'starting', mode: 'checking'
  * Tracks the Tauri-managed Python backend (starting / ready / failed) and
  * exposes a retry. Outside Tauri the backend is assumed ready immediately.
  */
-export function useBackendStatus(): { status: BackendSupervisionStatus; retry: () => Promise<void> } {
+export function useBackendStatus(): { status: BackendSupervisionStatus; retry: () => Promise<void>; refresh: () => void } {
   const [status, setStatus] = useState<BackendSupervisionStatus>(STARTING);
   const [attempt, setAttempt] = useState(0);
 
@@ -52,5 +52,8 @@ export function useBackendStatus(): { status: BackendSupervisionStatus; retry: (
     setAttempt((current) => current + 1);
   }, []);
 
-  return { status, retry };
+  /** Reads the status again (the backend was restarted elsewhere, e.g. by the update recovery). */
+  const refresh = useCallback(() => setAttempt((current) => current + 1), []);
+
+  return { status, retry, refresh };
 }

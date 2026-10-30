@@ -11,6 +11,10 @@ import { Toasts } from './components/Toasts';
 import { TopBar } from './components/TopBar';
 import { WatchAllDialog } from './components/WatchAllDialog';
 import { WatchStrip } from './components/WatchStrip';
+import { UpdateChip } from './components/UpdateChip';
+import { isInstalling } from './lib/appUpdate';
+import { useAppUpdate } from './hooks/useAppUpdate';
+import type { AppUpdate } from './hooks/useAppUpdate';
 import { useBackendStatus } from './hooks/useBackendStatus';
 import { useCourseContent } from './hooks/useCourseContent';
 import { useDeadlines } from './hooks/useDeadlines';
@@ -32,6 +36,7 @@ import { isTauriRuntime, openDownloadedFolder } from './lib/desktop';
 import { friendlyError } from './lib/errors';
 import { formatBytes, shortFolderName } from './lib/format';
 import type { JobPlan, PlannedItem } from './lib/jobItems';
+import { anyTransferBusy, busyAfterBackendStatus, isTrackedWorkBusy } from './lib/trackedWork';
 import type { CourseContentItem, CourseSummary, DeadlineEntryDto, DownloadOutputFormat, WatchMode } from './lib/types';
 
 const AUTO_REFRESH_EVERY_MS = 30 * 60 * 1000;
@@ -46,7 +51,7 @@ function toPlannedItem(item: CourseContentItem): PlannedItem {
   return { id: itemKey(item) as string, rawId: item.module_item_id as string | number, title: item.title, sizeBytes: item.size_bytes };
 }
 
-function Workspace({ session }: { session: LmsSession }) {
+function Workspace({ session, update, onWorkBusyChange }: { session: LmsSession; update: AppUpdate; onWorkBusyChange: (busy: boolean) => void }) {
   const { toasts, push, dismiss } = useToasts();
   const { courses, expire } = session;
   const now = useNow();
@@ -91,6 +96,11 @@ function Workspace({ session }: { session: LmsSession }) {
   const media = useMediaDependencies({ onMessage: push, downloadBusy: downloads.active });
   const lmsPages = useLmsPages({ notify: push, onAuthError });
   const attachments = usePageAttachments(course, dir, { onAuthError, notify: push });
+  // An app update waits for backend work the UI tracks; the controller lives in App, above this view.
+  const workBusy = isTrackedWorkBusy({ downloadActive: downloads.active, componentsInstalling: media.isInstalling, attachmentSaving: anyTransferBusy(attachments.pages) });
+  useEffect(() => {
+    onWorkBusyChange(workBusy);
+  }, [workBusy, onWorkBusyChange]);
 
   // A lecture that played to its end counts as watched at once; the LMS is asked a little later.
   const refreshTimers = useRef(new Set<ReturnType<typeof setTimeout>>());
@@ -317,6 +327,7 @@ function Workspace({ session }: { session: LmsSession }) {
         watchAllCount={allQueue.length}
         watchAllLoading={deadlines.state === 'loading' || deadlines.state === 'idle'}
         queueActive={viewer.queue.active}
+        update={update}
         onWatchAll={() => setWatchAllOpen(true)}
         onToggleDeadlines={() => setView((current) => (current === 'deadlines' ? 'course' : 'deadlines'))}
         onToggleGrades={() => setView((current) => (current === 'grades' ? 'course' : 'grades'))}
@@ -438,6 +449,7 @@ function Workspace({ session }: { session: LmsSession }) {
         <SettingsDialog
           downloadDir={dir}
           busy={downloads.active}
+          workBusy={workBusy}
           media={media}
           debugEvents={viewer.debugEvents}
           grades={grades}
@@ -459,16 +471,40 @@ function Workspace({ session }: { session: LmsSession }) {
   );
 }
 
-function SessionGate() {
+function SessionGate({ update, workBusy, onWorkBusyChange }: { update: AppUpdate; workBusy: boolean; onWorkBusyChange: (busy: boolean) => void }) {
   const session = useLmsSession();
   if (session.phase === 'checking') return <SplashScreen text="로그인 상태를 확인하는 중이에요…" />;
-  if (session.phase === 'signed-out') return <LoginScreen notice={session.notice} busy={session.signingIn} onSubmit={(username, password) => void session.signIn(username, password)} />;
-  return <Workspace session={session} />;
+  if (session.phase === 'signed-out') {
+    return (
+      <>
+        <LoginScreen notice={session.notice} busy={session.signingIn} onSubmit={(username, password) => void session.signIn(username, password)} />
+        <UpdateChip update={update} corner busyHeld={workBusy} />
+      </>
+    );
+  }
+  return <Workspace session={session} update={update} onWorkBusyChange={onWorkBusyChange} />;
 }
 
 /** Everything below talks to the API, so it renders only once the backend is ready. */
 export function App() {
-  const { status, retry } = useBackendStatus();
-  if (status.state !== 'ready') return <BackendScreen status={status} onRetry={() => void retry()} />;
-  return <SessionGate />;
+  // The update check needs neither the backend nor a sign-in: one controller for the whole app, so
+  // it checks at launch on every screen and "나중에" survives sign-out and sign-in.
+  const [workBusy, setWorkBusy] = useState(false);
+  const { status, retry, refresh } = useBackendStatus();
+  const update = useAppUpdate(workBusy, { onRecoveryAttempted: refresh });
+  // No job survives a dead sidecar: a busy flag held from an earlier workspace is dropped when the backend is not ready.
+  useEffect(() => {
+    setWorkBusy((held) => busyAfterBackendStatus(held, status.state));
+  }, [status.state]);
+  if (status.state !== 'ready') {
+    // While an update installs, the screen's own retry would restart the backend under the installer.
+    const installing = isInstalling(update.state.phase);
+    return (
+      <>
+        <BackendScreen status={status} onRetry={() => void retry()} retryBlockedText={installing ? '업데이트하는 중이에요' : undefined} />
+        <UpdateChip update={update} corner />
+      </>
+    );
+  }
+  return <SessionGate update={update} workBusy={workBusy} onWorkBusyChange={setWorkBusy} />;
 }

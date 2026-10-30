@@ -16,6 +16,8 @@ import { Spinner } from './Screens';
 interface Props {
   downloadDir: string;
   busy: boolean;
+  /** Any tracked backend work (download, component install, attachment save) is running: signing out waits. */
+  workBusy: boolean;
   media: MediaDependencies;
   debugEvents: WatchDebugEvent[];
   grades: GradesController;
@@ -297,7 +299,7 @@ function RemindersSection() {
   );
 }
 
-export function SettingsDialog({ downloadDir, busy, media, debugEvents, grades, watchMode, chromeAvailable, queueActive, onWatchModeChange, onPickFolder, onOpenFolder, onSignOut, onClose }: Props) {
+export function SettingsDialog({ downloadDir, busy, workBusy, media, debugEvents, grades, watchMode, chromeAvailable, queueActive, onWatchModeChange, onPickFolder, onOpenFolder, onSignOut, onClose }: Props) {
   const [signingOut, setSigningOut] = useState(false);
   const [signOutError, setSignOutError] = useState<string | null>(null);
   const desktop = isTauriRuntime();
@@ -372,7 +374,7 @@ export function SettingsDialog({ downloadDir, busy, media, debugEvents, grades, 
         <h3>계정</h3>
         <p className="muted small">앱을 끄면 로그인 정보가 지워져요.</p>
         <div className="setting-actions">
-          <button type="button" className="btn btn-sm" disabled={signingOut || busy} title={busy ? '다운로드가 끝나면 로그아웃할 수 있어요' : undefined} onClick={() => void handleSignOut()}>
+          <button type="button" className="btn btn-sm" disabled={signingOut || busy || workBusy} title={busy ? '다운로드가 끝나면 로그아웃할 수 있어요' : workBusy ? '설치나 저장이 끝나면 로그아웃할 수 있어요' : undefined} onClick={() => void handleSignOut()}>
             {signingOut ? '로그아웃하는 중…' : '로그아웃'}
           </button>
         </div>
