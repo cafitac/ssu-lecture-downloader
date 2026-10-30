@@ -84,3 +84,8 @@
 .problem { display: grid; gap: var(--sp-3); padding: var(--sp-4) 0; }
 .problem-lead { font-size: var(--fs-14); font-weight: var(--fw-semibold); }
 .problem-actions { justify-content: flex-end; }
+
+/* "파일 정리" prompt (once per folder and version) */
+.tidy-prompt { display: grid; gap: var(--sp-3); padding: var(--sp-4) 0; }
+.tidy-prompt-lead { font-size: var(--fs-14); word-break: keep-all; }
+.tidy-prompt-actions { justify-content: flex-end; }

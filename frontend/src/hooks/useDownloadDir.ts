@@ -36,12 +36,16 @@ function store(path: string): void {
 /** Download folder: the one the user picked last time, otherwise an app folder inside the OS Downloads folder. */
 export function useDownloadDir() {
   const [dir, setDir] = useState<string>(() => readStored() ?? FALLBACK);
+  // The folder is final once the default was looked up: until then `dir` may still be the placeholder.
+  const [ready, setReady] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
     defaultDownloadDirectory()
       .then((path) => {
-        if (cancelled || !path) return;
+        if (cancelled) return;
+        setReady(true);
+        if (!path) return;
         const stored = readStored();
         // Older versions remembered the bare Downloads folder as the default; move those to the app folder.
         if (stored && stored.replace(/\/+$/, '') !== path.replace(/\/+$/, '')) return;
@@ -50,6 +54,7 @@ export function useDownloadDir() {
       })
       .catch(() => {
         // Keep the fallback.
+        if (!cancelled) setReady(true);
       });
     return () => {
       cancelled = true;
@@ -65,5 +70,5 @@ export function useDownloadDir() {
     return true;
   }, []);
 
-  return { dir, pick };
+  return { dir, ready, pick };
 }

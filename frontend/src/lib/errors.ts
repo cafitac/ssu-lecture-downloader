@@ -119,6 +119,8 @@ const KNOWN: Record<string, string> = {
   chrome_navigation_failed: '강의 페이지를 열지 못했어요.',
   chrome_window_closed: 'Chrome 창이 닫혀 자동 재생을 멈췄어요.',
   chrome_closed: 'Chrome과의 연결이 끊겨 자동 재생을 멈췄어요.',
+  chrome_quit_unexpectedly: 'Chrome이 갑자기 종료되어 자동 재생을 멈췄어요.',
+  chrome_recover_exhausted: 'Chrome 연결이 반복해서 끊겨 자동 재생을 멈췄어요.',
   chrome_window_missing: 'Chrome 창이 열려 있지 않아요.',
   chrome_watch_error: '자동 재생 중 예상하지 못한 오류가 생겼어요.',
 };
