@@ -174,6 +174,7 @@ def lms_http_error_detail(exc: Exception, service: Any) -> tuple[str, str, dict[
     final_url = trace_entry.get("final_url") or trace_entry.get("url")
     if isinstance(final_url, str):
         host = urlsplit(final_url).netloc or None
+    logger.warning("lms_request_failed step=%s status=%s", step, status)
     code = f"lms_request_failed:{step}:{status}"
     message = f"LMS/Commons 요청 실패: {step} 단계에서 HTTP {status} 응답을 받았습니다."
     detail = {

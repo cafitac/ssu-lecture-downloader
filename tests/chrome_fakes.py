@@ -97,6 +97,7 @@ class FakeBrowser:
         self.cookies: list[dict[str, Any]] = []
         self.mouse: list[tuple[str | None, str, float, float]] = []
         self.destroyed_page = False
+        self.crashed_sessions: set[str] = set()
         self.fail_methods: dict[str, str] = {}
         self._located: str | None = None
 
@@ -114,6 +115,10 @@ class FakeBrowser:
 
     # -- helpers
     def emit(self, method: str, params: dict[str, Any], session: str | None = None) -> None:
+        if method == "Inspector.targetCrashed" and session == PAGE_SESSION:
+            self.crashed_sessions.add(PAGE_SESSION)
+        elif method == "Target.targetCrashed" and params.get("targetId") == "T1":
+            self.crashed_sessions.add(PAGE_SESSION)
         message: dict[str, Any] = {"method": method, "params": params}
         if session:
             message["sessionId"] = session
@@ -133,9 +138,17 @@ class FakeBrowser:
         method = message["method"]
         params = message.get("params") or {}
         session = message.get("sessionId")
+        if method in {"Page.enable", "Runtime.enable"} and session in self.crashed_sessions:
+            return  # Real Chrome never replies until Page.navigate revives the target.
+        if method == "Inspector.enable" and session in self.crashed_sessions:
+            self.emit("Inspector.targetCrashed", {}, session)
         if method in self.fail_methods:
             self.incoming.put(json.dumps({"id": message["id"], "error": {"code": -32000, "message": self.fail_methods[method]}}))
             return
+        if method == "Page.navigate":
+            if session in self.crashed_sessions:
+                self.emit("Inspector.targetReloadedAfterCrash", {}, session)
+            self.crashed_sessions.clear()
         if method == "Target.getTargets":
             return self.reply(message, {"targetInfos": [{"targetId": "T1", "type": "page", "url": "about:blank"}]})
         if method == "Target.attachToTarget":
