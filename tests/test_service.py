@@ -364,7 +364,7 @@ def test_service_native_plan_uses_head_redirect_target_for_native_transfer(tmp_p
     assert result.result.ok is True
     assert result.native_download is not None
     assert result.native_download.download_url == 'https://ssu-toast.commonscdn.com/video.mp4?redacted=1'
-    assert result.native_download.output_path.endswith('자료_구조/테스트 강의 [content-1].mp4')
+    assert result.native_download.output_path.endswith('자료_구조/01주차/강의 1/강의 1.mp4')
 
 
 def test_service_plans_and_downloads_lecture_to_safe_path(tmp_path: Path):
@@ -385,7 +385,7 @@ def test_service_plans_and_downloads_lecture_to_safe_path(tmp_path: Path):
     assert result.ok is True
     assert result.written is True
     assert result.file_size == 4
-    assert result.output_path.endswith('자료_구조/테스트 강의 [content-1].mp4')
+    assert result.output_path.endswith('자료_구조/01주차/강의 1/강의 1.mp4')
     assert Path(result.output_path).read_bytes() == b'1234'
     assert 'download_progress' in [event['stage'] for event in events]
     assert events[-1]['stage'] == 'download_done'
@@ -477,7 +477,7 @@ def test_service_plans_pdf_material_to_pdf_path(tmp_path: Path):
     assert result.ok is True
     assert result.written is False
     assert result.download_size == 2048
-    assert result.output_path.endswith('자료_구조/강의자료 PDF [pdf-content-1].pdf')
+    assert result.output_path.endswith('자료_구조/01주차/강의자료 PDF.pdf')
 
 
 def test_service_plans_readystream_video_to_mp4_path(tmp_path: Path):
@@ -510,7 +510,7 @@ def test_service_plans_readystream_video_to_mp4_path(tmp_path: Path):
 
     assert result.ok is True
     assert result.written is False
-    assert result.output_path.endswith('국제상무론/계약의 기본조건 2 [63b26d5c58048].mp4')
+    assert result.output_path.endswith('국제상무론/01주차/강의 1/강의 1.mp4')
 
 
 def test_service_batch_can_plan_selected_pdf_material(tmp_path: Path):
@@ -546,7 +546,7 @@ def test_service_batch_can_plan_selected_pdf_material(tmp_path: Path):
     assert result.ok is True
     assert [item.module_item_id for item in result.items] == [112]
     assert result.items[0].written is False
-    assert result.items[0].output_path.endswith('자료_구조/강의자료 PDF [pdf-content-1].pdf')
+    assert result.items[0].output_path.endswith('자료_구조/01주차/강의자료 PDF.pdf')
     assert any(event['stage'] == 'planned' for event in events)
     assert events[-1]['stage'] == 'batch_prepare_done'
     assert events[-1]['resolved_count'] == 1
@@ -991,6 +991,7 @@ def test_downloads_use_a_private_http_client_that_is_closed_afterwards(tmp_path:
     used = []
     closed = []
     monkeypatch.setattr(HttpClient, 'close', lambda self: closed.append(self))
+    monkeypatch.setattr(service, '_course_modules', lambda course_id, **kwargs: [])  # the folder plan must not reach the real LMS
 
     def fake_download(*, http, download_url, plan, referer=None, max_attempts=1, on_progress=None, should_cancel=None):
         used.append(http)
@@ -1105,3 +1106,41 @@ def test_batch_cancel_before_downloads_start_opens_no_connections(tmp_path: Path
     service.batch_download_lectures('user', 'password', course_id=42, course_name='과목', output_dir=tmp_path, dry_run=False, module_item_ids=[111], on_progress=on_progress, should_cancel=should_cancel)
 
     assert downloads == []
+
+
+def test_a_failing_module_list_fails_the_single_download_instead_of_filing_it_under_the_catch_all(tmp_path: Path, monkeypatch, caplog):
+    service = SsuLectureService(http=FakeHttp(), login_func=ok_login)
+    original = service._course_modules
+
+    def modules(course_id, **kwargs):
+        if 'http' in kwargs:  # the media resolution before it still works
+            return original(course_id, **kwargs)
+        raise curl_exceptions.ConnectionError('LMS unreachable')
+
+    monkeypatch.setattr(service, '_course_modules', modules)
+
+    with pytest.raises(curl_exceptions.ConnectionError), caplog.at_level('WARNING'):
+        service.download_lecture('user', 'password', course_id=42, module_item_id=111, course_name='과목', output_dir=tmp_path, dry_run=True)
+
+    assert any(record.levelname == 'WARNING' and 'module list unavailable' in record.getMessage() for record in caplog.records)
+    assert not list(tmp_path.rglob('*'))
+
+
+def test_a_login_failure_while_planning_the_folder_is_a_failed_result(tmp_path: Path, monkeypatch):
+    service = SsuLectureService(http=FakeHttp(), login_func=ok_login)
+    original = service._authenticated
+    calls = []
+
+    def authenticated(username, password, operation):
+        calls.append(operation)
+        if len(calls) == 1:  # the media resolution
+            return original(username, password, operation)
+        return LoginDiscoveryResult(ok=False, error_code='authentication_failed'), None
+
+    monkeypatch.setattr(service, '_authenticated', authenticated)
+
+    result = service.download_lecture('user', 'password', course_id=42, module_item_id=111, course_name='과목', output_dir=tmp_path, dry_run=True)
+    native = service.native_download_plan('user', 'password', course_id=42, module_item_id=111, course_name='과목', output_dir=tmp_path)
+
+    assert (result.ok, result.error_code) == (False, 'authentication_failed')
+    assert (native.result.ok, native.native_download) == (False, None)

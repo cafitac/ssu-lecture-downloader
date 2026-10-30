@@ -56,7 +56,7 @@ def test_plan_download_path_maps_commons_movie_content_type_to_playable_mp4_exte
         extension='movie',
     )
 
-    assert plan.file_path.name == '1주차 [content-1].mp4'
+    assert plan.file_path == tmp_path / 'UX방법론' / '기타' / '1주차' / '1주차.mp4'
 
 
 def test_download_streams_chunks_to_temp_file_then_atomic_final_path(tmp_path: Path):

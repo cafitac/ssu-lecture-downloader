@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from ssu_lecture_downloader.core.credentials import CredentialPair
+from ssu_lecture_downloader.core.library_layout import MACOS_RULES, PathRules
 from ssu_lecture_downloader.platforms.base import (
     APP_DOWNLOAD_FOLDER_NAME,
     APP_IDENTIFIER,
@@ -223,6 +224,11 @@ class MacOSPlatform:
     def local_engine_supported(self) -> bool:
         # faster-whisper's CTranslate2 wheels are not published for Intel Macs (see pyproject markers).
         return not (sys.platform == "darwin" and platform.machine() == "x86_64")
+
+    # -------------------------------------------------------------- PathRulesProvider
+
+    def path_rules(self) -> PathRules:
+        return MACOS_RULES
 
     # -------------------------------------------------------------- SecretFileWriter
 

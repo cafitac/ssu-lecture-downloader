@@ -32,6 +32,7 @@ from ssu_lecture_downloader.core import postprocess_media, stt_cues
 from ssu_lecture_downloader.core.postprocess_media import MediaCancelled
 from ssu_lecture_downloader.core.progress import emit_progress
 from ssu_lecture_downloader.core.ssh_tunnel import SshTunnel, TunnelError
+from ssu_lecture_downloader.core.errors import LibraryConflict, PathTooLong
 from ssu_lecture_downloader.core.stt import MEDIA, TranscriptionCancelled, TranscriptionRequest, TranscriptionResult, WorkGates, write_transcript_files
 from ssu_lecture_downloader.core.stt_cues import TranscriptSegment
 from ssu_lecture_downloader.core.stt_remote_config import (
@@ -679,9 +680,12 @@ def transcribe_with_remote(
             model=model,
             language=request.language,
             overwrite=request.overwrite,
+            paths=request.paths,
         )
     except OSError as exc:
-        return TranscriptionResult(ok=False, audio_path=audio_path, segments=cues, error_code='transcript_write_failed', message=str(exc)[:500])
+        # A taken lecture folder / path budget has its own stable code; any other write problem stays `transcript_write_failed`.
+        code = exc.error_code if isinstance(exc, (LibraryConflict, PathTooLong)) else 'transcript_write_failed'
+        return TranscriptionResult(ok=False, audio_path=audio_path, segments=cues, error_code=code, message=str(exc)[:500])
     result.warnings = warnings
     return result
 

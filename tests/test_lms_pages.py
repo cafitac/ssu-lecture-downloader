@@ -251,15 +251,15 @@ def test_list_page_files_quotes_the_page_reference_and_accepts_a_guarded_body():
     assert http.calls[0][1] == "https://canvas.ssu.ac.kr/api/v1/courses/7/pages/1%EC%A3%BC%EC%B0%A8%20%EC%9E%90%EB%A3%8C%2F.."
 
 
-def test_download_canvas_file_writes_atomically_into_the_course_folder(tmp_path: Path):
+def test_download_canvas_file_writes_atomically_into_the_week_folder_named_in_its_title(tmp_path: Path):
     service, http = make_service()
 
     result = service.download_canvas_file("u", "p", file_id="101", course_name="UX방법론", output_dir=tmp_path)
 
     assert result.ok and result.written and not result.skipped
     target = Path(result.output_path)
-    assert target.parent == tmp_path / "UX방법론"
-    assert target.name == "1주차 강의자료 [canvas-101].pdf"
+    assert target == tmp_path / "UX방법론" / "01주차" / "1주차 강의자료.pdf"
+    assert (target.parent / ".ssu" / "materials.json").is_file()
     assert target.read_bytes() == b"%PDF-1.4 abc"
     assert not list(tmp_path.rglob("*.part")), "the .part file is renamed away"
     assert result.file_size == len(b"%PDF-1.4 abc")
@@ -276,7 +276,7 @@ def test_download_canvas_file_skips_an_existing_file_and_keeps_it(tmp_path: Path
     assert first.written and again.skipped and not again.written
     assert again.output_path == first.output_path
     assert len([call for call in http.calls if call[0] == "download_media"]) == 1
-    assert Path(first.output_path).name == "실습 [canvas-102].bin"
+    assert Path(first.output_path) == tmp_path / "c" / "기타" / "실습.bin"
 
 
 def test_download_canvas_file_reports_files_canvas_refuses(tmp_path: Path):
@@ -366,7 +366,7 @@ def test_api_download_honours_the_chosen_folder_and_conflict_policy(api, tmp_pat
     first = client.post("/api/download/canvas-file", json=body).json()
     second = client.post("/api/download/canvas-file", json=body).json()
 
-    assert Path(first["output_path"]).parent == chosen / "c"
+    assert Path(first["output_path"]).parent == chosen / "c" / "기타"
     assert second["output_path"] != first["output_path"] and second["written"]
 
 
@@ -418,3 +418,32 @@ def test_api_health_advertises_the_lms_page_routes(api):
     client, _, _ = api
 
     assert "lms_pages" in client.get("/api/health").json()["capabilities"]
+
+
+def test_api_canvas_file_lands_in_the_week_of_the_page_it_was_opened_from_and_the_second_download_is_skipped(api):
+    client, _, root = api
+
+    body = {"course_id": 7, "file_id": "101", "course_name": "UX방법론", "module_name": "3주차: 실습", "week_position": 3}
+    first = client.post("/api/download/canvas-file", json=body).json()
+    again = client.post("/api/download/canvas-file", json=body).json()
+    other = client.post("/api/download/canvas-file", json={"course_id": 7, "file_id": "102", "course_name": "UX방법론"}).json()
+
+    assert first["output_path"] == str(root / "UX방법론" / "03주차" / "1주차 강의자료.pdf")  # the page's week beats the "1주차" in the file title
+    assert again["skipped"] is True and again["written"] is False and again["output_path"] == first["output_path"]
+    assert other["output_path"] == str(root / "UX방법론" / "기타" / "실습.bin")
+    assert (root / "UX방법론" / "03주차" / ".ssu" / "materials.json").is_file()
+
+
+def test_canvas_files_with_one_title_in_a_week_are_numbered(tmp_path: Path):
+    service, http = make_service()
+    http.files["103"] = {**http.files["101"], "id": "103", "url": "https://canvas.ssu.ac.kr/files/103/download?verifier=ghi"}
+    http.bodies["103"] = b"%PDF-1.4 other"
+
+    first = service.download_canvas_file("u", "p", file_id="101", course_name="c", output_dir=tmp_path, week_position=1)
+    second = service.download_canvas_file("u", "p", file_id="103", course_name="c", output_dir=tmp_path, week_position=1)
+    first_again = service.download_canvas_file("u", "p", file_id="101", course_name="c", output_dir=tmp_path, week_position=1)
+
+    assert Path(first.output_path).name == "1주차 강의자료.pdf"
+    assert Path(second.output_path).name == "1주차 강의자료 (2).pdf"
+    assert first_again.skipped is True and first_again.output_path == first.output_path
+    assert Path(second.output_path).read_bytes() == b"%PDF-1.4 other"

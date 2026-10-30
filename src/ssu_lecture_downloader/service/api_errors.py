@@ -20,7 +20,9 @@ from ssu_lecture_downloader.core.grades.models import (
 from ssu_lecture_downloader.core.errors import (
     NETWORK_ERROR,
     NETWORK_TIMEOUT,
+    LibraryConflict,
     LoginFlowError,
+    PathTooLong,
     classify_network_error,
     is_session_lost,
 )
@@ -59,6 +61,12 @@ GRADES_ERROR_CODES = frozenset(
 )
 
 INTERNAL_ERROR_CODE = "internal_error"
+LIBRARY_CONFLICT_CODE = LibraryConflict.error_code
+PATH_TOO_LONG_CODE = PathTooLong.error_code
+LIBRARY_MESSAGES = {
+    LIBRARY_CONFLICT_CODE: "저장할 자리에 같은 이름의 다른 파일이 생겼어요. 잠시 후 다시 받아 주세요.",
+    PATH_TOO_LONG_CODE: "저장 경로가 너무 길어요. 더 짧은 폴더로 바꿔서 다시 받아 주세요.",
+}
 MEDIA_CONTENT_ID_MISSING_MESSAGE = "attendance item does not expose Commons content_id"
 
 
@@ -91,6 +99,10 @@ def status_for_error_code(error_code: str | None) -> int:
         return HTTPStatus.UNAUTHORIZED
     if code == NETWORK_TIMEOUT:
         return HTTPStatus.GATEWAY_TIMEOUT
+    if code == LIBRARY_CONFLICT_CODE:
+        return HTTPStatus.CONFLICT
+    if code == PATH_TOO_LONG_CODE:
+        return HTTPStatus.BAD_REQUEST
     return HTTPStatus.BAD_GATEWAY
 
 
@@ -186,6 +198,8 @@ def service_exception_error(exc: Exception, service: Any) -> HTTPException:
         return service_error("session_expired")
     if isinstance(exc, LoginFlowError):
         return service_error(exc.code, message=exc.message)
+    if isinstance(exc, (LibraryConflict, PathTooLong)):
+        return service_error(exc.error_code, message=LIBRARY_MESSAGES[exc.error_code])
     if isinstance(exc, curl_exceptions.HTTPError):
         code, message, detail = lms_http_error_detail(exc, service)
         return service_error(code, message=message, detail=detail)
@@ -208,6 +222,8 @@ def background_job_error_code(exc: Exception, service: Any) -> str:
         return "session_expired"
     if isinstance(exc, LoginFlowError):
         return exc.code
+    if isinstance(exc, (LibraryConflict, PathTooLong)):
+        return exc.error_code
     if isinstance(exc, curl_exceptions.HTTPError):
         return lms_http_error_detail(exc, service)[0]
     network_code = classify_network_error(exc)

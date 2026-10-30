@@ -220,3 +220,91 @@ def test_faster_whisper_reports_intel_mac_as_unsupported(monkeypatch):
 
     monkeypatch.setattr(macos.platform, 'machine', lambda: 'arm64')
     assert stt.check_stt_provider('faster_whisper', stt_capability=capability).platform_supported is True
+
+
+# ---- explicit lecture files (week -> lecture layout); standalone naming stays as it was
+
+
+def lecture_paths(tmp_path: Path):
+    from ssu_lecture_downloader.core.library_layout import CourseLayout, LibraryTarget
+
+    target = LibraryTarget(key='1', title='선대_5_2', kind='lecture', content_id='cid-1', module_item_id='1', week_position=5)
+    paths = CourseLayout.plan(tmp_path / 'course', [target], course_id='7').lecture('1')
+    assert paths is not None
+    return paths
+
+
+def test_write_transcript_files_with_lecture_paths_puts_text_and_srt_next_to_the_video_and_md_json_in_the_hidden_folder(tmp_path: Path, monkeypatch):
+    paths = lecture_paths(tmp_path)
+    audio = tmp_path / 'scratch.mp3'
+    audio.write_bytes(b'audio')
+    written: list[str] = []
+    import ssu_lecture_downloader.core.stt as stt_module
+
+    real = stt_module._write_text_atomically
+
+    def record(path, content):
+        real(path, content)
+        written.append(path.name)
+
+    monkeypatch.setattr(stt_module, '_write_text_atomically', record)
+    result = write_transcript_files(
+        audio_path=audio, segments=[TranscriptSegment(start=0, end=1, text='안녕하세요.')], output_dir=None, provider='fake', model='m', language='ko', overwrite=False, paths=paths
+    )
+
+    lecture = tmp_path / 'course' / '05주차' / '선대_5_2'
+    assert result.ok is True
+    assert (result.text_path, result.srt_path) == (lecture / '선대_5_2 자막.txt', lecture / '선대_5_2.srt')
+    assert (result.md_path, result.json_path) == (lecture / '.ssu' / 'transcript.md', lecture / '.ssu' / 'transcript.json')
+    assert written == ['선대_5_2.srt', 'transcript.md', 'transcript.json', '선대_5_2 자막.txt']  # the text is the commit marker
+    assert (lecture / '.ssu' / 'item.json').is_file()
+    assert not list(tmp_path.rglob('*.part'))
+
+
+def test_write_transcript_files_with_lecture_paths_overwrites_leftovers_of_an_interrupted_run_but_not_a_finished_set(tmp_path: Path):
+    paths = lecture_paths(tmp_path)
+    audio = tmp_path / 'scratch.mp3'
+    audio.write_bytes(b'audio')
+    segments = [TranscriptSegment(start=0, end=1, text='안녕하세요.')]
+    paths.prepare()
+    (paths.lecture_dir / '.ssu' / 'transcript.md').write_text('partial')
+    kwargs = {'audio_path': audio, 'segments': segments, 'output_dir': None, 'provider': 'fake', 'model': 'm', 'language': 'ko', 'paths': paths}
+
+    resumed = write_transcript_files(overwrite=False, **kwargs)
+    again = write_transcript_files(overwrite=False, **kwargs)
+    forced = write_transcript_files(overwrite=True, **kwargs)
+
+    assert resumed.ok is True and 'partial' not in (paths.lecture_dir / '.ssu' / 'transcript.md').read_text(encoding='utf-8')
+    assert again.ok is False and again.error_code == 'transcript_exists'
+    assert forced.ok is True
+
+
+def test_standalone_transcription_keeps_the_transcript_names_next_to_the_audio(tmp_path: Path):
+    audio = tmp_path / 'lecture.wav'
+    audio.write_bytes(b'audio')
+
+    result = transcribe_audio(TranscriptionRequest(audio_path=audio, provider='fake'), stt_capability=SUPPORTS_LOCAL_STT)
+
+    assert result.ok is True
+    assert result.text_path == tmp_path / 'lecture.transcript.txt'
+    assert result.md_path == tmp_path / 'lecture.transcript.md' and result.json_path == tmp_path / 'lecture.transcript.json'
+    assert result.srt_path == tmp_path / 'lecture.srt'
+    assert not (tmp_path / '.ssu').exists()
+
+
+def test_transcribe_audio_with_lecture_paths_writes_the_lecture_layout(tmp_path: Path):
+    paths = lecture_paths(tmp_path)
+    audio = tmp_path / 'scratch.mp3'
+    audio.write_bytes(b'audio')
+
+    result = transcribe_audio(TranscriptionRequest(audio_path=audio, provider='fake', paths=paths), stt_capability=SUPPORTS_LOCAL_STT)
+
+    assert result.ok is True and result.text_path == paths.targets['text'] and result.text_path.is_file()
+
+
+def test_lecture_paths_cannot_come_from_a_request_body(tmp_path: Path):
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        TranscriptionRequest.model_validate({'audio_path': str(tmp_path / 'a.wav'), 'paths': {'lecture_dir': str(tmp_path), 'stem': 'x', 'targets': {}}})
+    assert 'paths' not in TranscriptionRequest(audio_path=tmp_path / 'a.wav', paths=lecture_paths(tmp_path)).model_dump()
