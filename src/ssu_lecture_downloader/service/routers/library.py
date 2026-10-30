@@ -24,7 +24,6 @@ from ssu_lecture_downloader.core.library_migration import (
 from ssu_lecture_downloader.service.api_errors import (
     INVALID_RUN_ID_CODE,
     TIDY_PLAN_EXPIRED_CODE,
-    TIDY_RUN_NOT_FOUND_CODE,
     tidy_error,
 )
 from ssu_lecture_downloader.service.app_context import AppContext, add_job_routes
@@ -118,7 +117,7 @@ def build_router(ctx: AppContext) -> APIRouter:
             try:
                 run_journal_path(root, request.run_id)
             except TidyRunNotFound:
-                raise tidy_error(TIDY_RUN_NOT_FOUND_CODE) from None
+                raise tidy_error(TidyRunNotFound.error_code) from None
 
             def work(job: Job) -> JobOutcome:
                 result = runner.undo(root, request.run_id, on_progress=job.append_progress, should_cancel=job.should_cancel)

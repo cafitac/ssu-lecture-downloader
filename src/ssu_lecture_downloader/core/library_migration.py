@@ -288,17 +288,27 @@ def _list_course_folder(folder: Path) -> tuple[list[_Found], list[tuple[Path, st
 
 
 def _disk_only_leftovers(found: list[_Found], index: LibraryIndex) -> set[Path]:
-    """Old files a preview will always leave (`duplicate_transcript`), knowable without the LMS: a copy `(n)` of a
-    transcript file, the oldest `.txt` next to a `.transcript.txt`, or next to a transcript text already in the lecture folder."""
+    """Old files a preview always leaves for disk-only duplicate or destination conflicts."""
     leftovers: set[Path] = set()
     main_text = {f.parsed.content_id for f in found if f.parsed.role == 'text' and f.parsed.duplicate is None}
     for f in found:
         role, content_id = f.parsed.role, f.parsed.content_id
+        if content_id in index.materials:
+            continue
+        lecture = index.lectures.get(content_id)
+        existing = index.lecture_files(lecture) if lecture is not None else {}
+        if lecture is not None:
+            for meta_role in ('md', 'json'):
+                path = lecture.lecture_dir / META_DIR_NAME / f'transcript.{meta_role}'
+                if os.path.lexists(path):
+                    existing[meta_role] = path
         if f.parsed.duplicate is not None and role in ('text', 'text_legacy', 'md', 'json'):
             leftovers.add(f.path)
         elif role == 'text_legacy':
-            lecture = index.lectures.get(content_id)
-            if content_id in main_text or (lecture is not None and 'text' in index.lecture_files(lecture)):
+            if content_id in main_text or 'text' in existing:
+                leftovers.add(f.path)
+        elif f.parsed.duplicate is None and role in existing:
+            if role not in ('video', 'audio') or existing[role].suffix == f.path.suffix:
                 leftovers.add(f.path)
     return leftovers
 
@@ -306,6 +316,8 @@ def _disk_only_leftovers(found: list[_Found], index: LibraryIndex) -> set[Path]:
 def count_legacy_files(course_dir: Path) -> int:
     """How many files directly inside `course_dir` a tidy-up could still move: old `[content id]` names, without the
     leftovers that need no LMS to know they stay (`.part` files, unknown names and duplicate transcripts)."""
+    if course_dir.is_symlink():
+        return 0
     found, _ = _list_course_folder(course_dir)
     if not found:
         return 0
@@ -534,7 +546,7 @@ def _move_shape_ok(source: object, destination: object) -> bool:
     if not isinstance(source, str) or not isinstance(destination, str):
         return False
     src, dst = source.split('/'), destination.split('/')
-    if len(src) != 2 or not 3 <= len(dst) <= 5 or dst[0] != src[0] or not _visible(src):
+    if len(src) != 2 or not 3 <= len(dst) <= 5 or _nfc(dst[0]) != _nfc(src[0]) or not _visible(src):
         return False
     if len(dst) == 5:
         return dst[3] == '.ssu' and _visible(dst[:3]) and dst[4] in ('transcript.md', 'transcript.json')

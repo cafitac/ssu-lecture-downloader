@@ -84,6 +84,15 @@ rules); added: `move_failed` (see decisions to confirm).
 - Not done (P4, noted): the metadata intent is not journaled before the metadata is written (a crash in between leaves app metadata that a later undo cannot take back; the next preview recognises it as the lecture); `runs()` is a plain read of the journals and does not run crash recovery, so a completed move whose `done` line was lost is counted only after the next apply/undo.
 - Follow-ups: make `lms_service._course_layout` public; move `has_active` from `ActivityRegistry` onto `JobRegistry`.
 
+## Review cycle 2 repairs
+
+- Verification: `UV_LOCKED=1 uv run pytest -q`: 879 passed, 2 deprecation warnings (45.27 s); fake HTTP server emitted a BrokenPipeError during teardown, exit 0. `UV_LOCKED=1 uv run lint-imports`: 4 kept, 0 broken. Both used `UV_CACHE_DIR=/private/tmp/layout-py-migration-uv-cache` because the default cache was sandbox-inaccessible.
+
+- Compare course names in journal move shapes after NFC normalization, so NFD course folders support both undo and recovery. Audited mkdir/meta shapes and `_meta_kind`: these check depth and fixed metadata names, with no raw course-name comparison.
+- `TidyRunNotFound.error_code` supplies the router and failed background-job code.
+- Disk-only legacy counts exclude existing new-layout lecture destinations, preserve material transcript-like copies, and ignore symlinked course folders.
+- Known residual: a planted `done` line with exact stat values can still rename a week- or lecture-depth file, but can never delete or overwrite it. Binding `done` lines to this run's own `intent` and `mkdir` entries is a follow-up.
+
 ## Progress and evidence
 
 - 2026-10-30: implemented from origin/develop d697c33. `UV_LOCKED=1 uv run pytest -q`: 855 -> 876 passed. `UV_LOCKED=1 uv run lint-imports`: 4 kept, 0 broken.

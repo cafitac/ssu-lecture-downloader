@@ -23,6 +23,7 @@ from ssu_lecture_downloader.core.errors import (
     LibraryConflict,
     LoginFlowError,
     PathTooLong,
+    TidyRunNotFound,
     classify_network_error,
     is_session_lost,
 )
@@ -243,7 +244,7 @@ def background_job_error_code(exc: Exception, service: Any) -> str:
         return "session_expired"
     if isinstance(exc, LoginFlowError):
         return exc.code
-    if isinstance(exc, (LibraryConflict, PathTooLong)):
+    if isinstance(exc, (LibraryConflict, PathTooLong, TidyRunNotFound)):
         return exc.error_code
     if isinstance(exc, curl_exceptions.HTTPError):
         return lms_http_error_detail(exc, service)[0]

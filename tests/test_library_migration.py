@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 import stat
+import unicodedata
 from collections import Counter
 from pathlib import Path
 from typing import Any
@@ -223,14 +224,43 @@ def test_apply_moves_exactly_the_preview_journals_first_and_a_second_preview_has
     week = json.loads((tree / EQ / '05주차' / '.ssu' / 'materials.json').read_text())['entries']
     assert set(week) == {'cid-m0', 'cid-e', 'cid-f'} and week['cid-e']['created_by'] == 'migration'
 
+    conflict = f'{LA}/선대_5_2 [cid-a].mp4'
+    write_files(tree, [conflict])  # same role already exists in the new layout
+    alias = tree / 'course-alias'
+    alias.symlink_to(tree / LA, target_is_directory=True)
+    assert count_legacy_files(alias) == 0
+    alias.unlink()
     assert count_legacy_files(tree / LA) == count_legacy_files(tree / EQ) == count_legacy_files(tree / UI) == 0  # what stays is not offered again
     again = planned(runner, tree)
 
-    assert again.moves == [] and {skip.path: skip.reason for skip in again.skips} == EXPECTED_SKIPS
+    assert again.moves == [] and {skip.path: skip.reason for skip in again.skips} == {**EXPECTED_SKIPS, conflict: 'destination_exists'}
     write_files(tree, [f'{LA}/선대_5_2 [cid-a].mp3'])  # a late old file of an already tidied lecture joins its folder
     second = runner.apply(planned(runner, tree))
     assert second.moved == 1 and (tree / LA / '05주차' / '선대_5_2' / '선대_5_2 음성.mp3').is_file()
     assert [run['run_id'] for run in runner.runs(tree)] == [second.run_id, result.run_id]
+    write_files(tree, [f'{EQ}/자료 [cid-f] (2).txt'])  # transcript-like material copies still move
+    assert count_legacy_files(tree / EQ) == 1
+    assert runner.apply(planned(runner, tree)).moved == 1
+
+
+def test_nfd_course_apply_recovery_and_undo(tmp_path):
+    course = unicodedata.normalize('NFD', '선형대수')
+    names = [f'{course}/강의 [cid-a].mp4', f'{course}/강의 [cid-a].transcript.md']
+    write_files(tmp_path, names)
+    before = {name: (tmp_path / name).read_bytes() for name in names}
+    runner = MigrationRunner()
+    result = runner.apply(runner.plan(tmp_path, FakeCatalog({LA: [video(1, '강의', 'cid-a')]})))
+    assert result.moved == 2
+    path = migrations_dir(tmp_path) / f'{result.run_id}.jsonl'
+    lines = read_journal(path)
+    done = next(line for line in lines if line['op'] == 'done')
+    path.write_text(''.join(json.dumps(line) + '\n' for line in lines if line is not done))
+    runner._recover_journal(tmp_path, path)
+    assert sum(line['op'] == 'done' for line in read_journal(path)) == 2
+    undone = runner.undo(tmp_path, result.run_id)
+    assert undone.restored == 2 and undone.skips == []
+    assert {name: (tmp_path / name).read_bytes() for name in names} == before
+    assert runner.runs(tmp_path)[0]['undo_available'] is False
 
 
 def test_apply_skips_what_changed_since_the_preview_and_moves_the_rest(tree):
