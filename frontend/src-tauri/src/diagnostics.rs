@@ -30,25 +30,41 @@ pub(crate) struct SavedDiagnostics {
 // Redaction
 // ---------------------------------------------------------------------------
 
-/// Words that mark a value as secret: `(word, whole word only, rest of the line when unquoted)`.
+/// How far an unquoted value reaches.
+#[derive(Clone, Copy, PartialEq)]
+enum Reach {
+    /// Up to the value's delimiter (`token=abc&x=1`).
+    Value,
+    /// To the end of the line after `:` (`Cookie: a=b; c=d`), but only up to the delimiter after `=`
+    /// (`cookies=2 launch=true` is a count, not a header).
+    LineAfterColon,
+    /// To the end of the line, whatever the separator and suffix: it holds a scheme and a credential.
+    Line,
+}
+
+/// Words that mark a value as secret: `(word, whole word only, reach)`.
 /// A word listed as not whole-word also matches inside names (`xn_api_token`, `JSESSIONID`, ...)
 /// and may be followed by more name characters (`session_id=`).
-const SECRET_KEYS: [(&str, bool, bool); 14] = [
-    ("cookie", false, true),
-    ("authorization", false, true),
-    ("token", false, false),
-    ("password", false, false),
-    ("passwd", false, false),
-    ("secret", false, false),
-    ("session", false, false),
-    ("api_key", false, false),
-    ("api-key", false, false),
-    ("apikey", false, false),
-    ("signature", false, false),
-    ("key-pair-id", false, false),
-    ("sid", true, false),
-    ("policy", true, false),
+const SECRET_KEYS: [(&str, bool, Reach); 14] = [
+    ("cookie", false, Reach::LineAfterColon),
+    ("authorization", false, Reach::Line),
+    ("token", false, Reach::Value),
+    ("password", false, Reach::Value),
+    ("passwd", false, Reach::Value),
+    ("secret", false, Reach::Value),
+    ("session", false, Reach::Value),
+    ("api_key", false, Reach::Value),
+    ("api-key", false, Reach::Value),
+    ("apikey", false, Reach::Value),
+    ("signature", false, Reach::Value),
+    ("key-pair-id", false, Reach::Value),
+    ("sid", true, Reach::Value),
+    ("policy", true, Reach::Value),
 ];
+
+/// Words that open a credential (`Bearer abc`): when a redacted value is one of them, the next
+/// token is the credential and goes too.
+const AUTH_SCHEMES: [&str; 5] = ["bearer", "basic", "digest", "negotiate", "token"];
 
 /// A dict pair `{'name': <this>, 'value': ...}` is secret when its name contains one of these.
 const SECRET_NAME_WORDS: [&str; 4] = ["token", "cookie", "session", "secret"];
@@ -211,6 +227,29 @@ fn apply_ranges(line: &str, ranges: &[(usize, usize)]) -> String {
     out
 }
 
+/// When the value `start..end` is an auth scheme word, extends `end` over the next
+/// whitespace-delimited token (the credential that follows the scheme).
+fn include_credential_after_scheme(bytes: &[u8], start: usize, end: usize) -> usize {
+    if !AUTH_SCHEMES
+        .iter()
+        .any(|scheme| scheme.as_bytes() == &bytes[start..end])
+    {
+        return end;
+    }
+    let mut next = end;
+    while next < bytes.len() && bytes[next].is_ascii_whitespace() {
+        next += 1;
+    }
+    if next == end || next >= bytes.len() {
+        return end;
+    }
+    let mut token_end = next;
+    while token_end < bytes.len() && !bytes[token_end].is_ascii_whitespace() {
+        token_end += 1;
+    }
+    token_end
+}
+
 /// Replaces secret values with `[redacted]` in one line: `key=value`, `key: value` and quoted
 /// dict/JSON keys for the words in `SECRET_KEYS`, `Bearer ...`, and name/value dict pairs.
 /// Query strings of URLs are dropped.
@@ -232,7 +271,7 @@ fn redact_line(line: &str) -> String {
                 }
             }
         }
-        for (key, whole_word, rest_of_line) in SECRET_KEYS {
+        for (key, whole_word, reach) in SECRET_KEYS {
             if !rest.starts_with(key.as_bytes()) {
                 continue;
             }
@@ -247,11 +286,12 @@ fn redact_line(line: &str) -> String {
             }
             let separator = skip_spaces(bytes, skip_quote(bytes, after_key));
             if separator < bytes.len() && (bytes[separator] == b'=' || bytes[separator] == b':') {
-                // Only the header form (`Cookie: a=b; c=d`, the key directly followed by `:`)
-                // takes the rest of the line. `cookies=2` or `cookie=a` stop at the value's end.
-                let header =
-                    rest_of_line && bytes[separator] == b':' && after_key == at + key.len();
-                if let Some((start, end)) = read_value(bytes, separator + 1, header) {
+                let to_line_end = reach == Reach::Line
+                    || (reach == Reach::LineAfterColon && bytes[separator] == b':');
+                if let Some((start, mut end)) = read_value(bytes, separator + 1, to_line_end) {
+                    if !to_line_end && !is_quote(bytes[start - 1]) {
+                        end = include_credential_after_scheme(bytes, start, end);
+                    }
                     if line[start..end].trim() != REDACTED {
                         out.push_str(&line[at..start]);
                         out.push_str(REDACTED);
@@ -329,6 +369,7 @@ const GENERIC_SAVE_ERROR: &str =
 const NO_PERMISSION_ERROR: &str =
     "이 폴더에는 파일을 저장할 권한이 없어요. 다른 폴더를 골라 주세요.";
 const DISK_FULL_ERROR: &str = "저장 공간이 부족해요. 디스크 공간을 확보한 뒤 다시 시도해 주세요.";
+const NAME_TAKEN_ERROR: &str = "같은 이름의 파일이 이미 있어요. 다른 이름으로 저장해 주세요.";
 const NOT_A_FILE_ERROR: &str = "같은 이름의 폴더가 이미 있어요. 다른 이름이나 폴더를 골라 주세요.";
 
 /// Plain Korean for the user. The OS detail goes to stderr (the app's log channel), not to the UI.
@@ -352,13 +393,13 @@ fn zip_error_text(error: &zip::result::ZipError) -> String {
     }
 }
 
-/// The destination with a `.zip` extension: appended when the user's name lacks one.
-fn with_zip_extension(destination: &Path) -> Option<PathBuf> {
+/// The destination with a `.zip` extension, and whether it was appended (the user did not type it).
+fn with_zip_extension(destination: &Path) -> Option<(PathBuf, bool)> {
     let name = destination.file_name()?.to_string_lossy().to_string();
     if name.to_ascii_lowercase().ends_with(".zip") {
-        Some(destination.to_path_buf())
+        Some((destination.to_path_buf(), false))
     } else {
-        Some(destination.with_file_name(format!("{name}.zip")))
+        Some((destination.with_file_name(format!("{name}.zip")), true))
     }
 }
 
@@ -375,8 +416,16 @@ pub(crate) fn write_bundle(
     log_dir: &Path,
     info: &serde_json::Value,
 ) -> Result<SavedDiagnostics, String> {
-    let destination =
+    let (destination, appended) =
         with_zip_extension(destination).ok_or_else(|| "저장할 파일 이름이 없어요.".to_string())?;
+    // The save dialog confirmed "Replace" for the name the user typed, not for `name.zip`.
+    if appended && fs::symlink_metadata(&destination).is_ok() {
+        return Err(match fs::metadata(&destination) {
+            Ok(metadata) if metadata.is_file() => NAME_TAKEN_ERROR,
+            _ => NOT_A_FILE_ERROR,
+        }
+        .to_string());
+    }
     let target = match fs::metadata(&destination) {
         Ok(metadata) if metadata.is_file() => {
             fs::canonicalize(&destination).unwrap_or_else(|_| destination.clone())
@@ -675,6 +724,73 @@ mod tests {
     }
 
     #[test]
+    fn authorization_always_takes_the_rest_of_the_line_and_cookie_does_after_a_colon() {
+        for (input, expected) in [
+            ("authorization=Bearer abc123xyz", "authorization=[redacted]"),
+            (
+                "authorization=Basic dXNlcjpwYXNz more",
+                "authorization=[redacted]",
+            ),
+            (
+                "authorization = Bearer abc.def tail",
+                "authorization = [redacted]",
+            ),
+            (
+                "proxy_authorization: Digest a=b, c=d",
+                "proxy_authorization: [redacted]",
+            ),
+            ("authorizations=Negotiate YII", "authorizations=[redacted]"),
+            (
+                r#"{"authorization_header": "Bearer abc", "n": 1}"#,
+                r#"{"authorization_header": "[redacted]", "n": 1}"#,
+            ),
+            ("cookies: a=b; c=d", "cookies: [redacted]"),
+            ("cookie_jar: a=b; c=d", "cookie_jar: [redacted]"),
+            ("Set-Cookie: a=b; Path=/", "Set-Cookie: [redacted]"),
+            // `=`-separated cookie values and counts stay value-bounded.
+            (
+                "plan ok cookies=2 launch=true viewer=true",
+                "plan ok cookies=[redacted] launch=true viewer=true",
+            ),
+            (
+                "cookie_count=3 launch=true",
+                "cookie_count=[redacted] launch=true",
+            ),
+        ] {
+            assert_eq!(redact(input), expected, "{input}");
+        }
+    }
+
+    #[test]
+    fn a_redacted_auth_scheme_word_takes_the_credential_after_it() {
+        for (input, expected) in [
+            ("token=Bearer abc123 next", "token=[redacted] next"),
+            (
+                "session: basic dXNlcjpwYXNz next",
+                "session: [redacted] next",
+            ),
+            ("api_key=Digest abc more=1", "api_key=[redacted] more=1"),
+            ("secret=Negotiate YII= end", "secret=[redacted] end"),
+            ("password=token abc next", "password=[redacted] next"),
+            // Not a scheme word: only the value goes.
+            ("token=basics next", "token=[redacted] next"),
+            // A scheme word with nothing after it.
+            ("token=bearer", "token=[redacted]"),
+            ("token=bearer ", "token=[redacted] "),
+            // A quoted value already holds both words.
+            (
+                r#"{"token": "Bearer abc", "n": 1}"#,
+                r#"{"token": "[redacted]", "n": 1}"#,
+            ),
+        ] {
+            assert_eq!(redact(input), expected, "{input}");
+        }
+        // Applying it again changes nothing.
+        let once = redact("token=Bearer abc123 next\nauthorization=Basic x y\ncookies: a=b; c=d\n");
+        assert_eq!(redact(&once), once);
+    }
+
+    #[test]
     fn redacts_values_of_secret_name_value_pairs() {
         assert_eq!(
             redact("[{'name': 'xn_api_token', 'value': 'abc123', 'domain': 'ssu.ac.kr'}]"),
@@ -952,6 +1068,41 @@ mod tests {
         let error = write_bundle(&link, &logs, &serde_json::json!({})).expect_err("refused");
         assert_eq!(error, NOT_A_FILE_ERROR);
         assert_eq!(leftovers(&out), ["folder", "link.zip"]);
+        fs::remove_dir_all(logs).ok();
+        fs::remove_dir_all(out).ok();
+    }
+
+    #[test]
+    fn an_appended_zip_name_that_is_taken_is_refused_not_replaced() {
+        let logs = temp_dir("taken-logs");
+        let out = temp_dir("taken-out");
+        // The user typed `diag`; `diag.zip` is another file they never agreed to replace.
+        fs::write(out.join("diag.zip"), b"someone else's zip").expect("existing file");
+        let error =
+            write_bundle(&out.join("diag"), &logs, &serde_json::json!({})).expect_err("name taken");
+        assert_eq!(error, NAME_TAKEN_ERROR);
+        assert_eq!(
+            fs::read(out.join("diag.zip")).expect("kept"),
+            b"someone else's zip"
+        );
+        assert_eq!(leftovers(&out), ["diag.zip"]);
+        // Typing the full name is the confirmed replace.
+        write_bundle(&out.join("diag.zip"), &logs, &serde_json::json!({})).expect("replace");
+        assert_eq!(zip_entries(&out.join("diag.zip"))[0].0, "info.json");
+        fs::remove_dir_all(logs).ok();
+        fs::remove_dir_all(out).ok();
+    }
+
+    #[test]
+    fn an_appended_zip_name_that_is_a_folder_gives_the_not_a_file_error() {
+        let logs = temp_dir("takendir-logs");
+        let out = temp_dir("takendir-out");
+        fs::create_dir_all(out.join("diag.zip").join("keep")).expect("folder");
+        let error = write_bundle(&out.join("diag"), &logs, &serde_json::json!({}))
+            .expect_err("a folder is in the way");
+        assert_eq!(error, NOT_A_FILE_ERROR);
+        assert!(out.join("diag.zip").join("keep").is_dir());
+        assert_eq!(leftovers(&out), ["diag.zip"]);
         fs::remove_dir_all(logs).ok();
         fs::remove_dir_all(out).ok();
     }
