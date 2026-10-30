@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import type { GradesController } from '../hooks/useGrades';
+import type { LibraryTidy } from '../hooks/useLibraryTidy';
 import type { MediaDependencies } from '../hooks/useMediaDependencies';
 import type { RemoteStt } from '../hooks/useRemoteStt';
 import { useReminders } from '../hooks/useReminders';
@@ -8,10 +9,12 @@ import { isTauriRuntime } from '../lib/desktop';
 import { MAC_STUDIO_PRESET, REMOTE_KIND_LABEL, REMOTE_STT_NOTE, draftFromStatus, patchFromDraft, remoteSummary } from '../lib/remoteStt';
 import type { RemoteSttDraft } from '../lib/remoteStt';
 import type { RemoteSttKind, WatchDebugEvent, WatchMode } from '../lib/types';
+import { TIDY_COPY } from '../lib/tidy';
 import { CHROME_MISSING_NOTE, WATCH_MODE_DESCRIPTION, WATCH_MODE_LABEL } from '../lib/watch';
 import { Dialog } from './Dialog';
 import { FolderIcon } from './Icons';
 import { Spinner } from './Screens';
+import { TidyEntries } from './TidyDialog';
 
 interface Props {
   downloadDir: string;
@@ -25,6 +28,11 @@ interface Props {
   watchMode: WatchMode;
   chromeAvailable: boolean | null;
   queueActive: boolean;
+  /** The folder tidy-up and why it cannot start now (a download or an attachment save is running). */
+  tidy: LibraryTidy;
+  tidyBlocked: boolean;
+  onTidy: () => void;
+  onUndoTidy: () => void;
   onWatchModeChange: (mode: WatchMode) => void;
   onPickFolder: () => void;
   onOpenFolder: () => void;
@@ -299,7 +307,7 @@ function RemindersSection() {
   );
 }
 
-export function SettingsDialog({ downloadDir, busy, workBusy, media, debugEvents, grades, watchMode, chromeAvailable, queueActive, onWatchModeChange, onPickFolder, onOpenFolder, onSignOut, onClose }: Props) {
+export function SettingsDialog({ downloadDir, busy, workBusy, media, debugEvents, grades, watchMode, chromeAvailable, queueActive, tidy, tidyBlocked, onTidy, onUndoTidy, onWatchModeChange, onPickFolder, onOpenFolder, onSignOut, onClose }: Props) {
   const [signingOut, setSigningOut] = useState(false);
   const [signOutError, setSignOutError] = useState<string | null>(null);
   const desktop = isTauriRuntime();
@@ -332,7 +340,9 @@ export function SettingsDialog({ downloadDir, busy, workBusy, media, debugEvents
             변경
           </button>
           {desktop && <button type="button" className="btn btn-sm" onClick={onOpenFolder}><FolderIcon />폴더 열기</button>}
+          <TidyEntries tidy={tidy} blocked={tidyBlocked} onTidy={onTidy} onUndoTidy={onUndoTidy} />
         </div>
+        {tidyBlocked && tidy.runs.state !== 'unsupported' && <p className="muted small">{TIDY_COPY.busyHint}</p>}
       </section>
 
       <section className="setting">

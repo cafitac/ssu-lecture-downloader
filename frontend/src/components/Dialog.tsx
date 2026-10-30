@@ -5,11 +5,15 @@ import { CloseIcon } from './Icons';
 interface Props {
   title: string;
   onClose: () => void;
+  /** Wider panel for dialogs that list things. */
+  wide?: boolean;
+  /** No close button, for a moment when closing is not allowed (the caller's `onClose` then does nothing). */
+  hideClose?: boolean;
   children: ReactNode;
 }
 
 /** Modal dialog: closes on Escape or a click on the backdrop, and returns focus to the opener. */
-export function Dialog({ title, onClose, children }: Props) {
+export function Dialog({ title, onClose, wide = false, hideClose = false, children }: Props) {
   const titleId = useId();
   const panelRef = useRef<HTMLDivElement>(null);
   const onCloseRef = useRef(onClose);
@@ -32,10 +36,10 @@ export function Dialog({ title, onClose, children }: Props) {
 
   return (
     <div className="overlay" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
-      <div className="dialog" role="dialog" aria-modal="true" aria-labelledby={titleId} tabIndex={-1} ref={panelRef}>
+      <div className={wide ? 'dialog dialog-wide' : 'dialog'} role="dialog" aria-modal="true" aria-labelledby={titleId} tabIndex={-1} ref={panelRef}>
         <header className="dialog-head">
           <h2 id={titleId}>{title}</h2>
-          <button type="button" className="btn btn-icon btn-ghost" aria-label="닫기" onClick={onClose}><CloseIcon /></button>
+          {!hideClose && <button type="button" className="btn btn-icon btn-ghost" aria-label="닫기" onClick={onClose}><CloseIcon /></button>}
         </header>
         <div className="dialog-body">{children}</div>
       </div>

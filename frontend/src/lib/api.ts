@@ -1,4 +1,4 @@
-import type { AudioExtractionResult, ChromeWatchItemInput, ChromeWatchStatus, BatchDownloadItemResult, BatchDownloadResult, CanvasFileDownloadResponse, ConflictStrategy, CourseDetailResponse, CoursesResponse, CredentialStatus, DeadlinesResponse, DownloadJobStatus, DownloadOutputFormat, DownloadResult, LmsSessionBridgeResponse, MediaDependencyInstallResult, MediaDependencyStatusResponse, NativeDownloadPlanResult, OfficialViewerPlanResult, OfficialViewerSessionBridgeResult, PageFilesResponse, PostprocessJobStatus, ProgressEvent, RemoteSttConfigPatch, RemoteSttStatus, STTProviderStatusResponse, TermsResponse, TranscriptionResult } from './types';
+import type { AudioExtractionResult, ChromeWatchItemInput, ChromeWatchStatus, BatchDownloadItemResult, BatchDownloadResult, CanvasFileDownloadResponse, ConflictStrategy, CourseDetailResponse, CoursesResponse, CredentialStatus, DeadlinesResponse, DownloadJobStatus, DownloadOutputFormat, DownloadResult, LmsSessionBridgeResponse, MediaDependencyInstallResult, MediaDependencyStatusResponse, NativeDownloadPlanResult, OfficialViewerPlanResult, OfficialViewerSessionBridgeResult, PageFilesResponse, PostprocessJobStatus, ProgressEvent, RemoteSttConfigPatch, RemoteSttStatus, STTProviderStatusResponse, TermsResponse, TidyJobKind, TidyJobStatus, TidyRun, TranscriptionResult } from './types';
 import type { GradesClassesResponse, GradesOverviewResponse, GradesSemesterKind, GradesStatusResponse } from './types';
 import { buildRequestHeaders } from './http';
 import { reportWithPostprocess } from './postprocess';
@@ -225,7 +225,7 @@ export function fetchPageFiles(courseId: string | number, pageRef: string, cours
 }
 
 /** Saves one Canvas file into the course folder (an existing file is kept). */
-export function downloadCanvasFile(courseId: string | number, fileId: string, courseName: string, outputDir: string, conflictStrategy: ConflictStrategy = 'skip'): Promise<CanvasFileDownloadResponse> {
+export function downloadCanvasFile(courseId: string | number, fileId: string, courseName: string, outputDir: string, conflictStrategy: ConflictStrategy = 'skip', week: { module_name?: string | null; week_position?: number | string | null } = {}): Promise<CanvasFileDownloadResponse> {
   return requestJson<CanvasFileDownloadResponse>('/api/download/canvas-file', {
     method: 'POST',
     body: JSON.stringify({
@@ -234,6 +234,9 @@ export function downloadCanvasFile(courseId: string | number, fileId: string, co
       course_name: courseName,
       output_dir: outputDir.trim() || undefined,
       conflict_strategy: conflictStrategy,
+      // The page's week decides the folder; without it the backend files the attachment under 기타.
+      module_name: week.module_name || undefined,
+      week_position: week.week_position ?? undefined,
     }),
   });
 }
@@ -531,4 +534,29 @@ export function saveRemoteSttConfig(patch: RemoteSttConfigPatch): Promise<Remote
 /** Opens the SSH tunnel if needed and probes the server. A failed probe is data (`reachable: false`), not an error. */
 export function checkRemoteStt(): Promise<RemoteSttStatus> {
   return requestJson<RemoteSttStatus>('/api/stt/remote/check', { method: 'POST' });
+}
+
+// ------------------------------------------------------------ Folder tidy-up (preview, move, undo)
+
+const tidyJobsPath = (kind: TidyJobKind) => `/api/library/tidy/${kind}/jobs`;
+
+function startTidyJob(kind: TidyJobKind, body: Record<string, string>): Promise<TidyJobStatus> {
+  return requestJson<TidyJobStatus>(tidyJobsPath(kind), { method: 'POST', body: JSON.stringify(body) });
+}
+
+export const startTidyPlanJob = (outputDir: string) => startTidyJob('plan', { output_dir: outputDir.trim() });
+export const startTidyApplyJob = (planId: string) => startTidyJob('apply', { plan_id: planId });
+export const startTidyUndoJob = (runId: string, outputDir: string) => startTidyJob('undo', { run_id: runId, output_dir: outputDir.trim() });
+
+export function fetchTidyJob(kind: TidyJobKind, jobId: string): Promise<TidyJobStatus> {
+  return requestJson<TidyJobStatus>(`${tidyJobsPath(kind)}/${jobId}`);
+}
+
+export function cancelTidyJob(kind: TidyJobKind, jobId: string): Promise<TidyJobStatus> {
+  return requestJson<TidyJobStatus>(`${tidyJobsPath(kind)}/${jobId}/cancel`, { method: 'POST' });
+}
+
+/** Past tidy-up runs of the download folder, newest first. */
+export function fetchTidyRuns(outputDir: string): Promise<{ runs: TidyRun[] }> {
+  return requestJson<{ runs: TidyRun[] }>(`/api/library/tidy/runs?${new URLSearchParams({ output_dir: outputDir.trim() }).toString()}`);
 }

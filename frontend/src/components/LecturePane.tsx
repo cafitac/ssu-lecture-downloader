@@ -7,6 +7,7 @@ import { LectureList } from './LectureList';
 import { LectureToolbar } from './LectureToolbar';
 import { Spinner } from './Screens';
 import { TaskList } from './TaskList';
+import { LegacyNotice } from './TidyDialog';
 
 interface Props {
   course: CourseSummary | null;
@@ -28,6 +29,10 @@ interface Props {
   /** True when the count is the checked videos rather than the automatic queue. */
   watchSelected: boolean;
   attachments: PageAttachmentsController;
+  /** Files of this course saved the old way, and the notice's two answers; `null` hides the notice. */
+  legacyNotice: { count: number; blocked: boolean } | null;
+  onTidy: () => void;
+  onTidyLater: () => void;
   queue: WatchQueueState;
   watchMode: WatchMode;
   openingKey: string | null;
@@ -63,6 +68,7 @@ export function LecturePane(props: Props) {
       <header className="pane-head">
         <h1 className="pane-title" title={course.name}>{splitCourseName(course.name).title}</h1>
         {contentState === 'ready' && <p className="pane-sub">영상 {total} · 시청 {watched}{upcoming > 0 && <span className="pane-sub-upcoming"> · 예정 {upcoming}</span>}</p>}
+        {props.legacyNotice && contentState === 'ready' && <LegacyNotice notice={props.legacyNotice} onTidy={props.onTidy} onLater={props.onTidyLater} />}
       </header>
       <LectureToolbar
         tab={tab}
