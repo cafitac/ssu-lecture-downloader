@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 
 from ssu_lecture_downloader.service.api import create_app
 from ssu_lecture_downloader.service.credentials import CredentialPair
-from ssu_lecture_downloader.core.errors import LoginFlowError
+from ssu_lecture_downloader.core.errors import LoginFlowError, TidyRunNotFound
 from ssu_lecture_downloader.core.login_flow import LoginDiscoveryResult
 from ssu_lecture_downloader.core.postprocess_media import AudioExtractionResult
 from ssu_lecture_downloader.core.lms_service import BatchDownloadItemResult, BatchDownloadResult
@@ -195,6 +195,7 @@ class FailingDownloadService(ClearableFakeService):
         (curl_exceptions.Timeout('slow'), 'network_timeout', 0),
         (LoginFlowError('commons_download_url_missing', 'missing'), 'commons_download_url_missing', 0),
         (PermissionError('denied'), 'PermissionError', 0),
+        (TidyRunNotFound('missing'), 'tidy_run_not_found', 0),
     ],
 )
 def test_background_job_error_codes(tmp_path, error, expected, cleared):

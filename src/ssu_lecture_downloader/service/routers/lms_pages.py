@@ -60,18 +60,19 @@ def build_router(ctx: AppContext) -> APIRouter:
         username, password = ctx.require_credentials()
         _, file_id = validate_canvas_file_request(request)
         output_dir = ctx.output_dir_for(request.output_dir)
-        result = ctx.call_service(
-            lambda: service.download_canvas_file(
-                username,
-                password,
-                file_id=file_id,
-                course_name=request.course_name,
-                output_dir=output_dir,
-                conflict_strategy=request.conflict_strategy,
-                module_name=request.module_name,
-                week_position=request.week_position,
+        with ctx.library_lock.downloading():
+            result = ctx.call_service(
+                lambda: service.download_canvas_file(
+                    username,
+                    password,
+                    file_id=file_id,
+                    course_name=request.course_name,
+                    output_dir=output_dir,
+                    conflict_strategy=request.conflict_strategy,
+                    module_name=request.module_name,
+                    week_position=request.week_position,
+                )
             )
-        )
         if not result.ok:
             raise_for_result_error(result.error_code)
         ctx.remember_outputs(result.output_path)

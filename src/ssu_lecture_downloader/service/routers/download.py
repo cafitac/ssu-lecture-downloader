@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from typing import Any
 
 from fastapi import APIRouter
@@ -55,7 +56,8 @@ def build_router(ctx: AppContext) -> APIRouter:
     def native_download_plan(request: DownloadPlanRequest) -> dict[str, object]:
         username, password = ctx.require_credentials()
         kwargs = item_kwargs(request)
-        result = ctx.call_service(lambda: service.native_download_plan(username, password, **kwargs))
+        with ctx.library_lock.downloading():  # it creates the lecture folder the shell then writes into
+            result = ctx.call_service(lambda: service.native_download_plan(username, password, **kwargs))
         download_result, _ = unpack_native_plan(result)
         if not download_result.ok:
             raise_for_result_error(download_result.error_code)
@@ -67,7 +69,8 @@ def build_router(ctx: AppContext) -> APIRouter:
         username, password = ctx.require_credentials()
         progress = ProgressCollector()
         kwargs = item_kwargs(request, dry_run=False, on_progress=progress)
-        result = ctx.call_service(lambda: service.download_lecture(username, password, **kwargs))
+        with ctx.library_lock.downloading():
+            result = ctx.call_service(lambda: service.download_lecture(username, password, **kwargs))
         if not result.ok:
             raise_for_result_error(result.error_code)
         ctx.remember_outputs(result.output_path)
@@ -85,7 +88,7 @@ def build_router(ctx: AppContext) -> APIRouter:
             ctx.remember_outputs(result.output_path)
             return JobOutcome.succeeded(download_payload(result, job.progress_events()))
 
-        return ctx.start_job(ctx.download_jobs, work)
+        return ctx.start_download_job(ctx.download_jobs, work)
 
     add_job_routes(router, ctx.download_jobs, path="/api/download/jobs", not_found_code="download_job_not_found")
 
@@ -108,7 +111,8 @@ def build_router(ctx: AppContext) -> APIRouter:
         validate_batch_request(request)
         progress = ProgressCollector()
         kwargs = run_batch_kwargs(request, dry_run=dry_run, on_progress=progress)
-        result = ctx.call_service(lambda: service.batch_download_lectures(username, password, **kwargs))
+        with ctx.library_lock.downloading() if not dry_run else nullcontext():
+            result = ctx.call_service(lambda: service.batch_download_lectures(username, password, **kwargs))
         if not result.ok:
             raise_for_result_error(result.error_code)
         ctx.remember_outputs(*(item.output_path for item in result.items))
@@ -127,7 +131,7 @@ def build_router(ctx: AppContext) -> APIRouter:
             ctx.remember_outputs(*(item.output_path for item in result.items))
             return JobOutcome.succeeded(batch_payload(result, job.progress_events()))
 
-        return ctx.start_job(ctx.download_jobs, work)
+        return ctx.start_download_job(ctx.download_jobs, work)
 
     @router.post("/api/download/batch/plan")
     def batch_download_plan(request: BatchDownloadRequest) -> dict[str, Any]:
@@ -148,7 +152,7 @@ def build_router(ctx: AppContext) -> APIRouter:
         def work(job: Job) -> JobOutcome:
             return ArtifactPipeline(ctx, job, request, outputs, credentials, output_dir).run()
 
-        return ctx.start_job(ctx.artifact_jobs, work)
+        return ctx.start_download_job(ctx.artifact_jobs, work)
 
     add_job_routes(router, ctx.artifact_jobs, path="/api/download/artifacts/jobs", not_found_code="artifact_job_not_found")
 
