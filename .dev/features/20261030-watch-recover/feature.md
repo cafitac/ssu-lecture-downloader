@@ -62,3 +62,26 @@
 - `UV_LOCKED=1 uv run lint-imports`: 4 contracts kept, 0 broken.
 - Commands used `UV_CACHE_DIR=/tmp/watch-recover-uv-cache` because the default cache is outside sandbox access.
 - `git diff --check`: clean. No commit, push, or external writes performed.
+
+## Review cycle 1 repairs
+
+- Recovery tests join the worker before reading terminal status; no new sleep polling.
+- Closed transports wait through `terminate_grace` for a pending process exit before consuming
+  a recovery attempt. Background launches validate the dedicated main pid through the process tree.
+  Subsequent attempts use the injectable `reconnect_backoff` delay and remain stoppable.
+- Page and OOPIF sessions enable Inspector; attached iframe target ids also identify renderer crashes.
+- Recovery-time version/attach CDP errors and timeouts consume the bounded recovery budget.
+- Crash events are collected before the alive check logs one incident, retaining Target status/errorCode.
+- Exhaustion reports `chrome_recover_exhausted`; an observed process exit without a page-destroy event
+  reports `chrome_exited`. Page target destruction retains `chrome_window_closed`, while a closed
+  transport with exited Chrome retains `chrome_closed`.
+- No frontend changes. Real Chrome crash/reconnect and LMS resume persistence remain unverified.
+
+### Review cycle 1 verification
+
+- Final `UV_LOCKED=1 uv run pytest -q`: 903 passed, 2 dependency deprecation warnings (45.45s).
+  The STT fake server printed a BrokenPipeError during shutdown; pytest exited successfully.
+- Chrome watch tests: 64 passed (10 additional cases); Chrome watch plus API tests: 74 passed.
+- `UV_LOCKED=1 uv run lint-imports`: 4 contracts kept, 0 broken.
+- `git diff --check`: clean. Used `UV_CACHE_DIR=/tmp/watch-recover-uv-cache`.
+- No commit, push, external write, or real Chrome/LMS execution.
