@@ -14,6 +14,7 @@ import { CHROME_MISSING_NOTE, WATCH_MODE_DESCRIPTION, WATCH_MODE_LABEL } from '.
 import { Dialog } from './Dialog';
 import { FolderIcon } from './Icons';
 import { Spinner } from './Screens';
+import { TidyEntries } from './TidyDialog';
 
 interface Props {
   downloadDir: string;
@@ -339,12 +340,7 @@ export function SettingsDialog({ downloadDir, busy, workBusy, media, debugEvents
             변경
           </button>
           {desktop && <button type="button" className="btn btn-sm" onClick={onOpenFolder}><FolderIcon />폴더 열기</button>}
-          {tidy.runs.state !== 'unsupported' && (
-            <button type="button" className="btn btn-sm" disabled={tidyBlocked} title={tidyBlocked ? TIDY_COPY.busyHint : undefined} onClick={onTidy}>폴더 정리…</button>
-          )}
-          {tidy.undoRun && (
-            <button type="button" className="btn btn-sm" disabled={tidyBlocked} title={tidyBlocked ? TIDY_COPY.busyHint : undefined} onClick={onUndoTidy}>마지막 정리 되돌리기</button>
-          )}
+          <TidyEntries tidy={tidy} blocked={tidyBlocked} onTidy={onTidy} onUndoTidy={onUndoTidy} />
         </div>
         {tidyBlocked && tidy.runs.state !== 'unsupported' && <p className="muted small">{TIDY_COPY.busyHint}</p>}
       </section>

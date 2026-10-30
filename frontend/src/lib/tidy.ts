@@ -3,7 +3,7 @@
  * Pure, so Node can load it in the contract tests; the hook only wires it to the API.
  */
 import { knownErrorText, GENERIC_ERROR } from './errors.ts';
-import type { TidyApplyResult, TidyJobKind, TidyJobStatus, TidyMove, TidyPlan, TidyRun, TidySkip, TidyUndoResult } from './types';
+import type { TidyApplyResult, TidyJobKind, TidyJobStatus, TidyMove, TidyPlan, TidyRun, TidyUndoResult } from './types';
 
 export type TidyPhase =
   | { kind: 'checking' }
@@ -27,7 +27,8 @@ export const TIDY_COPY = {
   skipsSummaryAfter: (count: number) => `그대로 둔 파일 ${count}개`,
   empty: '정리할 파일이 없어요.',
   moving: (done: number, total: number) => `정리하는 중… ${done}/${total}`,
-  undoing: '되돌리는 중…',
+  undoing: (done: number, total: number) => (total > 0 ? `되돌리는 중… ${done}/${total}` : '되돌리는 중…'),
+  reconnecting: '연결 확인 중…',
   stopHint: '지금 파일까지만 옮기고 멈춰요',
   result: (moved: number, skipped: number) => `${moved}개를 옮겼어요.${skipped > 0 ? ` ${skipped}개는 그대로 뒀어요.` : ''}`,
   undone: (restored: number, skipped: number) => `${restored}개를 원래 자리로 돌려놨어요.${skipped > 0 ? ` ${skipped}개는 그대로 뒀어요.` : ''}`,
@@ -45,10 +46,18 @@ const SKIP_REASONS: Record<string, string> = {
   not_a_regular_file: '폴더나 바로가기는 옮기지 않아요',
   in_use: '다른 앱이 쓰고 있어요 (Windows)',
   path_too_long: '경로가 너무 길어요 (Windows)',
+  move_failed: '옮기지 못했어요',
+};
+
+// An undo leaves a file where it is for other reasons than "the preview is old".
+const UNDO_REASONS: Record<string, string> = {
+  source_changed: '정리한 뒤에 파일이 바뀌어서 그대로 뒀어요',
+  source_missing: '정리한 뒤에 파일이 없어져서 그대로 뒀어요',
 };
 
 /** Why a file stays where it is; a code this version does not know still gets a plain sentence. */
-export function skipReasonText(code: string): string {
+export function skipReasonText(code: string, context: 'plan' | 'undo' = 'plan'): string {
+  if (context === 'undo' && Object.hasOwn(UNDO_REASONS, code)) return UNDO_REASONS[code];
   return Object.hasOwn(SKIP_REASONS, code) ? SKIP_REASONS[code] : '옮기지 않고 그대로 뒀어요';
 }
 
@@ -64,7 +73,8 @@ export function capRows<T>(rows: readonly T[], cap: number): { shown: T[]; hidde
 }
 
 export interface TidyLectureGroup {
-  stem: string;
+  /** `null`: materials, listed straight under the week. */
+  stem: string | null;
   moves: TidyMove[];
 }
 export interface TidyWeekGroup {
@@ -91,13 +101,18 @@ export function groupMoves(moves: readonly TidyMove[]): TidyCourseGroup[] {
   return courses;
 }
 
-/** The progress of a running move: the newest `tidy_moving` event. */
-export function movingProgress(job: TidyJobStatus): { done: number; total: number } {
+/** The progress of a running move: the newest `tidy_moving` event, else what was known before (no "0/0" flash). */
+export function movingProgress(job: TidyJobStatus, before: { done: number; total: number } = { done: 0, total: 0 }): { done: number; total: number } {
   for (let index = job.progress.length - 1; index >= 0; index -= 1) {
     const event = job.progress[index];
-    if (event.stage === 'tidy_moving') return { done: event.done ?? 0, total: event.total ?? 0 };
+    if (event.stage === 'tidy_moving') return { done: event.done ?? 0, total: event.total ?? before.total };
   }
-  return { done: 0, total: 0 };
+  return before;
+}
+
+/** The course notice: shown for old files, unless answered with 나중에, nothing is left to tidy, or the count is unknown. */
+export function legacyNoticeState(count: number | null, answeredLater: boolean, nothingToTidy: boolean, blocked: boolean): { count: number; blocked: boolean } | null {
+  return count !== null && count > 0 && !answeredLater && !nothingToTidy ? { count, blocked } : null;
 }
 
 /** The first dialog state after a finished plan job. */
@@ -123,8 +138,7 @@ export function undoableRun(runs: readonly TidyRun[]): TidyRun | null {
   return runs.length > 0 && runs[0].undo_available ? runs[0] : null;
 }
 
-export function skipsOf(phase: TidyPhase): TidySkip[] {
-  if (phase.kind === 'preview') return phase.plan.skips;
-  if (phase.kind === 'result' || phase.kind === 'undone') return phase.result.skips;
-  return [];
+/** A backend that predates the tidy-up answers unknown routes with 404 / `not_found`. */
+export function isUnsupportedBackend(code: string): boolean {
+  return code === 'HTTP 404' || code === 'not_found';
 }

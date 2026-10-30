@@ -546,7 +546,7 @@ function startTidyJob(kind: TidyJobKind, body: Record<string, string>): Promise<
 
 export const startTidyPlanJob = (outputDir: string) => startTidyJob('plan', { output_dir: outputDir.trim() });
 export const startTidyApplyJob = (planId: string) => startTidyJob('apply', { plan_id: planId });
-export const startTidyUndoJob = (runId: string) => startTidyJob('undo', { run_id: runId });
+export const startTidyUndoJob = (runId: string, outputDir: string) => startTidyJob('undo', { run_id: runId, output_dir: outputDir.trim() });
 
 export function fetchTidyJob(kind: TidyJobKind, jobId: string): Promise<TidyJobStatus> {
   return requestJson<TidyJobStatus>(`${tidyJobsPath(kind)}/${jobId}`);

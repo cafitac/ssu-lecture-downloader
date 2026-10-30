@@ -36,6 +36,7 @@ import type { LectureTab } from './lib/content';
 import { dueSoonCount } from './lib/deadline';
 import { isTauriRuntime, openDownloadedFolder } from './lib/desktop';
 import { friendlyError } from './lib/errors';
+import { legacyNoticeState } from './lib/tidy';
 import { formatBytes, shortFolderName } from './lib/format';
 import type { JobPlan, PlannedItem } from './lib/jobItems';
 import { anyTransferBusy, busyAfterBackendStatus, isTrackedWorkBusy } from './lib/trackedWork';
@@ -67,6 +68,8 @@ function Workspace({ session, update, onWorkBusyChange }: { session: LmsSession;
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [watchAllOpen, setWatchAllOpen] = useState(false);
   // Courses whose "예전 방식 파일" notice was answered with 나중에; asked again after a restart.
+  // A preview that found nothing to move: the notice stays away for the rest of the session.
+  const [nothingToTidy, setNothingToTidy] = useState(false);
   const [tidyLater, setTidyLater] = useState<ReadonlySet<string>>(new Set());
   // How a started queue plays; unset until the user chooses (then Chrome when it is installed).
   const [watchModePreference, setWatchModePreference] = useState<WatchMode | null>(readWatchModePreference);
@@ -105,6 +108,7 @@ function Workspace({ session, update, onWorkBusyChange }: { session: LmsSession;
   const tidy = useLibraryTidy({
     outputDir: dir,
     onAuthError,
+    onNothingToTidy: () => setNothingToTidy(true),
     onChanged: () => {
       const current = latest.current;
       if (current.course) void current.content.refreshQuietly(current.course);
@@ -326,9 +330,7 @@ function Workspace({ session, update, onWorkBusyChange }: { session: LmsSession;
     setSelectedCourseId(String(next.id));
     setView('course');
   };
-  const legacyNotice = course !== null && content.legacyFileCount !== null && content.legacyFileCount > 0 && !tidyLater.has(String(course.id))
-    ? { count: content.legacyFileCount, blocked: tidyBlocked, onTidy: tidy.open, onLater: () => setTidyLater((current) => new Set(current).add(String(course.id))) }
-    : null;
+  const legacyNotice = legacyNoticeState(content.legacyFileCount, course !== null && tidyLater.has(String(course.id)), nothingToTidy, tidyBlocked);
   const showActionBar = (view === 'course' && tab !== 'task') || downloads.active || downloads.startError !== null;
 
   return (
@@ -399,6 +401,8 @@ function Workspace({ session, update, onWorkBusyChange }: { session: LmsSession;
               watchSelected={selectedVideos.length > 0}
               attachments={attachments}
               legacyNotice={legacyNotice}
+              onTidy={tidy.open}
+              onTidyLater={() => { if (course) setTidyLater((current) => new Set(current).add(String(course.id))); }}
               queue={viewer.queue}
               watchMode={viewer.mode}
               openingKey={viewer.openingKey}

@@ -698,7 +698,8 @@ export interface GradesClassesResponse {
 export interface TidyMove {
   course: string;
   week_folder: string;
-  lecture_stem: string;
+  /** `null` for a lecture material, which sits directly in the week folder. */
+  lecture_stem: string | null;
   from: string;
   to: string;
   role: string;
@@ -716,11 +717,13 @@ export interface TidyPlan {
   skip_count: number;
   moves: TidyMove[];
   skips: TidySkip[];
-  open_files_note?: string | null;
+  /** Whether the open-files note applies (the dialog shows its own copy). */
+  open_files_note?: boolean;
 }
 
 export interface TidyApplyResult {
-  run_id: string;
+  /** `null` when nothing was moved, so there is no run to undo. */
+  run_id: string | null;
   moved: number;
   skipped: number;
   skips: TidySkip[];
@@ -736,7 +739,7 @@ export interface TidyUndoResult {
 
 export interface TidyRun {
   run_id: string;
-  at: string | number;
+  at: string | number | null;
   moved: number;
   undo_available: boolean;
 }

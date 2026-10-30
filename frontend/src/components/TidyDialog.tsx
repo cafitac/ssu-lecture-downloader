@@ -30,9 +30,9 @@ function MoveList({ plan }: { plan: TidyPlan }) {
                   <h4 className="tidy-week">{week.week}</h4>
                   <ul className="tidy-tree">
                     {week.lectures.map((lecture) => (
-                      <li key={lecture.stem}>
-                        <p className="tidy-lecture">{lecture.stem}</p>
-                        <ul className="tidy-moves">
+                      <li key={lecture.stem ?? '\u0000materials'}>
+                        {lecture.stem !== null && <p className="tidy-lecture">{lecture.stem}</p>}
+                        <ul className={lecture.stem === null ? 'tidy-moves tidy-materials' : 'tidy-moves'}>
                           {lecture.moves.map((move) => (
                             <li key={move.from} title={`${move.from} → ${move.to}`}>
                               <span className="tidy-name">{fileName(move.from)}</span>
@@ -55,7 +55,7 @@ function MoveList({ plan }: { plan: TidyPlan }) {
   );
 }
 
-function SkipList({ skips, label }: { skips: TidySkip[]; label: (count: number) => string }) {
+function SkipList({ skips, label, context = 'plan' }: { skips: TidySkip[]; label: (count: number) => string; context?: 'plan' | 'undo' }) {
   if (skips.length === 0) return null;
   const { shown, hidden } = capRows(skips, LIST_ROW_CAP);
   return (
@@ -65,7 +65,7 @@ function SkipList({ skips, label }: { skips: TidySkip[]; label: (count: number) 
         {shown.map((skip) => (
           <li key={skip.path} title={skip.path}>
             <span className="tidy-name">{fileName(skip.path)}</span>
-            <span className="muted tidy-reason">{skipReasonText(skip.reason)}</span>
+            <span className="muted tidy-reason">{skipReasonText(skip.reason, context)}</span>
           </li>
         ))}
       </ul>
@@ -76,6 +76,31 @@ function SkipList({ skips, label }: { skips: TidySkip[]; label: (count: number) 
 
 function Actions({ children }: { children: ReactNode }) {
   return <div className="setting-actions tidy-actions">{children}</div>;
+}
+
+/** The course notice: old-style files can be tidied (null count, 나중에 and "nothing to tidy" are decided by `legacyNoticeState`). */
+export function LegacyNotice({ notice, onTidy, onLater }: { notice: { count: number; blocked: boolean }; onTidy: () => void; onLater: () => void }) {
+  return (
+    <div className="legacy-notice" role="status">
+      <p>{TIDY_COPY.notice(notice.count)}</p>
+      <div className="legacy-notice-actions">
+        <button type="button" className="btn btn-sm" disabled={notice.blocked} title={notice.blocked ? TIDY_COPY.busyHint : undefined} onClick={onTidy}>정리하기</button>
+        <button type="button" className="btn btn-sm btn-ghost" onClick={onLater}>나중에</button>
+      </div>
+    </div>
+  );
+}
+
+/** Settings › 저장 폴더: the two tidy-up buttons, hidden on a backend without the tidy-up. */
+export function TidyEntries({ tidy, blocked, onTidy, onUndoTidy }: { tidy: Pick<LibraryTidy, 'runs' | 'undoRun'>; blocked: boolean; onTidy: () => void; onUndoTidy: () => void }) {
+  if (tidy.runs.state === 'unsupported') return null;
+  const title = blocked ? TIDY_COPY.busyHint : undefined;
+  return (
+    <>
+      <button type="button" className="btn btn-sm" disabled={blocked} title={title} onClick={onTidy}>폴더 정리…</button>
+      {tidy.undoRun && <button type="button" className="btn btn-sm" disabled={blocked} title={title} onClick={onUndoTidy}>마지막 정리 되돌리기</button>}
+    </>
+  );
 }
 
 /** Preview, move and undo of the folder tidy-up. Opening it is the user's explicit action. */
@@ -108,7 +133,7 @@ export function TidyDialog({ tidy, canOpenFolder, onOpenFolder }: Props) {
         <p className="muted small">{TIDY_COPY.openFiles}</p>
         <Actions>
           <button type="button" className="btn btn-sm" onClick={tidy.close}>취소</button>
-          <button type="button" className="btn btn-sm" onClick={tidy.apply}>정리하기</button>
+          <button type="button" className="btn btn-sm btn-primary" onClick={tidy.apply}>정리하기</button>
         </Actions>
       </>
     );
@@ -120,26 +145,21 @@ export function TidyDialog({ tidy, canOpenFolder, onOpenFolder }: Props) {
       </>
     );
   } else if (phase.kind === 'moving') {
-    const apply = phase.job === 'apply';
     const percent = phase.total > 0 ? Math.min(100, Math.round((phase.done / phase.total) * 100)) : 0;
     body = (
       <>
         <p className="tidy-lead" tabIndex={-1} ref={leadRef}>
-          <Spinner />{apply ? TIDY_COPY.moving(phase.done, phase.total) : TIDY_COPY.undoing}
+          <Spinner />{phase.job === 'apply' ? TIDY_COPY.moving(phase.done, phase.total) : TIDY_COPY.undoing(phase.done, phase.total)}
         </p>
-        {apply && (
+        {phase.total > 0 && (
           <div className="progress" role="progressbar" aria-label="정리 진행" aria-valuemin={0} aria-valuemax={phase.total} aria-valuenow={phase.done}>
             <div className="progress-fill" style={{ width: `${percent}%` }} />
           </div>
         )}
-        {apply && (
-          <>
-            <Actions>
-              <button type="button" className="btn btn-sm" disabled={tidy.stopping} onClick={() => void tidy.stop()}>{tidy.stopping ? '멈추는 중…' : '멈추기'}</button>
-            </Actions>
-            <p className="muted small">{TIDY_COPY.stopHint}</p>
-          </>
-        )}
+        <p className="muted small">{TIDY_COPY.stopHint}{tidy.reconnecting && ` · ${TIDY_COPY.reconnecting}`}</p>
+        <Actions>
+          <button type="button" className="btn btn-sm" disabled={tidy.stopping} onClick={() => void tidy.stop()}>{tidy.stopping ? '멈추는 중…' : '멈추기'}</button>
+        </Actions>
       </>
     );
   } else if (phase.kind === 'result') {
@@ -149,7 +169,7 @@ export function TidyDialog({ tidy, canOpenFolder, onOpenFolder }: Props) {
         <SkipList skips={phase.result.skips} label={TIDY_COPY.skipsSummaryAfter} />
         <Actions>
           {folderButton}
-          {phase.result.undo_available && <button type="button" className="btn btn-sm" onClick={() => tidy.undo(phase.result.run_id)}>되돌리기</button>}
+          {phase.result.undo_available && phase.result.run_id !== null && <button type="button" className="btn btn-sm" onClick={() => tidy.undo(phase.result.run_id ?? undefined)}>되돌리기</button>}
           <button type="button" className="btn btn-sm" onClick={tidy.close}>닫기</button>
         </Actions>
       </>
@@ -158,7 +178,7 @@ export function TidyDialog({ tidy, canOpenFolder, onOpenFolder }: Props) {
     body = (
       <>
         <p className="tidy-lead" tabIndex={-1} ref={leadRef}>{TIDY_COPY.undone(phase.result.restored, phase.result.skipped)}</p>
-        <SkipList skips={phase.result.skips} label={TIDY_COPY.skipsSummaryAfter} />
+        <SkipList skips={phase.result.skips} label={TIDY_COPY.skipsSummaryAfter} context="undo" />
         <Actions>
           {folderButton}
           <button type="button" className="btn btn-sm" onClick={tidy.close}>닫기</button>

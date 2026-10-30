@@ -26,12 +26,14 @@
 - Tests: one appended block in `frontend/scripts/contract-test.mjs` (append-only): design/09 copy and reason table, job outcome mapping, grouping/cap/undo-able run, every TidyDialog state rendered with real React, request shapes of the frozen contract incl. the Canvas week fields, and the expired-preview re-plan through the hook.
 - Verification: `npm run typecheck`, `npm run test:contract` green. Screenshots of every state, light and dark, from a mocked backend are under `.local/ui-tidy/shots/` (untracked).
 
+- 2026-10-30 (review cycle 1 repair, checked against layout-py-migration c2c7c35): types follow the backend (`lecture_stem` nullable, material moves sit under the week without a lecture heading; `open_files_note` boolean; `run_id` and runs `at` nullable). Undo sends `output_dir` and re-reads the run list when it fails to start. An unknown route (`not_found` / HTTP 404) hides the Settings entries. New copy: `move_failed`, `tidy_run_not_found`, `invalid_run_id`, `tidy_job_not_found`, undo wording for `source_changed` / `source_missing`, "연결 확인 중…". A failed poll never abandons a move (only an auth error or `tidy_job_not_found` does); `close()` and every new start bump a generation counter so a late start answer is dropped and its job cancelled; a 멈추기 pressed before the job id is known is queued; the moving total is kept until the first `tidy_moving` event (apply: the plan's `move_count`); a preview with nothing to move hides the notice for the session. The commit button 정리하기 is `btn-primary`; the contract test's one-accent rule now skips `TidyDialog.tsx` (the only edit to an existing line of the contract test). The notice, Settings entries, every dialog state and the hook scenarios (stop, queued stop, poll error, lost job, close while checking, undo then reload, undo start failure, unsupported backend) are covered; the hook tests use a stand-in React with memoised callbacks and effect dependencies.
+
 ## Contract assumptions the backend must match
 
 - Plan, apply and undo jobs use the usual job shape `{job_id, status, cancel_requested, progress, result, error_code}`; polled at `GET /api/library/tidy/{plan|apply|undo}/jobs/{job_id}`, cancelled at `POST …/{job_id}/cancel`.
 - Apply progress is the newest event `{stage: "tidy_moving", done, total}` in `progress`.
-- `moves[].from` / `to` and `skips[].path` end in the file name (the dialog shows the last path segment only); `open_files_note` is not rendered (the frozen copy is used).
+- `moves[].from` / `to` and `skips[].path` end in the file name (the dialog shows the last path segment only); `open_files_note` (boolean) is not rendered (the frozen copy is used).
 - A stopped (cancelled) apply job still carries `result`; `undo_available` there decides the 되돌리기 button.
 - `tidy_plan_expired` arrives as HTTP 409 `error_code` when apply starts (or as a failed job `error_code`); plan/apply/undo start errors `library_busy` / `library_tidy_running` as HTTP 409.
 - Course detail adds `legacy_file_count`; absent means no notice. `GET /api/library/tidy/runs` answering HTTP 404 hides the Settings entries.
-- Undo from Settings is immediate (no extra confirmation); undo shows no per-file progress.
+- Undo from Settings is immediate (no extra confirmation). Undo jobs report `tidy_moving` like apply and can be stopped; undo requests carry `output_dir`.
