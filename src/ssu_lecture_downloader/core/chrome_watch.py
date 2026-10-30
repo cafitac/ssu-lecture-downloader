@@ -232,6 +232,10 @@ class _Stopped(Exception):
     pass
 
 
+class _RendererGone(Exception):
+    pass
+
+
 class _WindowClosed(Exception):
     pass
 
@@ -478,6 +482,7 @@ class ChromeWatchManager:
 
     def _work(self, run: _Run) -> None:
         proc: Any = None
+        playback: _Playback | None = None
         client: CdpClient | None = None
         logger.info("chrome_watch run_start run_id=%s item_count=%s background=%s", run.run_id, len(run.items), self._background_launch)
         try:
@@ -522,6 +527,8 @@ class ChromeWatchManager:
         finally:
             with self._lock:
                 run.client = None
+            if playback is not None:
+                playback.client.close()
             if client is not None:
                 client.close()
             if proc is not None:
@@ -586,11 +593,18 @@ class ChromeWatchManager:
             if self._chrome_pid is not None:
                 self._write_pidfile(self._chrome_pid)
         logger.info("chrome_watch chrome_launch run_id=%s pid=%s pid_found=%s", run.run_id, self._chrome_pid, self._chrome_pid is not None)
+        try:
+            client, events = self._connect_client(run, port, path)
+        except Exception:
+            self._terminate(proc)
+            raise
+        return proc, client, events
+
+    def _connect_client(self, run: _Run, port: int, path: str) -> tuple[CdpClient, "queue.Queue[tuple[str, dict[str, Any], str | None]]"]:
         events: "queue.Queue[tuple[str, dict[str, Any], str | None]]" = queue.Queue()
         try:
             transport = self._connect(f"ws://127.0.0.1:{port}{path}")
         except Exception as exc:
-            self._terminate(proc)
             raise ChromeWatchError("chrome_connect_failed", "Chrome에 연결하지 못했어요.") from exc
         holder: list[CdpClient] = []
 
@@ -602,9 +616,16 @@ class ChromeWatchManager:
             events.put((method, params, session))
 
         client = CdpClient(transport, on_event, default_timeout=self.timings.call_timeout)
-        logger.info("chrome_watch cdp_connected run_id=%s", run.run_id)
         holder.append(client)
-        return proc, client, events
+        try:
+            version = client.call("Browser.getVersion")
+        except CdpError:
+            version = {}
+        except (CdpClosed, CdpTimeout):
+            client.close()
+            raise
+        logger.info("chrome_watch cdp_connected run_id=%s chrome=%s", run.run_id, version.get("product", "unknown"))
+        return client, events
 
     def _pidfile(self) -> Path:
         return self.profile_dir.parent / "chrome-watch.pid"
@@ -668,6 +689,7 @@ class _Playback:
         self.ended = False
         self.window_closed = False
         self.connection_closed = False
+        self.renderer_gone = False
         self.expected_duration: float | None = None
 
     def restore_window(self) -> None:
@@ -701,7 +723,9 @@ class _Playback:
     def attach_page(self) -> None:
         self.call("Target.setDiscoverTargets", {"discover": True})
         targets = self.call("Target.getTargets").get("targetInfos", [])
-        page = next((t for t in targets if t.get("type") == "page" and not str(t.get("url", "")).startswith("chrome-extension://")), None)
+        page = next((t for t in targets if t.get("targetId") == self.page_target), None)
+        if self.page_target is None:
+            page = next((t for t in targets if t.get("type") == "page" and not str(t.get("url", "")).startswith("chrome-extension://")), None)
         if page is None:
             target_id = self.call("Target.createTarget", {"url": "about:blank", "newWindow": True})["targetId"]
         else:
@@ -718,6 +742,7 @@ class _Playback:
         for method in ("Page.enable", "Runtime.enable", "DOM.enable"):
             self.safe_call(method, session=session)
         if is_page:
+            self.safe_call("Inspector.enable", session=session)
             self.safe_call("Network.enable", session=session)
         self.safe_call("Runtime.addBinding", {"name": BINDING_NAME}, session=session)
         self.safe_call("Page.addScriptToEvaluateOnNewDocument", {"source": HELPER_JS, "runImmediately": True}, session=session)
@@ -773,6 +798,10 @@ class _Playback:
     def handle(self, method: str, params: dict[str, Any], session: str | None) -> None:
         if method == "CdpClient.closed":
             self.connection_closed = True
+        elif (method == "Target.targetCrashed" and params.get("targetId") == self.page_target) or (method == "Inspector.targetCrashed" and session in self.sessions):
+            self.renderer_gone = True
+            item = self.run.items[self.run.index]
+            logger.warning("chrome_watch renderer_gone run_id=%s module_item_id=%s status=%s error_code=%s", self.run.run_id, item.module_item_id, params.get("status", "unknown"), params.get("errorCode", "unknown"))
         elif method == "Target.attachedToTarget":
             info = params.get("targetInfo") or {}
             child = params.get("sessionId")
@@ -862,7 +891,35 @@ class _Playback:
         run.skip.clear()
         started = self.m._clock()
         logger.info("chrome_watch item_start run_id=%s index=%s total=%s module_item_id=%s", run.run_id, index + 1, len(run.items), item.module_item_id)
-        outcome = self._play_item(item)
+        plan = self._fetch_plan(item)
+        recoveries = 0
+        needs_attach = False
+        while True:
+            try:
+                if needs_attach:
+                    self._recover_page()
+                    needs_attach = False
+                outcome = plan if isinstance(plan, str) else self._play_item(item, plan)
+                break
+            except (_RendererGone, CdpClosed) as exc:
+                if isinstance(exc, CdpClosed):
+                    self.connection_closed = True
+                if run.stop.is_set():
+                    raise _Stopped() from exc
+                if self.proc.poll() is not None:
+                    raise CdpClosed("Chrome exited") from exc
+                if recoveries >= 3:
+                    raise ChromeWatchError("renderer_gone_repeated", "Chrome 연결이 반복해서 끊겨 자동 재생을 멈췄어요.") from exc
+                recoveries += 1
+                cause = "renderer_gone" if self.renderer_gone else "cdp_closed"
+                logger.info("chrome_watch recover run_id=%s module_item_id=%s attempt=%s cause=%s", run.run_id, item.module_item_id, recoveries, cause)
+                with self.m._lock:
+                    run.phase = PHASE_OPENING
+                    run.position = run.duration = None
+                    run.paused = False
+                    run.auto_minimized = False
+                self.m._notice(run, "recover", "info", "강의에 다시 연결하는 중이에요.", item_title=item.title)
+                needs_attach = True
         with self.m._lock:
             if outcome == "done":
                 item.state = "done"
@@ -879,12 +936,9 @@ class _Playback:
             self.m._notice(self.run, "skipped", level, notice, item_title=item.title, reason=reason)
         return "skipped"
 
-    def _play_item(self, item: WatchItem) -> str:
+    def _play_item(self, item: WatchItem, plan: dict[str, Any]) -> str:
         run = self.run
         timings = self.m.timings
-        plan = self._fetch_plan(item)
-        if isinstance(plan, str):
-            return plan  # already skipped
         try:
             self.expected_duration = float(plan.get("duration") or item.duration or 0) or None
         except (TypeError, ValueError):
@@ -1007,7 +1061,58 @@ class _Playback:
                     text = f"‘{item.title}’ 재생이 멈춰 건너뛰었어요. {MINIMIZED_HINT}"
                     return self.skip_item(item, STALL_SKIP_REASON, "stalled", notice=text)
 
+    def _recover_page(self) -> None:
+        if self.run.stop.is_set():
+            raise _Stopped()
+        if self.connection_closed or self.client.closed:
+            self.client.close()
+            try:
+                port, path = wait_for_devtools_port(
+                    self.m.profile_dir, timeout=self.m.timings.port_timeout,
+                    poll=self.m.timings.port_poll,
+                    alive=lambda: self.proc.poll() is None and not self.run.stop.is_set(),
+                    clock=self.m._clock, sleep=self.m._sleep,
+                )
+            except ChromeWatchError as exc:
+                if self.run.stop.is_set():
+                    raise _Stopped() from exc
+                raise CdpClosed("DevTools port unavailable") from exc
+            if self.run.stop.is_set():
+                raise _Stopped()
+            try:
+                self.client, self.events = self.m._connect_client(self.run, port, path)
+            except ChromeWatchError as exc:
+                if exc.code != "chrome_connect_failed":
+                    raise
+                raise CdpClosed("reconnect failed") from exc
+            with self.m._lock:
+                self.run.client = self.client
+        else:
+            for session in list(self.sessions):
+                self.safe_call("Target.detachFromTarget", {"sessionId": session})
+            # Discard events from the old sessions before attaching again.
+            while True:
+                try:
+                    self.events.get_nowait()
+                except queue.Empty:
+                    break
+        self.sessions.clear()
+        self.frames.clear()
+        self.session_root.clear()
+        self.contexts.clear()
+        self.reports.clear()
+        self.page_session = None
+        self.window_closed = self.connection_closed = self.renderer_gone = False
+        self.accepting = self.ended = False
+        if self.run.stop.is_set():
+            raise _Stopped()
+        self.attach_page()
+
     def check_alive(self) -> None:
+        if self.run.stop.is_set():
+            raise _Stopped()
+        if self.renderer_gone:
+            raise _RendererGone()
         if self.window_closed:
             raise _WindowClosed()
         if self.connection_closed or self.client.closed:

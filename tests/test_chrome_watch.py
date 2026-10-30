@@ -523,11 +523,15 @@ def test_closing_the_chrome_window_ends_the_run_with_a_clear_code(tmp_path, capl
     assert "chrome_watch chrome_stop run_id=" in caplog.text
 
 
-def test_a_dropped_connection_ends_the_run(tmp_path, caplog):
+def test_a_dropped_connection_with_chrome_exited_ends_the_run(tmp_path, caplog):
     caplog.set_level(logging.INFO, logger=cw.logger.name)
     harness = Harness(tmp_path, [FakePlayer(stall=True)])
     harness.manager.start(items(1))
     harness.wait(lambda s: len(harness.browser.navigations) >= 1)
+    client = harness.manager._run.client
+    # Make process exit observable with the socket closure, avoiding a race with
+    # the separate, existing process-exited/window-closed path.
+    FakePopen.instances[0].poll = lambda: 1 if client.closed else None
     harness.browser.incoming.put(None)
     status = harness.finish()
     assert status["state"] == "failed" and status["error_code"] == "chrome_closed"
@@ -723,3 +727,141 @@ def test_worker_failure_diagnostics(tmp_path, caplog, monkeypatch, failure):
         record = next(r for r in caplog.records if "chrome_watch worker_error run_id=" in r.getMessage())
         assert record.exc_info is not None
         assert status["error_code"] == "chrome_watch_error"
+
+
+@pytest.mark.parametrize('event', ['Target.targetCrashed', 'Inspector.targetCrashed'])
+def test_renderer_crash_recovers_same_item_and_completes(tmp_path, caplog, event):
+    caplog.set_level(logging.INFO, logger=cw.logger.name)
+    harness = Harness(tmp_path, [FakePlayer(resume=True)])
+    navigate = harness.browser.navigate
+
+    def crash_once(message, url):
+        navigate(message, url)
+        if len(harness.browser.navigations) == 1:
+            harness.browser.emit(event, {'targetId': 'T1', 'status': 'crashed', 'errorCode': 9}, PAGE_SESSION)
+
+    harness.browser.navigate = crash_once
+    harness.manager.start(items(1))
+    status = harness.finish()
+    harness.wait_thread()
+    assert status['state'] == 'finished' and status['done_count'] == 1
+    assert harness.browser.navigations == [plan_for('1')['launch_url']] * 2
+    assert 'status=crashed error_code=9' in caplog.text
+    assert 'attempt=1 cause=renderer_gone' in caplog.text
+    assert 'Inspector.enable' in harness.browser.methods()
+    assert 'Browser.getVersion' in harness.browser.methods()
+    assert harness.plans == [('1', '1', 'UX방법론')]
+
+
+def test_cdp_closed_with_chrome_alive_reconnects_using_current_port(tmp_path, caplog):
+    caplog.set_level(logging.INFO, logger=cw.logger.name)
+    harness = Harness(tmp_path, [FakePlayer()])
+    first = harness.browser
+    replacement = FakeBrowser([FakePlayer(resume=True)])
+    navigate = first.navigate
+
+    def disconnect(message, url):
+        navigate(message, url)
+        (harness.profile / 'DevToolsActivePort').write_text('9333\n/devtools/browser/new\n')
+        harness.browser = replacement
+        first.close()
+
+    first.navigate = disconnect
+    harness.manager.start(items(1))
+    status = harness.finish()
+    harness.wait_thread()
+    assert status['state'] == 'finished' and status['done_count'] == 1
+    assert harness.urls[-1] == 'ws://127.0.0.1:9333/devtools/browser/new'
+    assert replacement.navigations == [plan_for('1')['launch_url']]
+    assert 'attempt=1 cause=cdp_closed' in caplog.text
+    assert harness.manager._run.client is None
+
+
+def test_three_recoveries_then_repeated_renderer_failure(tmp_path, caplog):
+    caplog.set_level(logging.INFO, logger=cw.logger.name)
+    harness = Harness(tmp_path, [FakePlayer()])
+    navigate = harness.browser.navigate
+
+    def crash(message, url):
+        navigate(message, url)
+        harness.browser.emit('Target.targetCrashed', {'targetId': 'T1', 'status': 'crashed', 'errorCode': 9})
+
+    harness.browser.navigate = crash
+    harness.manager.start(items(1))
+    status = harness.finish()
+    harness.wait_thread()
+    assert status['state'] == 'failed'
+    assert status['error_code'] == 'renderer_gone_repeated'
+    assert len(harness.browser.navigations) == 4
+    assert caplog.text.count('chrome_watch recover run_id=') == 3
+
+
+def test_user_stop_during_reconnect_stops_cleanly(tmp_path):
+    harness = Harness(tmp_path, [FakePlayer()])
+    first = harness.browser
+    navigate = first.navigate
+    replacement = FakeBrowser([FakePlayer()])
+
+    def disconnect(message, url):
+        navigate(message, url)
+        first.close()
+
+    def connect(url):
+        harness.urls.append(url)
+        if len(harness.urls) == 1:
+            return first
+        harness.manager._run.stop.set()
+        return replacement
+
+    first.navigate = disconnect
+    harness.connect = connect
+    harness.manager.start(items(1))
+    status = harness.finish()
+    harness.wait_thread()
+    assert status['state'] == 'stopped' and status['error_code'] is None
+    assert replacement.navigations == []
+
+
+def test_lms_failure_warning_contains_only_step_and_status(caplog):
+    from types import SimpleNamespace
+    from ssu_lecture_downloader.service.api_errors import lms_http_error_detail
+
+    service = SimpleNamespace(http=SimpleNamespace(trace=SimpleNamespace(last_entry=lambda: {
+        'step': 'lecture_launch', 'url': 'https://example.com/private?token=secret',
+    })))
+    exc = Exception('https://example.com/private?token=secret')
+    exc.response = SimpleNamespace(status_code=502)
+    with caplog.at_level(logging.WARNING):
+        code, _, _ = lms_http_error_detail(exc, service)
+    assert code == 'lms_request_failed:lecture_launch:502'
+    assert 'lms_request_failed step=lecture_launch status=502' in caplog.text
+    assert 'example.com' not in caplog.text and 'secret' not in caplog.text
+
+
+def test_crashed_target_missing_opens_a_new_tab(tmp_path):
+    harness = Harness(tmp_path, [FakePlayer()])
+    browser = harness.browser
+    handle = browser.handle
+    navigate = browser.navigate
+
+    def commands(message):
+        if browser.navigations and message['method'] == 'Target.getTargets':
+            return browser.reply(message, {'targetInfos': []})
+        if message['method'] == 'Target.createTarget':
+            return browser.reply(message, {'targetId': 'T2'})
+        return handle(message)
+
+    def crash_once(message, url):
+        navigate(message, url)
+        if len(browser.navigations) == 1:
+            browser.emit('Target.targetCrashed', {'targetId': 'T1'})
+            browser.close_page()
+
+    browser.handle = commands
+    browser.navigate = crash_once
+    harness.manager.start(items(1))
+    status = harness.finish()
+    harness.wait_thread()
+    assert status['state'] == 'finished'
+    assert 'Target.createTarget' in browser.methods()
+    assert harness.manager._run.page_target == 'T2'
