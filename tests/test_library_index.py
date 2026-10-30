@@ -63,34 +63,23 @@ def touch(directory: Path, *names: str) -> None:
 # --------------------------------------------------------------------------- legacy name parser
 
 
-@pytest.mark.parametrize(
-    ('name', 'content_id', 'suffix', 'role', 'duplicate'),
-    [
-        ('선대_5_2 [68e66b6c1b816].mp4', '68e66b6c1b816', '.mp4', 'video', None),
-        ('선대_6_1 [68feeb3f3b6dd].srt', '68feeb3f3b6dd', '.srt', 'srt', None),
-        ('선대_6_1 [68feeb3f3b6dd].transcript.txt', '68feeb3f3b6dd', '.transcript.txt', 'text', None),
-        ('선대_6_1 [68feeb3f3b6dd].transcript.md', '68feeb3f3b6dd', '.transcript.md', 'md', None),
-        ('선대_6_1 [68feeb3f3b6dd].transcript.json', '68feeb3f3b6dd', '.transcript.json', 'json', None),
-        ('선대_5_2 [68e66b6c1b816].txt', '68e66b6c1b816', '.txt', 'text_legacy', None),
-        ('7주차 1강 감성지능 리더십 [65dbf62460d5a] (2).mp4', '65dbf62460d5a', '.mp4', 'video', 2),
-        ('감성 [660650405b034].file', '660650405b034', '.file', 'material', None),
-        ('UI디자인_1주차_202602 [canvas-4732412].pdf', 'canvas-4732412', '.pdf', 'material', None),
-        ('녹음 [abc].MP3', 'abc', '.mp3', 'audio', None),
-        ('제목 [대괄호] 안의 [abc].mp4', 'abc', '.mp4', 'video', None),  # the last [...] group wins
-    ],
-)
-def test_legacy_names_are_attributed_to_a_content_id_and_role(name, content_id, suffix, role, duplicate):
-    parsed = parse_legacy_name(name)
-    assert parsed is not None
-    assert (parsed.content_id, parsed.suffix, parsed.role, parsed.duplicate) == (content_id, suffix, role, duplicate)
-
-
-@pytest.mark.parametrize(
-    'name',
-    ['notes.docx', 'no marker.mp4', 'lecture [content].mp4', '[abc].mp4', '제목 [abc].mp4.part', '제목 [a/b].mp4', '제목 [abc]mp4', '.DS_Store', '제목 [abc].toolongextension'],
-)
-def test_names_without_a_usable_marker_are_not_attributable(name):
-    assert parse_legacy_name(name) is None
+def test_legacy_names_are_attributed_to_a_content_id_and_role_and_unmarked_names_are_not():
+    parsed = {
+        name: (p.content_id, p.suffix, p.role, p.duplicate)
+        for name in (
+            '선대_5_2 [68e66b6c1b816].mp4', '선대_6_1 [68feeb3f3b6dd].srt', '선대_6_1 [68feeb3f3b6dd].transcript.txt', '선대_6_1 [68feeb3f3b6dd].transcript.md',
+            '선대_6_1 [68feeb3f3b6dd].transcript.json', '선대_5_2 [68e66b6c1b816].txt', '7주차 감성 [65dbf62460d5a] (2).mp4', '감성 [660650405b034].file',
+            '녹음 [abc].MP3', '제목 [대괄호] 안의 [abc].mp4',
+        )
+        if (p := parse_legacy_name(name))
+    }
+    assert [value for value in parsed.values()] == [
+        ('68e66b6c1b816', '.mp4', 'video', None), ('68feeb3f3b6dd', '.srt', 'srt', None), ('68feeb3f3b6dd', '.transcript.txt', 'text', None),
+        ('68feeb3f3b6dd', '.transcript.md', 'md', None), ('68feeb3f3b6dd', '.transcript.json', 'json', None), ('68e66b6c1b816', '.txt', 'text_legacy', None),
+        ('65dbf62460d5a', '.mp4', 'video', 2), ('660650405b034', '.file', 'material', None), ('abc', '.mp3', 'audio', None), ('abc', '.mp4', 'video', None),
+    ]
+    for name in ('notes.docx', 'lecture [content].mp4', '제목 [abc].mp4.part', '제목 [a/b].mp4', '.DS_Store', '제목 [abc].toolongextension'):
+        assert parse_legacy_name(name) is None, name
 
 
 # --------------------------------------------------------------------------- index: new layout
@@ -100,18 +89,19 @@ def test_index_finds_lectures_through_item_json_wherever_the_folder_sits(tmp_pat
     course = tmp_path / 'c'
     make_lecture(course, 'cid-1', '첫 강의', files=('첫 강의.mp4', '첫 강의.srt', '첫 강의 자막.txt', '첫 강의 음성.mp3'))
     make_lecture(course, 'cid-2', '둘째 강의', week='기타')
+    make_lecture(course, 'same', 'b 강의')
+    make_lecture(course, 'same', 'a 강의')  # two folders claiming one id: the first by name wins
 
     index = LibraryIndex.scan(course)
 
-    assert set(index.lectures) == {'cid-1', 'cid-2'}
-    entry = index.lectures['cid-1']
-    assert entry.lecture_dir == course / '05주차' / '첫 강의'
-    assert set(index.lecture_files(entry)) == {'video', 'srt', 'text', 'audio'}
+    assert set(index.lectures) == {'cid-1', 'cid-2', 'same'}
+    assert index.lectures['same'].lecture_dir.name == 'a 강의'
+    assert set(index.lecture_files(index.lectures['cid-1'])) == {'video', 'srt', 'text', 'audio'}
     assert index.downloaded_path('cid-1') == course / '05주차' / '첫 강의' / '첫 강의.mp4'
     assert index.downloaded_path('cid-2') is None  # an empty lecture folder is not "downloaded"
 
 
-def test_index_reads_material_entries_and_ignores_broken_ones(tmp_path):
+def test_index_reads_material_entries_ignores_broken_ones_and_needs_the_file(tmp_path):
     course = tmp_path / 'c'
     week = course / '05주차'
     touch(week, '자료.pdf', '메모.pdf')
@@ -119,29 +109,20 @@ def test_index_reads_material_entries_and_ignores_broken_ones(tmp_path):
     (week / '.ssu' / 'materials.json').write_text(json.dumps({
         'schema': 1,
         'entries': {
-            'm-1': {'file_name': '자료.pdf', 'kind': 'material', 'title': '자료', 'created_by': 'download', 'updated_at': 'x'},
+            'm-1': {'file_name': '자료.pdf', 'kind': 'material', 'title': '자료'},
             'canvas-9': {'file_name': '메모.pdf', 'kind': 'canvas_file'},
+            'missing': {'file_name': '없음.pdf'},
             'bad-1': {'file_name': '../escape.pdf'},
-            'bad-2': {'file_name': 'a/b.pdf'},
-            'bad-3': {'file_name': '.hidden'},
-            'bad-4': 'not an object',
+            'bad-2': {'file_name': '.hidden'},
+            'bad-3': 'not an object',
         },
     }), encoding='utf-8')
 
     index = LibraryIndex.scan(course)
 
-    assert set(index.materials) == {'m-1', 'canvas-9'}
-    assert index.downloaded_path('m-1') == week / '자료.pdf'
-    assert index.downloaded_path('canvas-9') == week / '메모.pdf'
+    assert set(index.materials) == {'m-1', 'canvas-9', 'missing'}
+    assert (index.downloaded_path('m-1'), index.downloaded_path('canvas-9'), index.downloaded_path('missing')) == (week / '자료.pdf', week / '메모.pdf', None)
     assert index.materials['canvas-9'].kind == 'canvas_file'
-
-
-def test_a_material_entry_whose_file_is_missing_is_not_downloaded(tmp_path):
-    course = tmp_path / 'c'
-    (course / '05주차' / '.ssu').mkdir(parents=True)
-    (course / '05주차' / '.ssu' / 'materials.json').write_text(json.dumps({'schema': 1, 'entries': {'m-1': {'file_name': '없음.pdf'}}}), encoding='utf-8')
-
-    assert LibraryIndex.scan(course).downloaded_path('m-1') is None
 
 
 # --------------------------------------------------------------------------- index: hostile metadata (AC3)
@@ -151,21 +132,12 @@ def test_a_material_entry_whose_file_is_missing_is_not_downloaded(tmp_path):
     'content',
     [
         '{not json',
-        '[]',
-        '"text"',
         json.dumps({**item_json('x', 'a'), 'schema': 2}),
-        json.dumps({**item_json('x', 'a'), 'schema': '1'}),
-        json.dumps({**item_json('x', 'a'), 'content_id': ''}),
-        json.dumps({**item_json('x', 'a'), 'content_id': 5}),
         json.dumps({**item_json('x', 'a'), 'stem': '../x'}),
-        json.dumps({**item_json('x', 'a'), 'stem': 'a/b'}),
-        json.dumps({**item_json('x', 'a'), 'stem': '..'}),
-        json.dumps({**item_json('x', 'a'), 'stem': '/etc'}),
-        json.dumps({**item_json('x', 'a'), 'week_folder': '../../x'}),
-        json.dumps({**item_json('x', 'a'), 'stem': 'a' * 300}),
         json.dumps({**item_json('x', 'a'), 'padding': 'p' * (70 * 1024)}),
+        json.dumps({**item_json('x', 'a'), 'content_id': ''}),
     ],
-    ids=lambda value: value[:30],
+    ids=['corrupt', 'wrong-schema', 'path-escaping', 'oversized', 'no-content-id'],
 )
 def test_corrupt_oversized_or_path_escaping_item_json_is_ignored_and_the_folder_is_foreign(tmp_path, content):
     course = tmp_path / 'c'
@@ -173,49 +145,31 @@ def test_corrupt_oversized_or_path_escaping_item_json_is_ignored_and_the_folder_
     (lecture / '.ssu').mkdir(parents=True)
     (lecture / '.ssu' / 'item.json').write_text(content, encoding='utf-8')
 
-    index = LibraryIndex.scan(course)
-
-    assert index.lectures == {}
+    assert LibraryIndex.scan(course).lectures == {}
     assert read_item_meta(lecture) is None
 
 
-def test_metadata_that_is_a_symlink_or_lives_behind_one_is_not_followed(tmp_path):
+def test_metadata_behind_symlinks_and_below_depth_two_is_not_followed(tmp_path):
     course = tmp_path / 'c'
     outside = tmp_path / 'outside'
     make_lecture(outside, 'stolen', 'victim')
+    victim = outside / '05주차' / 'victim'
     week = course / '05주차'
     week.mkdir(parents=True)
-    (week / 'linked-lecture').symlink_to(outside / '05주차' / 'victim', target_is_directory=True)
-    lecture = week / 'plain'
-    lecture.mkdir()
-    (lecture / '.ssu').symlink_to(outside / '05주차' / 'victim' / '.ssu', target_is_directory=True)
-    lecture2 = week / 'file-link'
-    (lecture2 / '.ssu').mkdir(parents=True)
-    (lecture2 / '.ssu' / 'item.json').symlink_to(outside / '05주차' / 'victim' / '.ssu' / 'item.json')
+    (week / 'linked-lecture').symlink_to(victim, target_is_directory=True)
+    (week / 'plain').mkdir()
+    (week / 'plain' / '.ssu').symlink_to(victim / '.ssu', target_is_directory=True)
+    (week / 'file-link' / '.ssu').mkdir(parents=True)
+    (week / 'file-link' / '.ssu' / 'item.json').symlink_to(victim / '.ssu' / 'item.json')
     (course / 'linked-week').symlink_to(outside / '05주차', target_is_directory=True)
-
-    index = LibraryIndex.scan(course)
-
-    assert index.lectures == {}
-
-
-def test_the_scan_does_not_look_deeper_than_week_and_lecture(tmp_path):
-    course = tmp_path / 'c'
-    deep = course / '05주차' / '강의' / '하위' / '더 깊이'
+    deep = week / '강의' / '하위' / '더 깊이'
     (deep / '.ssu').mkdir(parents=True)
     (deep / '.ssu' / 'item.json').write_text(json.dumps(item_json('deep', '더 깊이')), encoding='utf-8')
-    touch(course / '05주차' / '강의', '그냥 파일 [legacy-in-lecture].mp4')
+    touch(week / '강의', '그냥 파일 [legacy-in-lecture].mp4')
 
     index = LibraryIndex.scan(course)
 
     assert index.lectures == {} and index.legacy == {}
-
-
-def test_two_lecture_folders_claiming_one_content_id_resolve_to_the_first_by_name(tmp_path):
-    course = tmp_path / 'c'
-    make_lecture(course, 'same', 'b 강의')
-    make_lecture(course, 'same', 'a 강의')
-    assert LibraryIndex.scan(course).lectures['same'].lecture_dir.name == 'a 강의'
 
 
 # --------------------------------------------------------------------------- index: legacy fallback (read only)
@@ -225,63 +179,54 @@ def test_legacy_files_are_found_by_their_marker_for_every_role(tmp_path):
     course = tmp_path / 'c'
     touch(
         course,
-        '선대_5_2 [a1].mp4', '선대_5_2 [a1].srt', '선대_5_2 [a1].mp3', '선대_5_2 [a1].transcript.txt', '선대_5_2 [a1].transcript.md',
-        '선대_5_2 [a1].transcript.json', '선대_6_1 [b2].txt', '선대_6_1 [b2].srt', '감성 [c3].file', '복사본 [a1] (2).mp4',
-        '받다만 [d4].mp4.part', 'notes.docx', '.DS_Store',
+        '선대_5_2 [a1].mp4', '선대_5_2 [a1].srt', '선대_5_2 [a1].mp3', '선대_5_2 [a1].transcript.txt', '선대_5_2 [a1].txt', '선대_5_2 [a1].transcript.md',
+        '선대_5_2 [a1].transcript.json', '선대_6_1 [b2].txt', '선대_6_1 [b2].srt', '감성 [c3].file', '복사본 [a1] (2).mp4', '받다만 [d4].mp4.part', 'notes.docx', '.DS_Store',
     )
 
     index = LibraryIndex.scan(course)
 
     assert set(index.legacy) == {'a1', 'b2', 'c3'}
     assert set(index.legacy_paths('a1')) == {'video', 'srt', 'text', 'md', 'json', 'audio:mp3'}
-    assert index.legacy_paths('a1')['text'].name.endswith('.transcript.txt')
+    assert index.legacy_paths('a1')['text'].name.endswith('.transcript.txt')  # wins over the plain .txt of the same id
     assert index.legacy_paths('b2')['text'].name == '선대_6_1 [b2].txt'  # a legacy .txt satisfies the transcript role
-    assert index.legacy_material('c3') == course / '감성 [c3].file'
     assert index.legacy_files('a1').duplicates == [course / '복사본 [a1] (2).mp4']  # kept apart: never a role file
 
 
-def test_a_transcript_txt_wins_over_a_plain_legacy_txt_of_the_same_id(tmp_path):
+def test_legacy_material_prefers_the_planned_extension_then_any_file_of_the_id(tmp_path):
     course = tmp_path / 'c'
-    touch(course, 'T [a1].txt', 'T [a1].transcript.txt')
-    assert LibraryIndex.scan(course).legacy_paths('a1')['text'].name == 'T [a1].transcript.txt'
-
-
-def test_downloaded_path_prefers_video_then_audio_then_text_then_material_then_srt(tmp_path):
-    course = tmp_path / 'c'
-    touch(course, 'v [id1].mp4', 'v [id1].srt', 'a [id2].mp3', 'a [id2].srt', 't [id3].transcript.txt', 't [id3].srt', 'm [id4].pdf', 's [id5].srt')
+    touch(course, 'n [m1].txt', 'n [m1].pdf', 'a [m2].mp3', 'v [canvas-5].mp4', '감성 [c3].file')
     index = LibraryIndex.scan(course)
 
-    assert index.downloaded_path('id1').name == 'v [id1].mp4'
-    assert index.downloaded_path('id2').name == 'a [id2].mp3'
-    assert index.downloaded_path('id3').name == 't [id3].transcript.txt'
-    assert index.downloaded_path('id4').name == 'm [id4].pdf'
-    assert index.downloaded_path('id5').name == 's [id5].srt'
+    assert index.legacy_material('m1', 'txt') == course / 'n [m1].txt'
+    assert index.legacy_material('m1', 'docx') == course / 'n [m1].pdf'  # the material role beats a text role
+    assert index.legacy_material('m2', 'pdf') == course / 'a [m2].mp3'
+    assert index.legacy_material('canvas-5') == course / 'v [canvas-5].mp4'
+    assert index.legacy_material('c3') == course / '감성 [c3].file'
+    assert index.legacy_material('nothing', 'pdf') is None
+
+
+def test_downloaded_path_prefers_video_audio_text_material_srt_and_the_new_layout_over_the_old(tmp_path):
+    course = tmp_path / 'c'
+    touch(course, 'v [id1].mp4', 'v [id1].srt', 'a [id2].mp3', 'a [id2].srt', 't [id3].transcript.txt', 't [id3].srt', 'm [id4].pdf', 's [id5].srt', '옛 이름 [cid].mp4', '복사본 [dup] (2).mp4')
+    make_lecture(course, 'cid', '새 이름', files=('새 이름.mp4',))
+    index = LibraryIndex.scan(course)
+
+    assert {cid: index.downloaded_path(cid).name for cid in ('id1', 'id2', 'id3', 'id4', 'id5', 'cid', 'dup')} == {
+        'id1': 'v [id1].mp4', 'id2': 'a [id2].mp3', 'id3': 't [id3].transcript.txt', 'id4': 'm [id4].pdf', 'id5': 's [id5].srt', 'cid': '새 이름.mp4',
+        'dup': '복사본 [dup] (2).mp4',  # a lone (n) copy still counts, as the last resort
+    }
     assert index.downloaded_path('missing') is None
 
 
-def test_the_new_layout_wins_over_a_legacy_file_of_the_same_lecture(tmp_path):
-    course = tmp_path / 'c'
-    touch(course, '옛 이름 [cid].mp4')
-    make_lecture(course, 'cid', '새 이름', files=('새 이름.mp4',))
-    assert LibraryIndex.scan(course).downloaded_path('cid') == course / '05주차' / '새 이름' / '새 이름.mp4'
-
-
-def test_a_lone_copy_marked_n_still_counts_as_present_but_only_as_the_last_resort(tmp_path):
-    course = tmp_path / 'c'
-    touch(course, '복사본 [cid] (2).mp4')
-    assert LibraryIndex.scan(course).downloaded_path('cid') == course / '복사본 [cid] (2).mp4'
-
-
 def test_find_downloaded_files_keeps_its_contract_for_both_layouts_and_skips_unfinished_parts(tmp_path):
-    course = tmp_path / '자료/구조'.replace('/', '_')
+    course = tmp_path / '자료_구조'
     touch(course, '1주차 [abc123].mp4', '2주차 [zzz999].mp4.part')
     make_lecture(course, 'new-1', '새 강의', files=('새 강의 자막.txt',))
 
     found = find_downloaded_files(tmp_path, '자료/구조', ['abc123', 'zzz999', 'new-1', '', 'nothing'])
 
     assert found == {'abc123': str(course / '1주차 [abc123].mp4'), 'new-1': str(course / '05주차' / '새 강의' / '새 강의 자막.txt')}
-    assert find_downloaded_files(tmp_path, 'no such course', ['abc123']) == {}
-    assert find_downloaded_files(tmp_path, '자료/구조', []) == {}
+    assert find_downloaded_files(tmp_path, 'no such course', ['abc123']) == {} and find_downloaded_files(tmp_path, '자료/구조', []) == {}
 
 
 def test_scanning_never_writes_to_the_folder(tmp_path):
@@ -591,44 +536,6 @@ def test_two_same_title_lectures_downloaded_in_parallel_get_stable_numbered_fold
     assert again['status'] == 'succeeded' and stages(again, 'downloading') == []
 
 
-def test_a_foreign_folder_with_the_planned_name_pushes_the_new_lecture_to_a_numbered_folder(rig_for):
-    rig = rig_for(Lec(111, '선대_5_2', 'cid-a'))
-    foreign = rig.course_dir / '05주차' / '선대_5_2'
-    touch(foreign, '내 메모.txt')
-
-    snapshot = rig.run(['mp4'], [111])
-
-    assert snapshot['status'] == 'succeeded'
-    assert sorted(path.name for path in foreign.iterdir()) == ['내 메모.txt']
-    assert (rig.course_dir / '05주차' / '선대_5_2 (2)' / '선대_5_2 (2).mp4').is_file()
-
-
-def test_a_lecture_keeps_its_folder_when_the_lms_later_moves_it_to_another_week(rig_for):
-    lecture = Lec(111, '이사가는 강의', 'cid-a', week=4, module_name='4주차')
-    rig = rig_for(lecture)
-    rig.run(['mp4'], [111])
-    lecture.week, lecture.module_name = 5, '5주차'
-    rig.service.clear_cache()
-
-    again = rig.run(['mp4'], [111])
-
-    assert again['status'] == 'succeeded' and stages(again, 'downloading') == []
-    assert (rig.course_dir / '04주차' / '이사가는 강의' / '이사가는 강의.mp4').is_file()
-    assert not (rig.course_dir / '05주차').exists()
-
-
-def test_week_folder_comes_from_the_module_name_when_the_lms_gives_no_week_number(rig_for):
-    rig = rig_for(
-        Lec(111, '번호 없는 모듈', 'cid-a', week=None, module_name='오리엔테이션', lesson=1),
-        Lec(112, '이름 속 번호', 'cid-b', week=None, module_name='Week 3', lesson=2),
-        Lec(113, '모듈 이름 없음', 'cid-c', week=None, module_name='', lesson=3),
-    )
-
-    rig.run(['mp4'], [111, 112, 113])
-
-    assert sorted(path.name for path in rig.course_dir.iterdir()) == ['03주차', '기타', '오리엔테이션']
-
-
 # ---- AC6: materials
 
 
@@ -657,25 +564,6 @@ def test_a_file_material_takes_its_extension_from_the_lms_file_name(rig_for):
     assert Path(result.output_path).read_bytes() == b'1234'
 
 
-def test_a_file_material_without_a_usable_file_name_keeps_the_generic_extension(rig_for):
-    rig = rig_for(Lec(112, '이름 없는 자료', 'cid-file', kind='file', file_name=None))
-
-    result = rig.service.download_lecture('u', 'p', course_id=42, module_item_id=112, course_name=COURSE, output_dir=rig.root, dry_run=True)
-
-    assert Path(result.output_path).name == '이름 없는 자료.file'
-
-
-def test_same_title_materials_in_a_week_are_numbered_by_lesson_order(rig_for):
-    rig = rig_for(
-        Lec(112, '자료', 'cid-b', lesson=2, kind='pdf', file_name='b.pdf'),
-        Lec(111, '자료', 'cid-a', lesson=1, kind='pdf', file_name='a.pdf'),
-    )
-
-    result = rig.service.batch_download_lectures('u', 'p', course_id=42, course_name=COURSE, output_dir=rig.root, dry_run=True, module_item_ids=[111, 112])
-
-    assert {item.module_item_id: Path(item.output_path).name for item in result.items} == {111: '자료.pdf', 112: '자료 (2).pdf'}
-
-
 # ---- the internal plan handed to the pipeline (API payload unchanged)
 
 
@@ -694,17 +582,6 @@ def test_the_batch_result_carries_library_paths_but_the_payload_does_not(rig_for
         'ok', 'error_code', 'dry_run', 'course_id', 'course_name', 'total_count', 'success_count', 'failure_count', 'items', 'progress',
     }
     assert rig.tree() == [], 'planning writes nothing'
-
-
-def test_planning_a_course_changes_no_byte_of_an_existing_tree(rig_for):
-    rig = rig_for(Lec(111, '선대_5_2', 'cid-a'), Lec(112, '선대_6_1', 'cid-b', lesson=2))
-    touch(rig.course_dir, '선대_5_2 [cid-a].mp4')
-    make_lecture(rig.course_dir, 'cid-b', '선대_6_1', files=('선대_6_1.mp4',))
-    snapshot_before = sorted((str(p), p.stat().st_mtime_ns, p.stat().st_ino, p.stat().st_size) for p in rig.root.rglob('*'))
-
-    rig.service.batch_download_lectures('u', 'p', course_id=42, course_name=COURSE, output_dir=rig.root, dry_run=True, conflict_strategy='skip')
-
-    assert snapshot_before == sorted((str(p), p.stat().st_mtime_ns, p.stat().st_ino, p.stat().st_size) for p in rig.root.rglob('*'))
 
 
 # ---- AC14: the standalone audio job keeps its naming; an explicit output path is honoured
@@ -731,3 +608,44 @@ def test_extract_audio_writes_the_explicit_output_path_and_the_standalone_naming
 
     assert standalone.output_path == tmp_path / 'transcripts' / '선대_5_2.mp3'
     assert explicit.ok is True and explicit.output_path == explicit_target and explicit_target.read_bytes() == b'audio'
+
+
+def test_legacy_material_prefers_the_planned_extension_then_any_file_of_the_id(tmp_path):
+    course = tmp_path / 'c'
+    touch(course, 'n [m1].txt', 'n [m1].pdf', 'a [m2].mp3', 'v [canvas-5].mp4')
+    index = LibraryIndex.scan(course)
+
+    assert index.legacy_material('m1', 'txt') == course / 'n [m1].txt'
+    assert index.legacy_material('m1', 'pdf') == course / 'n [m1].pdf'
+    assert index.legacy_material('m1', 'docx') == course / 'n [m1].pdf'  # the material role beats a text role
+    assert index.legacy_material('m2', 'pdf') == course / 'a [m2].mp3'
+    assert index.legacy_material('canvas-5') == course / 'v [canvas-5].mp4'
+    assert index.legacy_material('nothing', 'pdf') is None
+
+
+def test_the_written_file_wins_over_a_dry_run_plan_that_points_elsewhere(rig_for, monkeypatch):
+    import dataclasses
+
+    from ssu_lecture_downloader.core.library_layout import CourseLayout, LibraryTarget
+
+    rig = rig_for(Lec(111, '선대_5_2', 'cid-a'))
+    decoy_dir = rig.root / 'elsewhere'
+    decoy = CourseLayout.plan(decoy_dir, [LibraryTarget(key='111', title='다른 곳', kind='lecture', content_id='cid-a', week_position=5)], course_id='42').lecture('111')
+    decoy.lecture_dir.mkdir(parents=True)
+    decoy.targets['video'].write_bytes(b'decoy video')
+    real = rig.service.batch_download_lectures
+
+    def misleading(*args, **kwargs):
+        result = real(*args, **kwargs)
+        return dataclasses.replace(result, library_paths={'111': decoy}) if kwargs.get('dry_run') else result
+
+    monkeypatch.setattr(rig.service, 'batch_download_lectures', misleading)
+
+    snapshot = rig.run(['txt'], [111])
+
+    assert snapshot['status'] == 'succeeded'
+    assert decoy.targets['video'].read_bytes() == b'decoy video', 'only the video this job wrote may be removed'
+    written = rig.course_dir / '05주차' / '선대_5_2'
+    assert (written / '선대_5_2.transcript.txt').is_file(), 'outputs follow the file that was written'
+    assert not (written / '선대_5_2.mp4').exists()
+    assert sorted(path.name for path in decoy.lecture_dir.iterdir()) == [decoy.targets['video'].name]

@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from ssu_lecture_downloader.core.download import (
     DownloadPlan,
     download_to_plan,
@@ -136,3 +138,17 @@ def test_skip_reuses_a_file_saved_earlier_under_another_title(tmp_path):
     fresh = plan_download_path(output_dir=tmp_path, course_name='UI디자인', lecture_title='5주차_02_웹접근성', content_id='aaaaaaaaaaaaa', extension='mp4', conflict_strategy='skip')
     assert fresh.file_path == course_dir / '기타' / '5주차_02_웹접근성' / '5주차_02_웹접근성.mp4'
     assert fresh.file_exists is False
+
+
+@pytest.mark.parametrize(
+    ('content_id', 'legacy_name', 'extension'),
+    [('m1', 'notes [m1].txt', 'txt'), ('m2', 'audio [m2].mp3', 'mp3'), ('m3', 'subs [m3].srt', 'srt'), ('canvas-5', 'clip [canvas-5].mp4', 'mp4'), ('m4', 'slides [m4].pdf', 'pdf')],
+)
+def test_a_material_saved_in_the_old_layout_with_a_media_or_text_extension_is_not_downloaded_again(tmp_path: Path, content_id, legacy_name, extension):
+    course = tmp_path / 'Course'
+    course.mkdir()
+    (course / legacy_name).write_text('already here')
+
+    plan = plan_download_path(output_dir=tmp_path, course_name='Course', lecture_title='t', content_id=content_id, extension=extension, conflict_strategy='skip')
+
+    assert plan.file_exists is True and plan.file_path == course / legacy_name

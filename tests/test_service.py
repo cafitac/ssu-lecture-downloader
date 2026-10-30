@@ -991,6 +991,7 @@ def test_downloads_use_a_private_http_client_that_is_closed_afterwards(tmp_path:
     used = []
     closed = []
     monkeypatch.setattr(HttpClient, 'close', lambda self: closed.append(self))
+    monkeypatch.setattr(service, '_course_modules', lambda course_id, **kwargs: [])  # the folder plan must not reach the real LMS
 
     def fake_download(*, http, download_url, plan, referer=None, max_attempts=1, on_progress=None, should_cancel=None):
         used.append(http)
@@ -1105,3 +1106,41 @@ def test_batch_cancel_before_downloads_start_opens_no_connections(tmp_path: Path
     service.batch_download_lectures('user', 'password', course_id=42, course_name='과목', output_dir=tmp_path, dry_run=False, module_item_ids=[111], on_progress=on_progress, should_cancel=should_cancel)
 
     assert downloads == []
+
+
+def test_a_failing_module_list_fails_the_single_download_instead_of_filing_it_under_the_catch_all(tmp_path: Path, monkeypatch, caplog):
+    service = SsuLectureService(http=FakeHttp(), login_func=ok_login)
+    original = service._course_modules
+
+    def modules(course_id, **kwargs):
+        if 'http' in kwargs:  # the media resolution before it still works
+            return original(course_id, **kwargs)
+        raise curl_exceptions.ConnectionError('LMS unreachable')
+
+    monkeypatch.setattr(service, '_course_modules', modules)
+
+    with pytest.raises(curl_exceptions.ConnectionError), caplog.at_level('WARNING'):
+        service.download_lecture('user', 'password', course_id=42, module_item_id=111, course_name='과목', output_dir=tmp_path, dry_run=True)
+
+    assert any(record.levelname == 'WARNING' and 'module list unavailable' in record.getMessage() for record in caplog.records)
+    assert not list(tmp_path.rglob('*'))
+
+
+def test_a_login_failure_while_planning_the_folder_is_a_failed_result(tmp_path: Path, monkeypatch):
+    service = SsuLectureService(http=FakeHttp(), login_func=ok_login)
+    original = service._authenticated
+    calls = []
+
+    def authenticated(username, password, operation):
+        calls.append(operation)
+        if len(calls) == 1:  # the media resolution
+            return original(username, password, operation)
+        return LoginDiscoveryResult(ok=False, error_code='authentication_failed'), None
+
+    monkeypatch.setattr(service, '_authenticated', authenticated)
+
+    result = service.download_lecture('user', 'password', course_id=42, module_item_id=111, course_name='과목', output_dir=tmp_path, dry_run=True)
+    native = service.native_download_plan('user', 'password', course_id=42, module_item_id=111, course_name='과목', output_dir=tmp_path)
+
+    assert (result.ok, result.error_code) == (False, 'authentication_failed')
+    assert (native.result.ok, native.native_download) == (False, None)

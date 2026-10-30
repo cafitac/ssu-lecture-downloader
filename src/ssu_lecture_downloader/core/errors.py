@@ -15,6 +15,14 @@ NETWORK_TIMEOUT = "network_timeout"
 LMS_SESSION_HOSTS = frozenset({"canvas.ssu.ac.kr", "lms.ssu.ac.kr", "smartid.ssu.ac.kr"})
 
 
+class PathTooLong(OSError):
+    """The planned path cannot fit the platform's path budget even with the shortest allowed stem."""
+
+
+class LibraryConflict(OSError):
+    """The folder or file planned for a library item was taken by something else between planning and writing."""
+
+
 @dataclass(frozen=True)
 class LoginFlowError(Exception):
     code: str

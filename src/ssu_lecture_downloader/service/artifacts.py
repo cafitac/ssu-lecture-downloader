@@ -133,7 +133,7 @@ class LecturePipeline:
         if not wants_mp3 and not audio_preexisting and audio_path.exists():
             if self._remove(audio_path):
                 owner.emit({"stage": "intermediate_audio_removed", **self.context, "output_path": str(audio_path)})
-        if "mp4" not in outputs and video_exists and bool(getattr(item, "written", False)):
+        if "mp4" not in outputs and video_exists and bool(getattr(item, "written", False)) and paths.video == Path(output_path):
             if self._remove(paths.video):
                 owner.emit({"stage": "source_video_removed", **self.context, "output_path": str(paths.video)})
         return None
@@ -281,6 +281,12 @@ class ArtifactPipeline:
     def lecture_paths(self, item: Any) -> LecturePaths:
         """The lecture's files from the plan; an item without a plan entry keeps the names derived from its video path."""
         planned = self.library_paths.get(str(getattr(item, "module_item_id", None)))
+        written = getattr(item, "output_path", None)
+        if planned is not None and written:
+            # The file that really exists wins over the dry-run plan: it must be in the planned folder (or be the planned old-layout video).
+            where = Path(str(written))
+            if where.parent != planned.lecture_dir and where != planned.legacy.get("video"):
+                planned = None
         if planned is None:
             return _fallback_paths(Path(str(item.output_path)), self.request.audio_format)
         return planned.with_audio_format(self.request.audio_format)

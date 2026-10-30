@@ -1172,3 +1172,15 @@ def test_course_detail_marks_lectures_and_materials_stored_in_the_week_layout_or
     assert items[0]['downloaded_path'] == str(lecture.targets['text'])
     assert items[1]['downloaded_path'] == str(course_dir / '옛 강의 [old-lecture].mp4')
     assert items[2]['downloaded_path'] == str(material.target)
+
+
+def test_audio_job_rejects_an_explicit_output_path_from_a_request_body(tmp_path):
+    store = FakeCredentialStore(CredentialPair(username='student-id', password='secret-password'))
+    client = TestClient(create_app(service_factory=FakeService, default_output_dir=tmp_path, credential_store=store))
+    video = tmp_path / 'v.mp4'
+    video.write_bytes(b'video')
+
+    rejected = client.post('/api/media/audio/jobs', json={'input_path': str(video), 'format': 'mp3', 'output_path': str(tmp_path / 'elsewhere.mp3')})
+
+    assert rejected.status_code == 422
+    assert 'output_path' not in client.get('/openapi.json').text

@@ -13,8 +13,10 @@ from ssu_lecture_downloader.core.library_layout import (
     LibraryIndex,
     LibraryTarget,
     LecturePaths,
+    VIDEO_EXTENSION_ALIASES,
     MaterialPaths,
     collision_name,
+    item_kind_for_extension,
 )
 from ssu_lecture_downloader.core.progress import emit_progress
 
@@ -49,14 +51,6 @@ class DownloadPlan:
 
 _UNSAFE_FILENAME_CHARS = re.compile(r'[\\/:*?"<>|\x00-\x1f\x7f]+')
 _WHITESPACE = re.compile(r'\s+')
-_VIDEO_EXTENSION_ALIASES = {
-    'everlec': 'mp4',
-    'movie': 'mp4',
-    'readystream': 'mp4',
-    'zoom': 'mp4',
-    'video': 'mp4',
-    'mp4': 'mp4',
-}
 MEDIA_DOWNLOAD_TIMEOUT_SECONDS = 3 * 60 * 60
 # Pause before retrying when the request itself failed (connect error, timeout, 5xx)
 # so a flapping network is not hammered N times in a row. Retries after a stream
@@ -71,16 +65,13 @@ def normalize_media_extension(extension: str | None) -> str:
     normalized = (extension or '').strip().lower().lstrip('.')
     if '/' in normalized:
         normalized = normalized.rsplit('/', 1)[-1]
-    return _VIDEO_EXTENSION_ALIASES.get(normalized, normalized or 'mp4')
+    return VIDEO_EXTENSION_ALIASES.get(normalized, normalized or 'mp4')
 
 
 def safe_filename(value: str, fallback: str = 'lecture') -> str:
     cleaned = _UNSAFE_FILENAME_CHARS.sub('_', value)
     cleaned = _WHITESPACE.sub(' ', cleaned).strip(' ._')
     return cleaned or fallback
-
-
-_VIDEO_KINDS = frozenset({'mp4', 'm4v', 'mov', 'mkv', 'webm'})
 
 
 def plan_library_download(
@@ -112,9 +103,9 @@ def plan_library_download(
         existing = library.source_video()
     chosen = target
     file_exists = target.exists()
-    if conflict_strategy == 'skip' and existing is not None:
-        chosen = existing
-        file_exists = True
+    if conflict_strategy == 'skip':
+        chosen = existing if existing is not None else target
+        file_exists = existing is not None
     elif conflict_strategy == 'rename':
         number = 2
         while chosen.exists():
@@ -152,7 +143,7 @@ def plan_download_path(
     normalized_extension = normalize_media_extension(extension)
     course_dir = output_dir / safe_filename(course_name, fallback='course')
     is_canvas = content_id.startswith('canvas-')
-    kind = 'canvas_file' if is_canvas else ('lecture' if normalized_extension in _VIDEO_KINDS else 'material')
+    kind = 'canvas_file' if is_canvas else item_kind_for_extension(normalized_extension)
     key = content_id or 'item'
     target = LibraryTarget(
         key=key,

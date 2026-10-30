@@ -352,3 +352,4 @@ class LegacyFiles:
     roles: dict[str, Path] = field(default_factory=dict)
     audio: dict[str, Path] = field(default_factory=dict)  # extension -> path
     duplicates: list[Path] = field(default_factory=list)
+    entries: list[tuple[str, Path]] = field(default_factory=list)  # every non-copy file as (suffix, path), in name order

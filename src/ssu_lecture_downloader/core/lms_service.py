@@ -25,16 +25,16 @@ from ssu_lecture_downloader.core.download import (
     DownloadCancelled,
     DownloadPlan,
     download_to_plan,
-    normalize_media_extension,
     plan_library_download,
     safe_filename,
 )
-from ssu_lecture_downloader.core.errors import is_session_lost, is_signed_url_failure, response_status
+from ssu_lecture_downloader.core.errors import classify_network_error, is_session_lost, is_signed_url_failure, response_status
 from ssu_lecture_downloader.core.http_client import HttpClient
 from ssu_lecture_downloader.core.library_layout import (
     CourseLayout,
     LecturePaths,
     LibraryTarget,
+    item_kind_for_extension,
     material_extension,
 )
 from ssu_lecture_downloader.core.lms import (
@@ -45,7 +45,6 @@ from ssu_lecture_downloader.core.lms import (
     latest_current_term,
     learningx_api_headers,
 )
-from ssu_lecture_downloader.core.library_meta import VIDEO_EXTENSIONS
 from ssu_lecture_downloader.core.login_flow import LoginDiscoveryResult
 from ssu_lecture_downloader.core.media import (
     AttendanceItemMedia,
@@ -442,7 +441,7 @@ def _planned_file(
     result = resolved.result
     extension = resolved.extension or "mp4"
     item_key = str(key)
-    is_video = normalize_media_extension(extension) in VIDEO_EXTENSIONS
+    is_video = item_kind_for_extension(extension) == "lecture"
     planned = layout.lecture(item_key) if is_video else layout.material(item_key, extension)
     if planned is None:
         planned = layout.ensure_kind(
@@ -1012,7 +1011,11 @@ class SsuLectureService:
                 DownloadLectureResult, login_result.error_code, dry_run=dry_run, written=False, course_id=course_id, module_item_id=module_item_id
             )
 
-        layout = self._single_item_layout(username, password, course_id=course_id, course_name=course_name, output_dir=output_dir)
+        layout, layout_error = self._single_item_layout(username, password, course_id=course_id, course_name=course_name, output_dir=output_dir)
+        if layout is None:
+            return _failure(
+                DownloadLectureResult, layout_error, dry_run=dry_run, written=False, course_id=course_id, module_item_id=module_item_id
+            )
         plan, file_size = _planned_file(resolved, layout=layout, key=module_item_id, output_dir=output_dir, fallback_title="lecture", conflict_strategy=conflict_strategy)
         written = False
         skipped = False
@@ -1077,20 +1080,26 @@ class SsuLectureService:
                 raise
             transfer(fresh)
 
-    def _single_item_layout(self, username: str, password: str, *, course_id: int | str, course_name: str, output_dir: Path) -> CourseLayout:
-        """The course plan a single download places its item in (module list is cached by the resolution just done)."""
+    def _single_item_layout(self, username: str, password: str, *, course_id: int | str, course_name: str, output_dir: Path) -> tuple[CourseLayout | None, str | None]:
+        """(course plan, None) for a single download, or (None, error code) when the module list cannot be had.
+
+        The module list is normally cached by the resolution just done. A network or session failure here is
+        logged and re-raised for the usual error mapping: placing the item in `기타` for good because the list
+        was briefly unavailable would hide it from its week.
+        """
 
         def load() -> list:
             return LearningXLister(self.http).extract_course_content_items(self._course_modules(course_id))
 
-        content_items: list = []
         try:
-            login_result, loaded = self._authenticated(username, password, load)
-            if login_result.ok and loaded is not None:
-                content_items = loaded
-        except Exception:  # noqa: BLE001 - no week information is better than no download: the item goes to 기타
-            logging.getLogger(__name__).debug("module list unavailable for the folder plan (course_id=%s)", course_id, exc_info=True)
-        return _course_layout(content_items, course_id=course_id, course_name=course_name, output_dir=output_dir)
+            login_result, content_items = self._authenticated(username, password, load)
+        except Exception as exc:
+            if classify_network_error(exc) is not None or is_session_lost(exc):
+                logging.getLogger(__name__).warning("module list unavailable for the folder plan (course_id=%s): %s", course_id, type(exc).__name__)
+            raise
+        if not login_result.ok or content_items is None:
+            return None, login_result.error_code
+        return _course_layout(content_items, course_id=course_id, course_name=course_name, output_dir=output_dir), None
 
     def native_download_plan(
         self,
@@ -1112,7 +1121,12 @@ class SsuLectureService:
             )
             return NativeDownloadPlanResult(result=failed, native_download=None)
 
-        layout = self._single_item_layout(username, password, course_id=course_id, course_name=course_name, output_dir=output_dir)
+        layout, layout_error = self._single_item_layout(username, password, course_id=course_id, course_name=course_name, output_dir=output_dir)
+        if layout is None:
+            failed = _failure(
+                DownloadLectureResult, layout_error, dry_run=True, written=False, course_id=course_id, module_item_id=module_item_id
+            )
+            return NativeDownloadPlanResult(result=failed, native_download=None)
         plan, file_size = _planned_file(resolved, layout=layout, key=module_item_id, output_dir=output_dir, fallback_title="lecture", conflict_strategy=conflict_strategy)
         skipped = plan.file_exists and conflict_strategy == 'skip'
         if not skipped and plan.library is not None:

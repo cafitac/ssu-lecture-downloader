@@ -22,6 +22,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
+from ssu_lecture_downloader.core.errors import LibraryConflict, PathTooLong
 from ssu_lecture_downloader.core.library_meta import (
     AUDIO_EXTENSIONS,
     META_DIR_NAME,
@@ -58,14 +59,6 @@ _WINDOWS_RESERVED = frozenset({'CON', 'PRN', 'AUX', 'NUL', *(f'COM{n}' for n in 
 # Longest decoration a name gets after the stem: ' (99)' for a collision, ' 자막.txt' / ' 음성.mp3' for an output.
 _COLLISION_SUFFIX_CHARS = len(' (99)')
 _LONGEST_OUTPUT_SUFFIX_CHARS = len(TEXT_SUFFIX)
-
-
-class PathTooLong(OSError):
-    """The planned path cannot fit the platform's path budget even with the shortest allowed stem."""
-
-
-class LibraryConflict(OSError):
-    """The folder planned for a lecture was taken by something else between planning and writing."""
 
 
 # --------------------------------------------------------------------------- name rules
@@ -115,7 +108,8 @@ class PathRules:
         """Shorten `stem` until the longest file planned for it fits `max_path_chars` (no-op without a budget)."""
         if self.max_path_chars is None:
             return stem
-        fixed = len(str(base_dir)) + len(week_folder) + 3 + _COLLISION_SUFFIX_CHARS + _LONGEST_OUTPUT_SUFFIX_CHARS
+        # Longest path planned for the stem: <base>/<week>/<stem> (99)/<stem> (99) 자막.txt.part (the stem is in both names).
+        fixed = len(str(base_dir)) + len(week_folder) + 3 + 2 * _COLLISION_SUFFIX_CHARS + _LONGEST_OUTPUT_SUFFIX_CHARS + len('.part')
         allowed = (self.max_path_chars - fixed) // 2  # the stem is in the folder name and in the file name
         if allowed < self.min_stem_chars:
             raise PathTooLong(f'path budget of {self.max_path_chars} characters cannot be met')
@@ -172,6 +166,22 @@ def week_folder(week_position: object, module_name: str | None, rules: PathRules
 
 def lecture_stem(title: str | None, rules: PathRules = DEFAULT_RULES) -> str:
     return rules.stem(title or '', fallback=FALLBACK_STEM)
+
+
+VIDEO_EXTENSION_ALIASES = {
+    'everlec': 'mp4',
+    'movie': 'mp4',
+    'readystream': 'mp4',
+    'zoom': 'mp4',
+    'video': 'mp4',
+    'mp4': 'mp4',
+}
+
+
+def item_kind_for_extension(extension: str | None) -> str:
+    """`lecture` for an extension the media server uses for video (aliases included), else `material`."""
+    ext = (extension or '').strip().lower().lstrip('.').rsplit('/', 1)[-1]  # aliases such as `readystream` are longer than a file extension
+    return 'lecture' if ext in VIDEO_EXTENSION_ALIASES or ext in VIDEO_EXTENSIONS else 'material'
 
 
 def clean_extension(extension: str | None, default: str = '') -> str:
@@ -374,19 +384,31 @@ class MaterialPaths:
     def meta_name(self) -> str:
         return self.file_name
 
-    def current(self) -> Path:
-        if self.target.exists():
-            return self.target
-        return self.legacy if self.legacy is not None and self.legacy.exists() else self.target
+    def _mapped_here(self) -> bool:
+        """Is the planned file name recorded in the week's materials.json for THIS content id?"""
+        entry = read_materials_meta(self.week_dir).get(self.content_id)
+        return entry is not None and _fold(entry.file_name) == _fold(self.file_name)
 
     def source_video(self) -> Path | None:
-        path = self.current()
-        return path if path.exists() else None
+        """The material that is already here: the planned file when materials.json maps it to this id, else the old flat-layout file."""
+        if self.target.exists() and self._mapped_here():
+            return self.target
+        return self.legacy if self.legacy is not None and self.legacy.exists() else None
 
     def prepare(self) -> None:
-        """Create the week folder and record the material in `<week>/.ssu/materials.json` before its bytes arrive."""
+        """Create the week folder and record the material in `<week>/.ssu/materials.json` before its bytes arrive.
+
+        Re-reads materials.json under the course lock: a name held by another content id (any case), or a file
+        of that name nobody recorded for this id, is a conflict and is never written over.
+        """
         with course_lock(self.course_dir or self.week_dir.parent):
             self.week_dir.mkdir(parents=True, exist_ok=True)
+            entries = read_materials_meta(self.week_dir)
+            wanted = _fold(self.file_name)
+            if any(other != self.content_id and _fold(entry.file_name) == wanted for other, entry in entries.items()):
+                raise LibraryConflict(f'{self.file_name} belongs to another material')
+            if self.target.exists() and not self._mapped_here():
+                raise LibraryConflict(f'{self.file_name} is not a material of this app')
             upsert_material_meta(self.week_dir, self.content_id, MaterialMeta(file_name=self.file_name, kind=self.kind, title=self.title))
 
 
@@ -481,6 +503,7 @@ class LibraryIndex:
         if role == 'audio':
             files.audio.setdefault(parsed.suffix.lstrip('.'), path)
         files.roles.setdefault(role, path)
+        files.entries.append((parsed.suffix, path))
 
     # ---- queries
     def legacy_files(self, content_id: str | None) -> LegacyFiles | None:
@@ -502,9 +525,22 @@ class LibraryIndex:
             paths[f'audio:{extension}'] = path
         return paths
 
-    def legacy_material(self, content_id: str | None) -> Path | None:
+    def legacy_material(self, content_id: str | None, extension: str | None = None) -> Path | None:
+        """The old flat-layout file of an id planned as a material: the planned extension first, then any file of that id.
+
+        A material can carry a media or text extension (`notes [m1].txt`, a Canvas `.mp4`), which the name parser
+        files under another role, so the role is not trusted here.
+        """
         files = self.legacy_files(content_id)
-        return None if files is None else files.roles.get('material')
+        if files is None:
+            return None
+        wanted = f'.{clean_extension(extension)}' if extension else None
+        for suffix, path in files.entries:
+            if suffix == wanted:
+                return path
+        if 'material' in files.roles:
+            return files.roles['material']
+        return files.entries[0][1] if files.entries else None
 
     def lecture_files(self, entry: LectureEntry) -> dict[str, Path]:
         """Visible files that exist in a new-layout lecture folder, by role."""
@@ -683,7 +719,7 @@ class CourseLayout:
         if isinstance(known, MaterialPaths) and known.file_name.rsplit('.', 1)[-1] == extension:
             return known
         index = self.index
-        legacy = index.legacy_material(identity)
+        legacy = index.legacy_material(identity, extension)
         entry = index.materials.get(identity)
         if entry is not None:
             paths = MaterialPaths(entry.week_dir, entry.file_name, identity, entry.kind, entry.title or target.title, legacy, self.course_dir)
