@@ -8,7 +8,7 @@ import type { DiagnosticsSaveState } from './diagnosticsSave.ts';
 import type { ChromeWatchNotice, SavedDiagnostics, WatchQueueNotice } from './types.ts';
 
 /** What was noticed. Each kind is asked at most once per app session. */
-export type ProblemKind = 'chrome-watch' | 'app-watch' | 'backend' | 'previous-crash';
+export type ProblemKind = 'chrome-watch' | 'chrome-skip' | 'app-watch' | 'backend' | 'previous-crash';
 
 export const PROBLEM_TITLE = '문제가 생겼어요';
 export const PROBLEM_HINT = '진단 파일을 저장해서 전달해 주시겠어요? 어디로도 자동 전송되지 않아요.';
@@ -17,6 +17,7 @@ export const PROBLEM_SAVE_FAILED_TEXT = '진단 파일을 저장하지 못했어
 
 const SENTENCES: Record<ProblemKind, string> = {
   'chrome-watch': '자동 재생이 오류로 멈췄어요.',
+  'chrome-skip': '재생이 멈춰서 강의를 건너뛰었어요.',
   'app-watch': '재생이 멈춰서 강의를 건너뛰었어요.',
   backend: '내부 서버가 멈췄어요.',
   'previous-crash': '지난번에 앱이 비정상적으로 종료됐어요.',
@@ -27,13 +28,28 @@ export function problemSentence(kind: ProblemKind): string {
   return SENTENCES[kind];
 }
 
+/** Run error codes of a stop the user caused by closing the Chrome window; that is no problem. */
+const USER_CLOSED_CODES: ReadonlySet<string> = new Set(['chrome_window_closed']);
+
 /**
- * Whether a notice of the Chrome-window watch is a problem worth asking about: a failed run, or a
- * playback stall. A run that failed only because the login ran out is the login screen's business.
+ * Whether a notice of the Chrome-window watch is a problem worth asking about:
+ * - `failed`: the run ended with an error, unless the login ran out (the login screen's business)
+ *   or the user closed the Chrome window (`chrome_window_closed`). A lost Chrome or DevTools
+ *   connection (`chrome_closed`) does count.
+ * - `skipped`: only a lecture skipped because of a problem (the final stall, a plan error) carries
+ *   a notice; the user's own skip has none.
+ * - `stalled` does not: the first stall reloads the page and usually recovers; if it does not, the
+ *   run then skips the lecture and that notice asks.
+ * `errorCode` is the run's error code, which belongs to a `failed` notice only.
  */
-export function chromeNoticeIsProblem(notice: Pick<ChromeWatchNotice, 'kind'>, authLost: boolean): boolean {
-  if (notice.kind === 'failed') return !authLost;
-  return notice.kind === 'stalled';
+export function chromeNoticeIsProblem(notice: Pick<ChromeWatchNotice, 'kind'>, authLost: boolean, errorCode: string | null = null): boolean {
+  if (notice.kind === 'failed') return !authLost && !(errorCode !== null && USER_CLOSED_CODES.has(errorCode));
+  return notice.kind === 'skipped';
+}
+
+/** The prompt kind of a Chrome notice that is a problem: a skip has its own sentence. */
+export function chromeProblemKind(notice: Pick<ChromeWatchNotice, 'kind'>): ProblemKind {
+  return notice.kind === 'skipped' ? 'chrome-skip' : 'chrome-watch';
 }
 
 /** Whether a notice of the in-app watch runtime reports a failed or skipped lecture. */
@@ -52,9 +68,10 @@ export interface ProblemPromptController {
   /**
    * Something went wrong. Opens the dialog unless this kind was already asked this session or a
    * dialog is open (a newcomer is dropped, not queued, and does not use up its once). Returns
-   * whether the dialog opened.
+   * whether the dialog opened. With `wait`, a report that finds a dialog open is kept and shown as
+   * soon as that one closes (for a one-shot signal that cannot be asked for again).
    */
-  report: (kind: ProblemKind) => boolean;
+  report: (kind: ProblemKind, options?: { wait?: boolean }) => boolean;
   /** 닫기: the dialog goes away; the kind stays asked. */
   close: () => void;
 }
@@ -63,6 +80,7 @@ export interface ProblemPromptController {
 export function createProblemPromptController(): ProblemPromptController {
   let state: ProblemPromptState = { kind: null };
   const asked = new Set<ProblemKind>();
+  const pending: ProblemKind[] = [];
   const listeners = new Set<() => void>();
   const set = (next: ProblemPromptState) => {
     state = next;
@@ -74,14 +92,21 @@ export function createProblemPromptController(): ProblemPromptController {
       listeners.add(listener);
       return () => { listeners.delete(listener); };
     },
-    report: (kind) => {
-      if (state.kind !== null || asked.has(kind)) return false;
+    report: (kind, options) => {
+      if (asked.has(kind)) return false;
+      if (state.kind !== null) {
+        if (options?.wait && !pending.includes(kind) && state.kind !== kind) pending.push(kind);
+        return false;
+      }
       asked.add(kind);
       set({ kind });
       return true;
     },
     close: () => {
-      if (state.kind !== null) set({ kind: null });
+      if (state.kind === null) return;
+      const next = pending.shift();
+      if (next !== undefined) asked.add(next);
+      set({ kind: next ?? null });
     },
   };
 }

@@ -2547,7 +2547,7 @@ const assistSource = readFileSync('src-tauri/src/assets/watch_assist.js', 'utf8'
         assert.ok(idle.includes('자동 재생이 오류로 멈췄어요.') && idle.includes('어디로도 자동 전송되지 않아요.'), 'the sentence and the no-upload promise');
         assert.ok(/class="btn btn-sm btn-primary"[^>]*>진단 파일 저장<\/button>/.test(idle) && /class="btn btn-sm"[^>]*>닫기<\/button>/.test(idle), '[진단 파일 저장] and [닫기]');
         assert.ok(!/disabled|role="status"|role="alert"/.test(idle), 'idle: nothing disabled, no result');
-        for (const [kind, sentence] of [['chrome-watch', '자동 재생이 오류로 멈췄어요.'], ['app-watch', '재생이 멈춰서 강의를 건너뛰었어요.'], ['backend', '내부 서버가 멈췄어요.'], ['previous-crash', '지난번에 앱이 비정상적으로 종료됐어요.']]) {
+        for (const [kind, sentence] of [['chrome-watch', '자동 재생이 오류로 멈췄어요.'], ['chrome-skip', '재생이 멈춰서 강의를 건너뛰었어요.'], ['app-watch', '재생이 멈춰서 강의를 건너뛰었어요.'], ['backend', '내부 서버가 멈췄어요.'], ['previous-crash', '지난번에 앱이 비정상적으로 종료됐어요.']]) {
           assert.ok(view({ kind }).includes(`<p class="problem-lead">${sentence}</p>`), `${kind}: ${sentence}`);
         }
         const busy = view({ busy: true });
@@ -2637,10 +2637,10 @@ const assistSource = readFileSync('src-tauri/src/assets/watch_assist.js', 'utf8'
     assert.ok(appFn.indexOf('useProblemPrompt()') > 0 && appFn.indexOf('useProblemPrompt()') < appFn.indexOf('BackendScreen'), 'one prompt controller for the session, above the branches');
     assert.equal((appSource.match(/\{problemDialog\}/g) ?? []).length, 2, 'the dialog is on the backend branch and the session branch');
     assert.ok(/status\.state === 'failed'\) reportProblem\('backend'\)/.test(appSource), 'the failure screen asks on its own');
-    assert.ok(/previousRunCrashed\(\)\.then\(\(crashed\) => \{\s*if \(crashed\) reportProblem\('previous-crash'\)/.test(appSource), 'a crashed previous run asks once at launch');
+    assert.ok(/previousRunCrashed\(\)\.then\(\(crashed\) => \{\s*if \(crashed\) reportProblem\('previous-crash', \{ wait: true \}\)/.test(appSource), 'a crashed previous run asks once at launch');
     assert.ok(/onProblem=\{reportProblem\}/.test(appSource), 'the workspace reports watch problems up');
     const viewerSource = readFileSync('src/hooks/useOfficialViewer.ts', 'utf8');
-    assert.ok(/chromeNoticeIsProblem\(notice, authLost\)\) optionsRef\.current\.onProblem\('chrome-watch'\)/.test(viewerSource) && /appWatchNoticeIsProblem\(payload\)\) optionsRef\.current\.onProblem\('app-watch'\)/.test(viewerSource), 'both watch notice streams feed the prompt');
+    assert.ok(/chromeNoticeIsProblem\(notice, authLost, status\.error_code\)\) optionsRef\.current\.onProblem\(chromeProblemKind\(notice\)\)/.test(viewerSource) && /appWatchNoticeIsProblem\(payload\)\) optionsRef\.current\.onProblem\('app-watch'\)/.test(viewerSource), 'both watch notice streams feed the prompt');
     const updateCss = readFileSync('src/styles/update.css', 'utf8');
     assert.ok(!/inset:\s*0|backdrop/.test(updateCss), 'no full-screen layer');
     assert.deepEqual(updateCss.match(/[^}]*position:\s*fixed[^}]*/g)?.map((rule) => rule.trim().split('{')[0].trim()), ['.update-host.update-corner'], 'only the small corner chip is fixed');
@@ -2759,6 +2759,15 @@ const assistSource = readFileSync('src-tauri/src/assets/watch_assist.js', 'utf8'
       const broken = tauriBridge({ previous_run_crashed: () => { throw 'unknown command'; } });
       try { assert.equal(await desktop.previousRunCrashed(), false, 'an older shell means no prompt'); } finally { broken.restore(); }
       const rust = readFileSync('src-tauri/src/diagnostics.rs', 'utf8');
+      // The crash marker: written in setup, removed in the exit handler (a quit, and the updater's relaunch).
+      {
+        const lib = readFileSync('src-tauri/src/lib.rs', 'utf8');
+        const setup = lib.slice(lib.indexOf('.setup(move |app|'), lib.indexOf('.invoke_handler('));
+        assert.ok(setup.includes('session_marker::SessionMarker::begin(marker_dir)'), 'SessionMarker::begin runs in setup');
+        const exit = lib.slice(lib.indexOf('app.run(|app_handle, event|'), lib.indexOf('Err(error) => {\n            eprintln!("error while building'));
+        assert.ok(/tauri::RunEvent::ExitRequested \{ \.\. \} \| tauri::RunEvent::Exit/.test(exit) && /marker\.end\(\)/.test(exit), 'marker.end() runs in the ExitRequested | Exit handler');
+        assert.ok(exit.indexOf('RunEvent::Exit') < exit.indexOf('marker.end()'), 'inside that handler, not before it');
+      }
       // The automatic save's three error sentences (Rust maps the cause; the manual Settings copy is untouched).
       for (const sentence of [
         '다운로드 폴더에 저장할 권한이 없어요. 설정 → 문제 보내기에서 다른 위치를 골라 저장해 주세요.',
@@ -2798,8 +2807,22 @@ const assistSource = readFileSync('src-tauri/src/assets/watch_assist.js', 'utf8'
     // Which notices ask: a failed run (not a lost login) and stalls of the Chrome watch; an error notice of the in-app watch.
     assert.equal(prompt.chromeNoticeIsProblem({ kind: 'failed' }, false), true);
     assert.equal(prompt.chromeNoticeIsProblem({ kind: 'failed' }, true), false, 'a lost login is the login screen\'s business');
-    assert.equal(prompt.chromeNoticeIsProblem({ kind: 'stalled' }, false), true);
-    for (const kind of ['finished', 'skipped', 'minimize_paused']) assert.equal(prompt.chromeNoticeIsProblem({ kind }, false), false, kind);
+    assert.equal(prompt.chromeNoticeIsProblem({ kind: 'failed' }, false, 'chrome_window_closed'), false, 'closing the Chrome window yourself is no problem');
+    assert.equal(prompt.chromeNoticeIsProblem({ kind: 'failed' }, false, 'chrome_closed'), true, 'a lost Chrome or DevTools connection is');
+    assert.equal(prompt.chromeNoticeIsProblem({ kind: 'failed' }, false, null), true);
+    assert.equal(prompt.chromeNoticeIsProblem({ kind: 'skipped' }, false), true, 'a problem skip (the final stall, a plan error) carries a skipped notice');
+    assert.equal(prompt.chromeNoticeIsProblem({ kind: 'skipped' }, false, 'chrome_window_closed'), true, 'the run code belongs to failed notices only');
+    assert.equal(prompt.chromeNoticeIsProblem({ kind: 'stalled' }, false), false, 'a first stall reloads the page and usually recovers');
+    for (const kind of ['finished', 'minimize_paused']) assert.equal(prompt.chromeNoticeIsProblem({ kind }, false), false, kind);
+    // A recovered stall (one stalled notice, then the lecture finishes) never asks; a stall that ends in a skip asks once, with the skip sentence.
+    {
+      const asks = (notices) => notices.filter((notice) => prompt.chromeNoticeIsProblem(notice, false, null)).map(prompt.chromeProblemKind);
+      assert.deepEqual(asks([{ kind: 'stalled' }, { kind: 'finished' }]), [], 'recovered stall: no prompt');
+      assert.deepEqual(asks([{ kind: 'stalled' }, { kind: 'skipped' }, { kind: 'finished' }]), ['chrome-skip']);
+      assert.deepEqual(asks([{ kind: 'failed' }]), ['chrome-watch']);
+      assert.equal(prompt.problemSentence('chrome-skip'), '재생이 멈춰서 강의를 건너뛰었어요.');
+      assert.equal(prompt.problemSentence('chrome-watch'), '자동 재생이 오류로 멈췄어요.');
+    }
     assert.equal(prompt.appWatchNoticeIsProblem({ kind: 'error', auth_expired: false }), true);
     assert.equal(prompt.appWatchNoticeIsProblem({ kind: 'error', auth_expired: true }), false);
     for (const kind of ['info', 'success']) assert.equal(prompt.appWatchNoticeIsProblem({ kind, auth_expired: false }), false, kind);
@@ -2829,6 +2852,23 @@ const assistSource = readFileSync('src-tauri/src/assets/watch_assist.js', 'utf8'
         assert.equal(controller.report(kind), false, `${kind} once`);
       }
       unsubscribe();
+      // A one-shot report (the crash flag is read once) waits for an open dialog instead of being lost.
+      {
+        const waiting = prompt.createProblemPromptController();
+        assert.equal(waiting.report('backend'), true);
+        assert.equal(waiting.report('previous-crash', { wait: true }), false, 'not shown over the open dialog');
+        assert.equal(waiting.report('previous-crash', { wait: true }), false);
+        waiting.close();
+        assert.deepEqual(waiting.getState(), { kind: 'previous-crash' }, 'shown as soon as the other one closes');
+        waiting.close();
+        assert.deepEqual(waiting.getState(), { kind: null }, 'only once');
+        assert.equal(waiting.report('previous-crash', { wait: true }), false, 'and asked');
+        const plain = prompt.createProblemPromptController();
+        plain.report('backend');
+        plain.report('app-watch');
+        plain.close();
+        assert.deepEqual(plain.getState(), { kind: null }, 'a report without wait is still dropped');
+      }
       const other = prompt.createProblemPromptController();
       assert.equal(other.report('chrome-watch'), true, 'a new app session asks again');
     }

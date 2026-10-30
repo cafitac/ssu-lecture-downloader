@@ -157,7 +157,8 @@ fn pump_lines<R: Read>(reader: R, log: &Mutex<RotatingLog>) -> u64 {
     drained
 }
 
-/// The threads copying a child's output into its log.
+/// The threads copying a child's output into its log, one per stream. Lines keep their order within
+/// a stream; the order between two streams is only the order the threads wrote them.
 pub(crate) struct LogPump {
     finished: Receiver<()>,
     threads: usize,

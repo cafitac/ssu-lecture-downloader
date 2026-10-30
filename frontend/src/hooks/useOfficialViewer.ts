@@ -25,7 +25,7 @@ import type { ChromeWatchStatus, CourseContentItem, CourseSummary, WatchDebugEve
 import type { AllCoursesQueueItem } from '../lib/watch';
 import { IDLE_WATCH_QUEUE, chromeStatusToQueue, newChromeNotices, resolveWatchMode, toChromeAllInputs, toChromeInputs, toExternalView, toQueueInputs } from '../lib/watch';
 import { startPolling } from '../lib/polling';
-import { appWatchNoticeIsProblem, chromeNoticeIsProblem } from '../lib/problemPrompt';
+import { appWatchNoticeIsProblem, chromeNoticeIsProblem, chromeProblemKind } from '../lib/problemPrompt';
 import type { ProblemKind } from '../lib/problemPrompt';
 import { useTauriEvent } from './useTauriEvent';
 
@@ -107,7 +107,7 @@ export function useOfficialViewer({ notify, onAuthError, onItemWatched, onQueueS
       run.lastNoticeId = notice.id;
       if (notice.kind === 'failed' && authLost) continue;
       optionsRef.current.notify(notice.text, notice.level);
-      if (chromeNoticeIsProblem(notice, authLost)) optionsRef.current.onProblem('chrome-watch');
+      if (chromeNoticeIsProblem(notice, authLost, status.error_code)) optionsRef.current.onProblem(chromeProblemKind(notice));
     }
     if (authLost) optionsRef.current.onAuthError(friendlyError(new ApiError(status.error_code ?? '', '')));
     const next = chromeStatusToQueue(status);

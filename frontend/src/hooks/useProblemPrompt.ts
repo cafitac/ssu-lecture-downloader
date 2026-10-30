@@ -4,7 +4,7 @@ import type { ProblemKind, ProblemPromptState } from '../lib/problemPrompt.ts';
 
 export interface ProblemPrompt {
   state: ProblemPromptState;
-  report: (kind: ProblemKind) => boolean;
+  report: (kind: ProblemKind, options?: { wait?: boolean }) => boolean;
   close: () => void;
 }
 

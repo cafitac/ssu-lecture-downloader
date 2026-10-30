@@ -24,7 +24,9 @@
 - **EP-PROMPT:** an in-app "문제가 생겼어요" dialog when an error is detected. It offers
   [진단 파일 저장] (saves to `~/Downloads/SSU 진단/` and reveals the file in Finder) and [닫기].
   - Triggers:
-    - a Chrome watch notice of kind `failed`, or a `stalled` notice that ended in a skip;
+    - a Chrome watch notice of kind `failed` (not a login loss, not `chrome_window_closed`, which
+      the user causes) or `skipped` (the stall that ends in a skip; a first `stalled` notice
+      usually recovers and does not ask);
     - the in-app watch runtime reporting a failed or skipped item;
     - the backend failure screen;
     - an abnormal exit of the previous app run, asked at the next launch through a session
@@ -35,7 +37,8 @@
 ## Acceptance
 
 - AC1: neither log file grows past its cap. Rotation keeps exactly one previous file. Stdout
-  and stderr lines from the sidecar still reach `backend.log` in order. A crash during startup
+  and stderr lines from the sidecar still reach `backend.log`, in order per stream (two writer
+  threads; no ordering between stdout and stderr, no stream prefixes). A crash during startup
   stays diagnosable.
 - AC2: each trigger opens the dialog once per session. 닫기 dismisses it. Saving writes a zip
   through the existing `save_diagnostics` and reveals it in Finder.

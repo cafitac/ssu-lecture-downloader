@@ -534,7 +534,7 @@ export function App() {
   // this asks once (no cancel flag: a result must not be lost to the dev double-mount).
   useEffect(() => {
     void previousRunCrashed().then((crashed) => {
-      if (crashed) reportProblem('previous-crash');
+      if (crashed) reportProblem('previous-crash', { wait: true });
     });
   }, [reportProblem]);
   // The failure screen is up: ask on our own. Seen again when an open dialog closes (a dropped report is not used up).

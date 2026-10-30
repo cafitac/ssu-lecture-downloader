@@ -583,6 +583,8 @@ fn open_backend_log(path: &Path) -> std::io::Result<SharedLog> {
 
 /// Copies the child's stdout and stderr into the log on writer threads, so the log is capped
 /// (the child itself writes to pipes that are always drained).
+/// One thread per stream: lines keep their order within each stream, while the order between
+/// stdout and stderr lines is only the order in which the threads got to write them.
 fn start_log_pump(log: &SharedLog, child: &mut Child) -> LogPump {
     let mut streams: Vec<Box<dyn Read + Send>> = Vec::new();
     if let Some(stdout) = child.stdout.take() {
