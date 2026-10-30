@@ -67,6 +67,18 @@ LIBRARY_MESSAGES = {
     LIBRARY_CONFLICT_CODE: "저장할 자리에 같은 이름의 다른 파일이 생겼어요. 잠시 후 다시 받아 주세요.",
     PATH_TOO_LONG_CODE: "저장 경로가 너무 길어요. 더 짧은 폴더로 바꿔서 다시 받아 주세요.",
 }
+# Tidy-up of the download folder (LAYOUT-PY-MIGRATION): all three are 409 and raised at the start request.
+LIBRARY_BUSY_CODE = "library_busy"
+LIBRARY_TIDY_RUNNING_CODE = "library_tidy_running"
+TIDY_PLAN_EXPIRED_CODE = "tidy_plan_expired"
+TIDY_RUN_NOT_FOUND_CODE = "tidy_run_not_found"
+INVALID_RUN_ID_CODE = "invalid_run_id"
+TIDY_MESSAGES = {
+    LIBRARY_BUSY_CODE: "다운로드가 끝난 뒤에 정리할 수 있어요.",
+    LIBRARY_TIDY_RUNNING_CODE: "폴더를 정리하는 중이에요. 끝나면 받을 수 있어요.",
+    TIDY_PLAN_EXPIRED_CODE: "미리보기가 오래됐어요. 다시 확인해 주세요.",
+    TIDY_RUN_NOT_FOUND_CODE: "되돌릴 정리 기록을 찾지 못했어요.",
+}
 MEDIA_CONTENT_ID_MISSING_MESSAGE = "attendance item does not expose Commons content_id"
 
 
@@ -101,8 +113,12 @@ def status_for_error_code(error_code: str | None) -> int:
         return HTTPStatus.GATEWAY_TIMEOUT
     if code == LIBRARY_CONFLICT_CODE:
         return HTTPStatus.CONFLICT
-    if code == PATH_TOO_LONG_CODE:
+    if code in (PATH_TOO_LONG_CODE, INVALID_RUN_ID_CODE):
         return HTTPStatus.BAD_REQUEST
+    if code in (LIBRARY_BUSY_CODE, LIBRARY_TIDY_RUNNING_CODE, TIDY_PLAN_EXPIRED_CODE):
+        return HTTPStatus.CONFLICT
+    if code == TIDY_RUN_NOT_FOUND_CODE:
+        return HTTPStatus.NOT_FOUND
     return HTTPStatus.BAD_GATEWAY
 
 
@@ -114,6 +130,11 @@ def service_error(error_code: str | None, *, message: str | None = None, detail:
     if detail:
         payload["detail"] = detail
     return HTTPException(status_code=status_for_error_code(code), detail=payload)
+
+
+def tidy_error(error_code: str) -> HTTPException:
+    """The 409/404/400 of the tidy-up endpoints, with the plain Korean message the UI may show."""
+    return service_error(error_code, message=TIDY_MESSAGES.get(error_code))
 
 
 def authentication_failed_error(error_code: str | None) -> HTTPException:

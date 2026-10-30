@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+import threading
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, TypeVar
@@ -12,9 +14,12 @@ from fastapi import APIRouter, HTTPException
 from ssu_lecture_downloader.platforms import select_platform
 from ssu_lecture_downloader.platforms.base import Platform
 from ssu_lecture_downloader.service.api_errors import (
+    LIBRARY_BUSY_CODE,
+    LIBRARY_TIDY_RUNNING_CODE,
     background_job_error_code,
     missing_credentials_error,
     service_exception_error,
+    tidy_error,
 )
 from ssu_lecture_downloader.core.chrome_watch import ChromeWatchManager
 from ssu_lecture_downloader.core.grades.consent import CONSENT_FILE_NAME, GradesConsentStore
@@ -23,6 +28,7 @@ from ssu_lecture_downloader.core.grades.service import GradesService
 from ssu_lecture_downloader.service.credentials import CredentialStore
 from ssu_lecture_downloader.service.pipeline_gates import StageGates
 from ssu_lecture_downloader.core.jobs import Job, JobOutcome, JobRegistry, JobRunner
+from ssu_lecture_downloader.core.library_migration import TidyPlanStore
 from ssu_lecture_downloader.service.security import MediaPathPolicy
 from ssu_lecture_downloader.core.stt_remote import RemoteSTTService
 from ssu_lecture_downloader.core.stt_remote_config import RemoteSTTSettingsStore
@@ -86,6 +92,69 @@ def build_grades(platform: Platform, credentials: CredentialStore) -> GradesServ
     return GradesService(consent, RusaintGateway(), credentials_provider)
 
 
+class ActivityRegistry(JobRegistry):
+    """A job registry that can say whether any of its jobs has not finished yet (queued or running)."""
+
+    def has_active(self) -> bool:
+        with self._lock:
+            jobs = list(self._jobs.values())
+        return any(not job.finished for job in jobs)
+
+
+class LibraryLock:
+    """Keeps a tidy-up of the download folder and downloads from running at the same time.
+
+    Downloads are Python jobs in `downloads` (checked, atomically with starting them) and synchronous
+    requests (counted while they run). A tidy-up is an apply/undo job in `tidy`; its registry entry lives
+    exactly as long as the work, so nothing here can be left set by a job that never started.
+    Native (Tauri) downloads are invisible to Python: the UI gate covers them.
+    """
+
+    def __init__(self, downloads: tuple[ActivityRegistry, ...], tidy: ActivityRegistry) -> None:
+        self._downloads = downloads
+        self._tidy = tidy
+        self._mutex = threading.Lock()
+        self._synchronous = 0
+
+    @contextmanager
+    def admit_download_job(self) -> Iterator[None]:
+        """Held while a download/artifact job is created: refused (409 `library_tidy_running`) during a tidy-up."""
+        with self._mutex:
+            if self._tidy.has_active():
+                raise tidy_error(LIBRARY_TIDY_RUNNING_CODE)
+            yield
+
+    @contextmanager
+    def downloading(self) -> Iterator[None]:
+        """Around a synchronous request that writes into the download folder."""
+        with self._mutex:
+            if self._tidy.has_active():
+                raise tidy_error(LIBRARY_TIDY_RUNNING_CODE)
+            self._synchronous += 1
+        try:
+            yield
+        finally:
+            with self._mutex:
+                self._synchronous -= 1
+
+    def _busy(self) -> bool:
+        return self._synchronous > 0 or self._tidy.has_active() or any(registry.has_active() for registry in self._downloads)
+
+    def check_idle(self) -> None:
+        """409 `library_busy` while any download or tidy-up runs (a preview must not describe a moving folder)."""
+        with self._mutex:
+            if self._busy():
+                raise tidy_error(LIBRARY_BUSY_CODE)
+
+    @contextmanager
+    def admit_tidy_job(self) -> Iterator[None]:
+        """Held while an apply/undo job is created: refused (409 `library_busy`) while a download or tidy-up runs."""
+        with self._mutex:
+            if self._busy():
+                raise tidy_error(LIBRARY_BUSY_CODE)
+            yield
+
+
 @dataclass
 class AppContext:
     service: Any
@@ -93,11 +162,17 @@ class AppContext:
     default_output_dir: Path
     media_paths: MediaPathPolicy
     runner: JobRunner
-    download_jobs: JobRegistry = field(default_factory=JobRegistry)
+    download_jobs: ActivityRegistry = field(default_factory=ActivityRegistry)
     audio_jobs: JobRegistry = field(default_factory=JobRegistry)
     stt_jobs: JobRegistry = field(default_factory=JobRegistry)
     dependency_jobs: JobRegistry = field(default_factory=JobRegistry)
-    artifact_jobs: JobRegistry = field(default_factory=JobRegistry)
+    artifact_jobs: ActivityRegistry = field(default_factory=ActivityRegistry)
+    # Tidy-up of the download folder: previews (read only) and apply/undo runs (these block downloads).
+    tidy_plan_jobs: JobRegistry = field(default_factory=JobRegistry)
+    tidy_jobs: ActivityRegistry = field(default_factory=ActivityRegistry)
+    tidy_plans: TidyPlanStore = field(default_factory=TidyPlanStore)
+    tidy_run_roots: dict[str, Path] = field(default_factory=dict)  # run id -> download folder it ran in
+    library_lock: LibraryLock = field(init=False)
     remote_stt: RemoteSTTService | None = None
     # Built by the watch router (it needs the credentials/service helpers above) unless injected.
     chrome_watch: ChromeWatchManager | None = None
@@ -109,6 +184,7 @@ class AppContext:
     gates: StageGates = field(default_factory=StageGates)
 
     def __post_init__(self) -> None:
+        self.library_lock = LibraryLock((self.download_jobs, self.artifact_jobs), self.tidy_jobs)
         if self.remote_stt is None:
             self.remote_stt = build_remote_stt(self.platform)
         if self.grades is None:
@@ -148,6 +224,11 @@ class AppContext:
     def start_job(self, registry: JobRegistry, work: Callable[[Job], JobOutcome | None], *, wait_seconds: float = 0.0) -> dict[str, Any]:
         """Start background work and return the job snapshot the start endpoints respond with."""
         return self.runner.start(registry, work, wait_seconds=wait_seconds).snapshot()
+
+    def start_download_job(self, registry: JobRegistry, work: Callable[[Job], JobOutcome | None]) -> dict[str, Any]:
+        """`start_job` for jobs that write into the download folder: refused while a tidy-up runs."""
+        with self.library_lock.admit_download_job():
+            return self.start_job(registry, work)
 
 
 def job_or_404(registry: JobRegistry, job_id: str, error_code: str):
