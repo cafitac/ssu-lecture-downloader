@@ -31,6 +31,7 @@ from ssu_lecture_downloader.service.routers import credentials as credentials_ro
 from ssu_lecture_downloader.service.routers import download as download_routes
 from ssu_lecture_downloader.service.routers import grades as grades_routes
 from ssu_lecture_downloader.service.routers import health as health_routes
+from ssu_lecture_downloader.service.routers import library as library_routes
 from ssu_lecture_downloader.service.routers import lms_pages as lms_pages_routes
 from ssu_lecture_downloader.service.routers import media as media_routes
 from ssu_lecture_downloader.service.routers import stt_remote as stt_remote_routes
@@ -109,7 +110,7 @@ def create_app(
         grades=grades,
     )
     contexts.append(ctx)
-    for module in (health_routes, credentials_routes, grades_routes, download_routes, media_routes, stt_remote_routes, watch_routes, lms_pages_routes):
+    for module in (health_routes, credentials_routes, grades_routes, download_routes, media_routes, stt_remote_routes, watch_routes, lms_pages_routes, library_routes):
         # The routes are already built; attach them as-is instead of having FastAPI rebuild each one.
         app.router.routes.extend(module.build_router(ctx).routes)
     return app

@@ -14,7 +14,8 @@ from ssu_lecture_downloader.service.api_errors import (
 from ssu_lecture_downloader.service.api_models import CredentialRequest
 from ssu_lecture_downloader.service.app_context import AppContext
 from ssu_lecture_downloader.service.credentials import CredentialPair
-from ssu_lecture_downloader.core.download import find_downloaded_files
+from ssu_lecture_downloader.core.download import find_downloaded_files, safe_filename
+from ssu_lecture_downloader.core.library_migration import count_legacy_files
 
 
 def build_router(ctx: AppContext) -> APIRouter:
@@ -109,13 +110,15 @@ def build_router(ctx: AppContext) -> APIRouter:
         if not result.ok or result.course is None:
             raise_for_result_error(result.error_code)
         content_items = result.content_items or []
-        downloaded = find_downloaded_files(ctx.output_dir_for(output_dir), course_name, (item.content_id for item in content_items if item.downloadable))
+        root = ctx.output_dir_for(output_dir)
+        downloaded = find_downloaded_files(root, course_name, (item.content_id for item in content_items if item.downloadable))
         return {
             "ok": True,
             "error_code": None,
             "course": result.course.model_dump(),
             "lecture_count": len(result.lectures),
             "lectures": [lecture.model_dump() for lecture in result.lectures],
+            "legacy_file_count": count_legacy_files(root / safe_filename(course_name, fallback="course")) if course_name else 0,
             "content_count": len(content_items),
             "content_items": [{**item.model_dump(), "downloaded_path": downloaded.get(item.content_id or "")} for item in content_items],
         }
