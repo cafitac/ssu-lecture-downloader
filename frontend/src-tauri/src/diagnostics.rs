@@ -630,9 +630,16 @@ pub(crate) fn unique_zip_destination(folder: &Path, file_name: &str) -> Result<P
 #[tauri::command]
 pub(crate) fn diagnostics_auto_destination(file_name: String) -> Result<String, String> {
     let home = crate::platform::real_user_home_dir()
-        .ok_or_else(|| "다운로드 폴더를 찾지 못했어요.".to_string())?;
-    let folder = home.join("Downloads").join(AUTO_SAVE_FOLDER);
-    unique_zip_destination(&folder, &file_name).map(|path| path.to_string_lossy().to_string())
+        .ok_or_else(|| automatic_error_text("no home folder"))?;
+    automatic_destination_in(&home.join("Downloads").join(AUTO_SAVE_FOLDER), &file_name)
+}
+
+/// `unique_zip_destination` for the automatic save, whose every error uses the automatic copy
+/// (this path has no folder to pick, so the manual sentences must never reach the dialog).
+fn automatic_destination_in(folder: &Path, file_name: &str) -> Result<String, String> {
+    unique_zip_destination(folder, file_name)
+        .map(|path| path.to_string_lossy().to_string())
+        .map_err(|error| automatic_error_text(&error))
 }
 
 /// `async` so that Tauri runs it off the main thread: reading, redacting and compressing the
@@ -734,6 +741,40 @@ mod tests {
         }
         // The manual save keeps its sentences.
         assert!(NO_PERMISSION_ERROR.contains("다른 폴더를 골라 주세요"));
+    }
+
+    #[test]
+    fn automatic_destination_errors_use_the_automatic_copy() {
+        let root = temp_dir("auto-errors");
+        // A file sits where the folder should be: create_dir_all fails.
+        let blocker = root.join("SSU 진단");
+        fs::write(&blocker, b"not a folder").unwrap();
+        let error = automatic_destination_in(&blocker, "ssu-진단-20261030-1105.zip")
+            .expect_err("the folder cannot be created");
+        assert_eq!(error, AUTO_GENERIC_ERROR);
+        assert!(!error.contains("폴더를 골라"), "{error}");
+        // An invalid name is mapped too.
+        let error = automatic_destination_in(&root, "../x.zip").expect_err("bad name");
+        assert_eq!(error, AUTO_GENERIC_ERROR);
+        // The folder inside a folder that refuses new entries: the permission copy (not run as root).
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let locked = root.join("locked");
+            fs::create_dir(&locked).unwrap();
+            fs::set_permissions(&locked, fs::Permissions::from_mode(0o500)).unwrap();
+            if fs::create_dir(locked.join("probe")).is_err() {
+                let error = automatic_destination_in(&locked.join("SSU 진단"), "a.zip")
+                    .expect_err("no permission");
+                assert_eq!(error, AUTO_NO_PERMISSION_ERROR);
+                assert!(!error.contains("폴더를 골라"), "{error}");
+            }
+            fs::set_permissions(&locked, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        // Success is still a plain path.
+        let ok = automatic_destination_in(&root.join("fresh"), "a.zip").unwrap();
+        assert_eq!(ok, root.join("fresh").join("a.zip").to_string_lossy());
+        fs::remove_dir_all(root).ok();
     }
 
     #[test]
