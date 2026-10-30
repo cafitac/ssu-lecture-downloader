@@ -28,6 +28,27 @@
 - AC1: a chrome-watch run writes INFO lines for: run start (count), item start (index, module_item_id),
   progress milestones, item end, stall detected (seconds without progress), skip (reason), Chrome process
   exit or CDP disconnect, worker exception, and run end (done/skipped counts, phase).
+  Event catalogue (backend.log, prefix `chrome_watch <event>`, key=value fields):
+  - run_start: item_count, background
+  - user_stop: —
+  - chrome_launch: pid, pid_found
+  - cdp_connected: —
+  - item_start: index, total, module_item_id
+  - item_end: module_item_id, outcome, elapsed_seconds
+  - skip: module_item_id, reason
+  - progress: module_item_id, percent OR elapsed_seconds
+  - click: kind, ok
+  - window: action
+  - stall: module_item_id, seconds_without_progress, action, paused, accepting, phase
+  - chrome_exit: exit_code, expected
+  - window_closed: —
+  - run_failed: error_code
+  - cdp_disconnected: reason, expected
+  - worker_error: —
+  - plan_failed: error
+  - chrome_stop: exit_code
+  - run_end: state, phase, error_code, done_count, skipped_count
+  - shutdown_error: —
 - AC2: no log line contains a cookie, token, password, or query string.
 - AC3: the diagnostics zip contains backend.log, backend.previous.log and watch.log when present, plus
   `info.json` (app version, OS, arch, time). Missing files are skipped, not fatal.

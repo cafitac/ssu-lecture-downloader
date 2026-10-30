@@ -278,7 +278,7 @@ def test_queue_plays_every_lecture_in_one_tab_and_closes_chrome(tmp_path, caplog
     assert any("kind=front ok=True" in message for message in messages)
     assert any("action=minimize" in message for message in messages)
     for message in messages:
-        assert not any(secret in message.lower() for secret in ("cookie", "token", "http", "://", "?", "1주차", "UX방법론"))
+        assert not any(secret.lower() in message.lower() for secret in ("cookie", "token", "http", "://", "?", "1주차", "UX방법론"))
 
 
 def test_start_button_and_resume_yes_are_pressed_with_trusted_mouse_events(tmp_path):
@@ -465,6 +465,33 @@ def test_a_lecture_whose_plan_fails_is_skipped_and_the_queue_goes_on(tmp_path):
     assert status["notices"][0]["kind"] == "skipped"
 
 
+@pytest.mark.parametrize("failure, reason_code", [
+    (cw.ChromeWatchPlanError("service_error"), "service_error"),
+    (cw.ChromeWatchPlanError("network_timeout"), "network_timeout"),
+    (RuntimeError("private detail"), "plan_exception"),
+    (None, "launch_url_missing"),
+    (cw.ChromeWatchPlanError("unsafe code\n"), "plan_error"),
+])
+def test_plan_skip_logs_explicit_reason_code(tmp_path, caplog, failure, reason_code):
+    caplog.set_level(logging.INFO, logger=cw.logger.name)
+
+    def plan(*args):
+        if failure is not None:
+            raise failure
+        return {"launch_url": ""}
+
+    harness = Harness(tmp_path, [], plan=plan)
+    harness.manager.start(items(1))
+    status = harness.finish()
+    harness.wait_thread()
+    assert status["state"] == "finished" and status["skipped_count"] == 1
+    messages = [record.getMessage() for record in caplog.records]
+    assert any(message.startswith("chrome_watch skip ") and message.endswith(f" reason={reason_code}") for message in messages)
+    assert status["items"][0]["reason"] == cw.plan_error_reason(failure.code if isinstance(failure, cw.ChromeWatchPlanError) else None)
+    if reason_code == "plan_exception":
+        assert any(message.startswith("chrome_watch plan_failed run_id=") and message.endswith(" error=RuntimeError") for message in messages)
+
+
 def test_a_lost_lms_login_fails_the_run_with_the_error_code(tmp_path, caplog):
     caplog.set_level(logging.INFO, logger=cw.logger.name)
     def plan(course_id, module_item_id, course_name):
@@ -505,7 +532,7 @@ def test_a_dropped_connection_ends_the_run(tmp_path, caplog):
     assert status["state"] == "failed" and status["error_code"] == "chrome_closed"
     harness.wait_thread()
     assert "chrome_watch cdp_disconnected run_id=" in caplog.text
-    assert "reason=CdpClosed" in caplog.text
+    assert "reason=CdpClosed expected=false" in caplog.text
 
 
 def test_status_payload_while_playing_carries_position_and_course(tmp_path):

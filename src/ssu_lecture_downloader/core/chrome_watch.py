@@ -23,6 +23,7 @@ import atexit
 import json
 import logging
 import queue
+import re
 import threading
 import time
 import uuid
@@ -399,7 +400,7 @@ class ChromeWatchManager:
             if thread is not None and thread.is_alive():
                 thread.join(self.timings.stop_join)  # a finished run may still be closing its Chrome
         except Exception:  # noqa: BLE001 - exit path
-            logger.exception("chrome watch shutdown")
+            logger.exception("chrome_watch shutdown_error")
         self._kill_stale()
 
     # ---------------------------------------------------------------------- status
@@ -509,7 +510,7 @@ class ChromeWatchManager:
             logger.info("chrome_watch run_failed run_id=%s error_code=%s", run.run_id, exc.code or type(exc).__name__)
             self._fail(run, exc.code, exc.message)
         except (CdpClosed, CdpTimeout) as exc:
-            logger.info("chrome_watch cdp_disconnected run_id=%s reason=%s", run.run_id, type(exc).__name__)
+            logger.info("chrome_watch cdp_disconnected run_id=%s reason=%s expected=%s", run.run_id, type(exc).__name__, str(run.stop.is_set()).lower())
             if run.stop.is_set():
                 with self._lock:
                     run.state = "stopped"
@@ -869,16 +870,10 @@ class _Playback:
             run.position = None
             run.duration = None
 
-    def skip_item(self, item: WatchItem, reason: str, *, notice: str | None = None, level: str = "error") -> str:
+    def skip_item(self, item: WatchItem, reason: str, reason_code: str, *, notice: str | None = None, level: str = "error") -> str:
         with self.m._lock:
             item.state = "skipped"
             item.reason = reason
-        reason_code = {
-            USER_SKIP_REASON: "user_skip",
-            STALL_SKIP_REASON: "stalled",
-            plan_error_reason("network_error"): "network_error",
-            plan_error_reason(None): "launch_url_missing",
-        }.get(reason, "unknown")
         logger.info("chrome_watch skip run_id=%s module_item_id=%s reason=%s", self.run.run_id, item.module_item_id, reason_code)
         if notice:
             self.m._notice(self.run, "skipped", level, notice, item_title=item.title, reason=reason)
@@ -912,7 +907,7 @@ class _Playback:
             if run.stop.is_set():
                 raise _Stopped()
             if run.skip.is_set():
-                return self.skip_item(item, USER_SKIP_REASON)
+                return self.skip_item(item, USER_SKIP_REASON, "user_skip")
             self.pump(timings.tick)
             self.check_alive()
             now = clock()
@@ -1010,7 +1005,7 @@ class _Playback:
                     activity_at = clock()
                 else:
                     text = f"‘{item.title}’ 재생이 멈춰 건너뛰었어요. {MINIMIZED_HINT}"
-                    return self.skip_item(item, STALL_SKIP_REASON, notice=text)
+                    return self.skip_item(item, STALL_SKIP_REASON, "stalled", notice=text)
 
     def check_alive(self) -> None:
         if self.window_closed:
@@ -1033,17 +1028,18 @@ class _Playback:
             if exc.auth:
                 raise ChromeWatchError(exc.code, "LMS 로그인이 풀렸어요. 다시 로그인해 주세요.") from exc
             reason = plan_error_reason(exc.code)
-            return self.skip_item(item, reason, notice=f"‘{item.title}’ {reason}")
+            reason_code = exc.code if re.fullmatch(r"[a-z_]+", exc.code) else "plan_error"
+            return self.skip_item(item, reason, reason_code, notice=f"‘{item.title}’ {reason}")
         except Exception as exc:  # noqa: BLE001 - one lecture must not end the queue
-            logger.warning("chrome watch plan failed: %s", type(exc).__name__)
+            logger.warning("chrome_watch plan_failed run_id=%s error=%s", self.run.run_id, type(exc).__name__)
             reason = plan_error_reason(None)
-            return self.skip_item(item, reason, notice=f"‘{item.title}’ {reason}")
+            return self.skip_item(item, reason, "plan_exception", notice=f"‘{item.title}’ {reason}")
         if self.run.stop.is_set():
             raise _Stopped()
         launch_url = plan.get("launch_url")
         if not isinstance(launch_url, str) or not launch_url.startswith("https://"):
             reason = plan_error_reason(None)
-            return self.skip_item(item, reason, notice=f"‘{item.title}’ {reason}")
+            return self.skip_item(item, reason, "launch_url_missing", notice=f"‘{item.title}’ {reason}")
         duration = plan.get("duration")
         if isinstance(duration, (int, float)) and duration > 0 and item.duration is None:
             item.duration = float(duration)
