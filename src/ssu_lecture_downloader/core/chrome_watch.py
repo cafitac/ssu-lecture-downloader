@@ -693,6 +693,7 @@ class _Playback:
         self.ended = False
         self.window_closed = False
         self.connection_closed = False
+        self.reviving_session: str | None = None
         self.renderer_gone = False
         self.crash_details: dict[str, Any] = {}
         self.crash_logged = False
@@ -742,7 +743,8 @@ class _Playback:
         self.page_target = target_id
         with self.m._lock:
             self.run.page_target = target_id
-        self.setup_session(session, is_page=True)
+        if not self.renderer_gone:
+            self.setup_session(session, is_page=True)
 
     def setup_session(self, session: str, *, is_page: bool) -> None:
         self.sessions.add(session)
@@ -804,9 +806,11 @@ class _Playback:
     def handle(self, method: str, params: dict[str, Any], session: str | None) -> None:
         if method == "CdpClient.closed":
             self.connection_closed = True
-        elif (method == "Target.targetCrashed" and params.get("targetId") in {self.page_target, *self.child_targets.values()}) or (method == "Inspector.targetCrashed" and session in self.sessions):
+        elif (method == "Target.targetCrashed" and params.get("targetId") in {self.page_target, *self.child_targets.values()}) or (method == "Inspector.targetCrashed" and session in self.sessions and session != self.reviving_session):
             self.renderer_gone = True
             self.crash_details.update({key: params[key] for key in ("status", "errorCode") if key in params})
+        elif method == "Inspector.targetReloadedAfterCrash" and session == self.page_session:
+            self.renderer_gone = False
         elif method == "Target.attachedToTarget":
             info = params.get("targetInfo") or {}
             child = params.get("sessionId")
@@ -923,6 +927,7 @@ class _Playback:
                     self._wait_for_exit()
                 if not self._process_alive():
                     raise ChromeWatchError("chrome_quit_unexpectedly", "Chrome이 갑자기 종료되어 자동 재생을 멈췄어요.") from exc
+                self._log_renderer_crash()
                 if recoveries >= 3:
                     raise ChromeWatchError("chrome_recover_exhausted", "Chrome 연결이 반복해서 끊겨 자동 재생을 멈췄어요.") from exc
                 if recoveries:
@@ -1109,12 +1114,33 @@ class _Playback:
             self.m._sleep(self.m.timings.port_poll)
 
     def _recover_page(self, plan: dict[str, Any]) -> bool:
+        try:
+            return self._recover_page_attempt(plan)
+        except Exception:
+            self.pump(0)
+            self._log_renderer_crash()
+            self.page_session = None
+            self.sessions.clear()
+            self.child_targets.clear()
+            self.frames.clear()
+            self.session_root.clear()
+            self.contexts.clear()
+            self.reports.clear()
+            self.accepting = self.ended = False
+            raise
+        finally:
+            self.reviving_session = None
+
+    def _recover_page_attempt(self, plan: dict[str, Any]) -> bool:
         self.pump(0)
         if self.run.stop.is_set():
             raise _Stopped()
         if self.window_closed:
             raise _WindowClosed()
+        self._log_renderer_crash()
         navigated = False
+        if self.page_session is None and self.renderer_gone and not (self.connection_closed or self.client.closed):
+            self.attach_page()
         if self.connection_closed or self.client.closed:
             self.client.close()
             try:
@@ -1144,11 +1170,14 @@ class _Playback:
             assert self.page_session is not None
             self.child_targets.clear()
             self.sessions = {self.page_session}
+            self.reviving_session = self.page_session
             self.frames.clear()
             self.session_root.clear()
             self.contexts.clear()
             self.reports.clear()
             self.renderer_gone = False
+            self.crash_details.clear()
+            self.crash_logged = False
             self.accepting = self.ended = False
             result = self.call("Page.navigate", {"url": plan["launch_url"]}, self.page_session)
             if result.get("errorText"):
@@ -1183,16 +1212,19 @@ class _Playback:
             self.accepting = True
         return navigated
 
+    def _log_renderer_crash(self) -> None:
+        if self.renderer_gone and not self.crash_logged:
+            item = self.run.items[self.run.index]
+            logger.warning("chrome_watch renderer_gone run_id=%s module_item_id=%s status=%s error_code=%s", self.run.run_id, item.module_item_id, self.crash_details.get("status", "unknown"), self.crash_details.get("errorCode", "unknown"))
+            self.crash_logged = True
+
     def check_alive(self) -> None:
         if self.run.stop.is_set():
             raise _Stopped()
         if self.window_closed:
             raise _WindowClosed()
         if self.renderer_gone:
-            if not self.crash_logged:
-                item = self.run.items[self.run.index]
-                logger.warning("chrome_watch renderer_gone run_id=%s module_item_id=%s status=%s error_code=%s", self.run.run_id, item.module_item_id, self.crash_details.get("status", "unknown"), self.crash_details.get("errorCode", "unknown"))
-                self.crash_logged = True
+            self._log_renderer_crash()
             raise _RendererGone()
         if self.connection_closed or self.client.closed:
             if self.run.stop.is_set():

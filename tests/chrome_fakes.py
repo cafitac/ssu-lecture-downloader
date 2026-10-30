@@ -140,7 +140,11 @@ class FakeBrowser:
         session = message.get("sessionId")
         if method in {"Page.enable", "Runtime.enable"} and session in self.crashed_sessions:
             return  # Real Chrome never replies until Page.navigate revives the target.
+        if method == "Inspector.enable" and session in self.crashed_sessions:
+            self.emit("Inspector.targetCrashed", {}, session)
         if method == "Page.navigate":
+            if session in self.crashed_sessions:
+                self.emit("Inspector.targetReloadedAfterCrash", {}, session)
             self.crashed_sessions.clear()
         if method in self.fail_methods:
             self.incoming.put(json.dumps({"id": message["id"], "error": {"code": -32000, "message": self.fail_methods[method]}}))

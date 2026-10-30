@@ -26,7 +26,7 @@
 
 - **WR-CAUSE:**
   - Log why a renderer died: `Target.targetCrashed` / `Inspector.targetCrashed`, with status and errorCode when provided.
-  - Log the Chrome version at `run_start` (from `Browser.getVersion`).
+  - Log the Chrome version on `cdp_connected` (from `Browser.getVersion`).
   - Log LMS request failures (`lms_request_failed` step/status) at WARNING, without a path, URL, or query.
 - **WR-RESUME:** if the renderer dies, or the DevTools connection drops while Chrome is still alive, recover instead of failing the run.
   - Reconnect if needed.
@@ -165,3 +165,36 @@ The coordinator reran the probe outside the sandbox with headless=new, Chrome
 - `UV_LOCKED=1 uv run lint-imports`: 4 contracts kept, 0 broken.
 - `git diff --check`: clean. Used `UV_CACHE_DIR=/tmp/watch-recover-uv-cache`.
 - Preserved prior uncommitted repairs. No commit, push, or external writes.
+
+
+## Review fixes after head 9642616
+
+- Ignore replayed Inspector crash signals from the session being revived; clear
+  `renderer_gone` on `Inspector.targetReloadedAfterCrash`. Failed recovery discards
+  the page session and session state, so the next attempt attaches again. A newly
+  attached crashed target is navigated before domain setup.
+- Share incident logging across alive checks, playback exceptions and recovery,
+  before deciding whether to recover or exhaust the budget. The repeated-crash
+  test requires four `renderer_gone` lines for four crashes and three recoveries.
+- FakeBrowser replays `Inspector.targetCrashed` when Inspector.enable targets a
+  crashed session and emits targetReloadedAfterCrash on revival. Tests cover
+  successful revival despite replay and retry after reattachment failure.
+- Coordinator evidence: `crash-probe/result-real-order.txt`, Chrome 156.0.8078.76,
+  ran crash → same-session navigate → detach → attach → domain enables → evaluate.
+  Exactly one Inspector.targetCrashed arrived, at the crash. Navigate emitted
+  Inspector.targetReloadedAfterCrash on the old session; new-session enables and
+  evaluate succeeded. The earlier `result-real.txt` sent Inspector.enable before
+  navigation: that call replays targetCrashed, explaining its second crash event.
+  This is coordinator-supplied real Chrome evidence; real LMS resume persistence
+  remains unverified.
+- Follow-up after merge: ERR-PROMPT's known limitation that a Chrome exit is
+  reported as `chrome_window_closed` becomes obsolete.
+
+### Verification
+
+- Focused Chrome watch suite: 74 passed.
+- `UV_LOCKED=1 uv run pytest -q`: 913 passed, 2 existing dependency
+  deprecation warnings (43.35 s).
+- `UV_LOCKED=1 uv run lint-imports`: 4 contracts kept, 0 broken.
+- Used `UV_CACHE_DIR=/tmp/watch-recover-uv-cache`. `git diff --check`: clean.
+- No commit, push, or external writes.
