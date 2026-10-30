@@ -2511,7 +2511,7 @@ const assistSource = readFileSync('src-tauri/src/assets/watch_assist.js', 'utf8'
         const { SettingsDialog } = await server.ssrLoadModule('/src/components/SettingsDialog.tsx');
         const media = { missingComponents: [], ffmpegDependency: { available: true }, whisperStatus: { available: true }, subtitlesViaRemote: false, subtitlesUnsupportedReason: null, canInstall: false, autoInstallAvailable: true, autoInstallUnavailableReason: null, isInstalling: false, install() {}, load() {}, remote: { status: null, busy: null, outcome: null, save: async () => true, check: async () => {} } };
         const grades = { consent: 'off', refreshStatus: async () => {}, revoke: async () => null };
-        const settings = () => renderToStaticMarkup(React.createElement(SettingsDialog, { downloadDir: '/Users/x/Downloads', busy: false, workBusy: false, media, debugEvents: [], grades, watchMode: 'chrome', chromeAvailable: true, queueActive: false, onWatchModeChange() {}, onPickFolder() {}, onOpenFolder() {}, onSignOut: async () => null, onClose() {} }));
+        const settings = () => renderToStaticMarkup(React.createElement(SettingsDialog, { downloadDir: '/Users/x/Downloads', busy: false, workBusy: false, media, debugEvents: [], grades, watchMode: 'chrome', chromeAvailable: true, queueActive: false, tidy: { runs: { state: 'unsupported', list: [] } }, tidyBlocked: false, onTidy() {}, onUndoTidy() {}, onWatchModeChange() {}, onPickFolder() {}, onOpenFolder() {}, onSignOut: async () => null, onClose() {} }));
         const savedWindow = Object.getOwnPropertyDescriptor(globalThis, 'window');
         const savedInternals = Object.getOwnPropertyDescriptor(globalThis, '__TAURI_INTERNALS__');
         try {
