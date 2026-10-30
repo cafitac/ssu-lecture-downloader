@@ -80,7 +80,7 @@ export async function saveDiagnosticsFile(now: Date = new Date()): Promise<Saved
 export async function saveDiagnosticsAutomatically(now: Date = new Date()): Promise<SavedDiagnostics | null> {
   if (!isTauriRuntime()) return null;
   const destination = await invoke<string>('diagnostics_auto_destination', { fileName: diagnosticsFileName(now) });
-  return invoke<SavedDiagnostics>('save_diagnostics', { destination });
+  return invoke<SavedDiagnostics>('save_diagnostics', { destination, automatic: true });
 }
 
 /** Whether the previous run of the app ended abnormally. The shell clears the flag when it is read. */

@@ -1,8 +1,8 @@
 //! "진단 파일 저장": a zip of the app's own log files plus a small `info.json`, written only where
 //! the user chose in the save dialog. Nothing is uploaded or sent anywhere.
 //!
-//! The shell and the backend already write `backend.log`, `backend.previous.log` and `watch.log`
-//! into the app log dir. Before a log goes into the zip it is redacted once more (defence in
+//! The shell and the backend already write `backend.log`, `watch.log` and the one rotated
+//! `*.previous.log` of each into the app log dir. Before a log goes into the zip it is redacted once more (defence in
 //! depth: the writers already keep tokens and cookies out) and cut to its last 5 MB.
 
 use serde::Serialize;
@@ -15,7 +15,12 @@ use tauri::Manager;
 use crate::backend::BackendManager;
 
 /// The log files that go into the zip, by their names in the app log dir.
-const LOG_FILES: [&str; 3] = ["backend.log", "backend.previous.log", "watch.log"];
+const LOG_FILES: [&str; 4] = [
+    "backend.log",
+    "backend.previous.log",
+    "watch.log",
+    "watch.previous.log",
+];
 /// Each log is cut to its last this many bytes.
 const MAX_LOG_BYTES: u64 = 5 * 1024 * 1024;
 const REDACTED: &str = "[redacted]";
@@ -370,7 +375,25 @@ const NO_PERMISSION_ERROR: &str =
     "이 폴더에는 파일을 저장할 권한이 없어요. 다른 폴더를 골라 주세요.";
 const DISK_FULL_ERROR: &str = "저장 공간이 부족해요. 디스크 공간을 확보한 뒤 다시 시도해 주세요.";
 const NAME_TAKEN_ERROR: &str = "같은 이름의 파일이 이미 있어요. 다른 이름으로 저장해 주세요.";
+/// The same three causes for the automatic save (the "문제가 생겼어요" dialog), which has no folder
+/// to pick: it points to Settings instead.
+const AUTO_NO_PERMISSION_ERROR: &str =
+    "다운로드 폴더에 저장할 권한이 없어요. 설정 → 문제 보내기에서 다른 위치를 골라 저장해 주세요.";
+const AUTO_DISK_FULL_ERROR: &str = "저장 공간이 부족해요. 공간을 확보한 뒤 다시 시도해 주세요.";
+const AUTO_GENERIC_ERROR: &str =
+    "진단 파일을 저장하지 못했어요. 설정 → 문제 보내기에서 다시 시도해 주세요.";
 const NOT_A_FILE_ERROR: &str = "같은 이름의 폴더가 이미 있어요. 다른 이름이나 폴더를 골라 주세요.";
+
+/// The automatic save's copy for an error text of the manual save: permission and disk-full keep
+/// their cause, everything else gets the generic sentence.
+fn automatic_error_text(error: &str) -> String {
+    match error {
+        NO_PERMISSION_ERROR => AUTO_NO_PERMISSION_ERROR,
+        DISK_FULL_ERROR => AUTO_DISK_FULL_ERROR,
+        _ => AUTO_GENERIC_ERROR,
+    }
+    .to_string()
+}
 
 /// Plain Korean for the user. The OS detail goes to stderr (the app's log channel), not to the UI.
 fn io_error_text(error: &std::io::Error) -> String {
@@ -618,6 +641,19 @@ pub(crate) fn diagnostics_auto_destination(file_name: String) -> Result<String, 
 pub(crate) fn save_diagnostics(
     app: tauri::AppHandle,
     destination: String,
+    automatic: Option<bool>,
+) -> Result<SavedDiagnostics, String> {
+    let result = save_diagnostics_to(&app, destination);
+    if automatic == Some(true) {
+        result.map_err(|error| automatic_error_text(&error))
+    } else {
+        result
+    }
+}
+
+fn save_diagnostics_to(
+    app: &tauri::AppHandle,
+    destination: String,
 ) -> Result<SavedDiagnostics, String> {
     if destination.trim().is_empty() {
         return Err("저장할 위치가 비어 있어요.".to_string());
@@ -665,6 +701,39 @@ mod tests {
                 (entry.name().expect("entry name").to_string(), text)
             })
             .collect()
+    }
+
+    #[test]
+    fn the_automatic_save_has_its_own_copy_without_a_folder_to_pick() {
+        assert_eq!(
+            automatic_error_text(NO_PERMISSION_ERROR),
+            "다운로드 폴더에 저장할 권한이 없어요. 설정 → 문제 보내기에서 다른 위치를 골라 저장해 주세요."
+        );
+        assert_eq!(
+            automatic_error_text(DISK_FULL_ERROR),
+            "저장 공간이 부족해요. 공간을 확보한 뒤 다시 시도해 주세요."
+        );
+        for other in [
+            GENERIC_SAVE_ERROR,
+            NAME_TAKEN_ERROR,
+            NOT_A_FILE_ERROR,
+            "저장할 위치가 비어 있어요.",
+        ] {
+            assert_eq!(
+                automatic_error_text(other),
+                "진단 파일을 저장하지 못했어요. 설정 → 문제 보내기에서 다시 시도해 주세요.",
+                "{other}"
+            );
+        }
+        for text in [
+            AUTO_NO_PERMISSION_ERROR,
+            AUTO_DISK_FULL_ERROR,
+            AUTO_GENERIC_ERROR,
+        ] {
+            assert!(!text.contains("폴더를 골라"), "{text}");
+        }
+        // The manual save keeps its sentences.
+        assert!(NO_PERMISSION_ERROR.contains("다른 폴더를 골라 주세요"));
     }
 
     #[test]
@@ -929,24 +998,42 @@ mod tests {
         let out = temp_dir("out");
         fs::write(logs.join("backend.log"), "start\nGET /v?token=SECRET1 ok\n").expect("log");
         fs::write(logs.join("watch.log"), "watch Cookie: sid=SECRET2\n").expect("log");
-        // backend.previous.log does not exist: skipped, not an error.
+        // The rotated watch log is included; backend.previous.log does not exist: skipped, not an error.
+        fs::write(logs.join("watch.previous.log"), "older watch line\n").expect("log");
         let destination = out.join("diag.zip");
         let info = serde_json::json!({ "app_version": "9.9.9" });
 
         let saved = write_bundle(&destination, &logs, &info).expect("bundle");
-        assert_eq!(saved.files, ["backend.log", "watch.log", "info.json"]);
+        assert_eq!(
+            saved.files,
+            [
+                "backend.log",
+                "watch.log",
+                "watch.previous.log",
+                "info.json"
+            ]
+        );
         assert_eq!(saved.path, destination.to_string_lossy());
 
         let entries = zip_entries(&destination);
         let names: Vec<&str> = entries.iter().map(|(name, _)| name.as_str()).collect();
-        assert_eq!(names, ["backend.log", "watch.log", "info.json"]);
+        assert_eq!(
+            names,
+            [
+                "backend.log",
+                "watch.log",
+                "watch.previous.log",
+                "info.json"
+            ]
+        );
         assert_eq!(entries[0].1, "start\nGET /v?token=[redacted] ok\n");
         assert_eq!(entries[1].1, "watch Cookie: [redacted]\n");
-        let info: serde_json::Value = serde_json::from_str(&entries[2].1).expect("info json");
+        assert_eq!(entries[2].1, "older watch line\n");
+        let info: serde_json::Value = serde_json::from_str(&entries[3].1).expect("info json");
         assert_eq!(info["app_version"], "9.9.9");
         assert_eq!(
             info["included_files"],
-            serde_json::json!(["backend.log", "watch.log"])
+            serde_json::json!(["backend.log", "watch.log", "watch.previous.log"])
         );
         assert!(!entries.iter().any(|(_, text)| text.contains("SECRET")));
 

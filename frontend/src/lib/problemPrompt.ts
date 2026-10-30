@@ -13,7 +13,7 @@ export type ProblemKind = 'chrome-watch' | 'app-watch' | 'backend' | 'previous-c
 export const PROBLEM_TITLE = '문제가 생겼어요';
 export const PROBLEM_HINT = '진단 파일을 저장해서 전달해 주시겠어요? 어디로도 자동 전송되지 않아요.';
 export const PROBLEM_SAVED_TEXT = DIAGNOSTICS_SAVED_TEXT;
-export const PROBLEM_SAVE_FAILED_TEXT = '진단 파일을 저장하지 못했어요. 잠시 뒤에 다시 시도해 주세요.';
+export const PROBLEM_SAVE_FAILED_TEXT = '진단 파일을 저장하지 못했어요. 설정 → 문제 보내기에서 다시 시도해 주세요.';
 
 const SENTENCES: Record<ProblemKind, string> = {
   'chrome-watch': '자동 재생이 오류로 멈췄어요.',

@@ -2739,15 +2739,17 @@ const assistSource = readFileSync('src-tauri/src/assets/watch_assist.js', 'utf8'
     {
       let nameAsked;
       let written;
+      let savedArgs;
       const bridge = tauriBridge({
         diagnostics_auto_destination: (args) => { nameAsked = args.fileName; return '/Users/x/Downloads/SSU 진단/ssu-진단-20261030-1105 (2).zip'; },
-        save_diagnostics: (args) => { written = args.destination; return { path: args.destination, files: ['info.json'] }; },
+        save_diagnostics: (args) => { written = args.destination; savedArgs = args; return { path: args.destination, files: ['info.json'] }; },
       });
       try {
         const saved = await desktop.saveDiagnosticsAutomatically(new Date(2026, 9, 30, 11, 5));
         assert.equal(nameAsked, 'ssu-진단-20261030-1105.zip');
         assert.equal(written, '/Users/x/Downloads/SSU 진단/ssu-진단-20261030-1105 (2).zip');
         assert.equal(saved.path, written);
+        assert.equal(savedArgs.automatic, true, 'the shell is told it is the automatic save, so its errors do not mention a folder to pick');
         assert.deepEqual(bridge.calls, ['diagnostics_auto_destination', 'save_diagnostics'], 'no save dialog');
       } finally { bridge.restore(); }
       assert.equal(await desktop.saveDiagnosticsAutomatically(), null, 'nothing is written outside the desktop app');
@@ -2757,6 +2759,19 @@ const assistSource = readFileSync('src-tauri/src/assets/watch_assist.js', 'utf8'
       const broken = tauriBridge({ previous_run_crashed: () => { throw 'unknown command'; } });
       try { assert.equal(await desktop.previousRunCrashed(), false, 'an older shell means no prompt'); } finally { broken.restore(); }
       const rust = readFileSync('src-tauri/src/diagnostics.rs', 'utf8');
+      // The automatic save's three error sentences (Rust maps the cause; the manual Settings copy is untouched).
+      for (const sentence of [
+        '다운로드 폴더에 저장할 권한이 없어요. 설정 → 문제 보내기에서 다른 위치를 골라 저장해 주세요.',
+        '저장 공간이 부족해요. 공간을 확보한 뒤 다시 시도해 주세요.',
+        '진단 파일을 저장하지 못했어요. 설정 → 문제 보내기에서 다시 시도해 주세요.',
+      ]) assert.ok(rust.includes(`"${sentence}"`) || rust.includes(sentence), sentence);
+      assert.ok(rust.includes('이 폴더에는 파일을 저장할 권한이 없어요. 다른 폴더를 골라 주세요.') && rust.includes('automatic: Option<bool>'), 'the manual copy stays; the flag is optional');
+      // A Rust sentence reaches the dialog as it is (no folder picker wording to rewrite on this side).
+      {
+        const states = [];
+        await prompt.runProblemSave({ save: async () => { throw '저장 공간이 부족해요. 공간을 확보한 뒤 다시 시도해 주세요.'; }, reveal: async () => {} }, (state) => states.push(state));
+        assert.deepEqual(states.at(-1), { busy: false, outcome: { ok: false, text: '저장 공간이 부족해요. 공간을 확보한 뒤 다시 시도해 주세요.' } });
+      }
       assert.ok(rust.includes('const AUTO_SAVE_FOLDER: &str = "SSU 진단";') && /home\.join\("Downloads"\)\.join\(AUTO_SAVE_FOLDER\)/.test(rust), 'the fixed folder is ~/Downloads/SSU 진단');
     }
 
