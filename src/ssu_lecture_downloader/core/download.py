@@ -3,11 +3,19 @@ from __future__ import annotations
 import re
 import time
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
 from ssu_lecture_downloader.core.errors import response_status
+from ssu_lecture_downloader.core.library_layout import (
+    CourseLayout,
+    LibraryIndex,
+    LibraryTarget,
+    LecturePaths,
+    MaterialPaths,
+    collision_name,
+)
 from ssu_lecture_downloader.core.progress import emit_progress
 
 
@@ -25,11 +33,18 @@ class DownloadHttpClient(Protocol):
 
 @dataclass(frozen=True)
 class DownloadPlan:
+    """Where one download goes. `course_dir` is the folder that holds `file_path` (a lecture or week folder).
+
+    `library` (a `LecturePaths` / `MaterialPaths`) is prepared right before the first byte is written:
+    it creates the folder and records the item in its hidden `.ssu` metadata.
+    """
+
     output_dir: Path
     course_dir: Path
     file_path: Path
     file_exists: bool = False
     conflict_strategy: str = 'rename'
+    library: LecturePaths | MaterialPaths | None = field(default=None, compare=False, repr=False)
 
 
 _UNSAFE_FILENAME_CHARS = re.compile(r'[\\/:*?"<>|\x00-\x1f\x7f]+')
@@ -65,15 +80,55 @@ def safe_filename(value: str, fallback: str = 'lecture') -> str:
     return cleaned or fallback
 
 
-def _existing_with_content_id(course_dir: Path, content_id: str, extension: str) -> Path | None:
-    if not content_id or content_id == 'content':
-        return None
-    marker = f'[{content_id}].{extension}'
-    try:
-        matches = sorted(entry for entry in course_dir.iterdir() if entry.is_file() and entry.name.endswith(marker))
-    except OSError:
-        return None
-    return matches[0] if matches else None
+_VIDEO_KINDS = frozenset({'mp4', 'm4v', 'mov', 'mkv', 'webm'})
+
+
+def plan_library_download(
+    *,
+    output_dir: Path,
+    library: LecturePaths | MaterialPaths,
+    extension: str,
+    conflict_strategy: str = 'rename',
+) -> DownloadPlan:
+    """The download plan of one item whose folder was already decided (see `CourseLayout`).
+
+    - `skip`: an existing file in either layout (new layout first, then the old `[content id]` name) is the answer.
+    - `overwrite`: always the new-layout path; an old-layout file is never written to.
+    - `rename`: the new-layout path, `<stem> (n).<ext>` next to the first copy when that exists.
+    """
+    if conflict_strategy not in {'rename', 'overwrite', 'skip'}:
+        raise ValueError(f'unsupported conflict strategy: {conflict_strategy}')
+    if isinstance(library, LecturePaths):
+        library = library.with_video_extension(normalize_media_extension(extension))
+        directory = library.lecture_dir
+        target = library.targets['video']
+        stem = library.stem
+        ext = library.video_ext
+        existing = library.source_video()
+    else:
+        directory = library.week_dir
+        target = library.target
+        stem, _, ext = library.file_name.rpartition('.')
+        existing = library.source_video()
+    chosen = target
+    file_exists = target.exists()
+    if conflict_strategy == 'skip' and existing is not None:
+        chosen = existing
+        file_exists = True
+    elif conflict_strategy == 'rename':
+        number = 2
+        while chosen.exists():
+            chosen = directory / f'{collision_name(stem, number)}.{ext}'
+            number += 1
+        file_exists = chosen.exists()
+    return DownloadPlan(
+        output_dir=output_dir,
+        course_dir=directory,
+        file_path=chosen,
+        file_exists=file_exists,
+        conflict_strategy=conflict_strategy,
+        library=library,
+    )
 
 
 def plan_download_path(
@@ -84,54 +139,55 @@ def plan_download_path(
     content_id: str,
     extension: str,
     conflict_strategy: str = 'rename',
+    module_name: str | None = None,
+    week_position: object = None,
 ) -> DownloadPlan:
+    """Standalone entry (CLI, tests): plan one item without a course plan, in the week -> lecture layout.
+
+    Without a week the item goes to `기타`. The service plans whole courses with `CourseLayout` instead, so
+    that same-title lectures get stable `(n)` names.
+    """
     if conflict_strategy not in {'rename', 'overwrite', 'skip'}:
         raise ValueError(f'unsupported conflict strategy: {conflict_strategy}')
     normalized_extension = normalize_media_extension(extension)
     course_dir = output_dir / safe_filename(course_name, fallback='course')
-    stem = safe_filename(f'{lecture_title} [{content_id}]')
-    original = course_dir / f'{stem}.{normalized_extension}'
-    if conflict_strategy != 'rename' and not original.exists():
-        # Files saved earlier under another title (e.g. the media server's name) are matched
-        # by their `[content_id]`, so a re-download does not duplicate them.
-        earlier = _existing_with_content_id(course_dir, content_id, normalized_extension)
-        if earlier is not None:
-            original = earlier
-    original_exists = original.exists()
-    candidate = original
-    if conflict_strategy == 'rename':
-        suffix = 2
-        while candidate.exists():
-            candidate = course_dir / f'{stem} ({suffix}).{normalized_extension}'
-            suffix += 1
-    return DownloadPlan(
-        output_dir=output_dir,
-        course_dir=course_dir,
-        file_path=candidate,
-        file_exists=original_exists if conflict_strategy != 'rename' else candidate.exists(),
-        conflict_strategy=conflict_strategy,
+    is_canvas = content_id.startswith('canvas-')
+    kind = 'canvas_file' if is_canvas else ('lecture' if normalized_extension in _VIDEO_KINDS else 'material')
+    key = content_id or 'item'
+    target = LibraryTarget(
+        key=key,
+        title=lecture_title,
+        kind=kind,
+        content_id=None if content_id == 'content' else content_id,
+        week_position=week_position,
+        module_name=module_name,
+        extension=normalized_extension,
     )
+    layout = CourseLayout.plan(course_dir, [target], course_id='')
+    library = layout.lecture(key) if kind == 'lecture' else layout.material(key)
+    if library is None:
+        raise ValueError('item could not be placed')
+    return plan_library_download(output_dir=output_dir, library=library, extension=normalized_extension, conflict_strategy=conflict_strategy)
 
 
 def find_downloaded_files(output_dir: Path, course_name: str, content_ids: Iterable[str]) -> dict[str, str]:
-    """Already downloaded media per content id, found by the `[content_id]` in the file name.
+    """Already downloaded files per content id, found in either layout.
 
-    Looks only into the course folder `plan_download_path` would use; unfinished `.part`
-    files do not count. Costs one directory listing, no LMS requests.
+    New layout: `.ssu/item.json` of a lecture folder / `.ssu/materials.json` of a week folder. Old flat
+    layout (read only): the `[content id]` marker in the course folder. Unfinished `.part` files do not
+    count. Costs one walk of the course folder, no LMS requests. The path shown prefers video, audio,
+    `자막.txt`, material, `.srt`.
     """
-    wanted = {content_id for content_id in content_ids if content_id}
+    wanted = [content_id for content_id in dict.fromkeys(content_ids) if content_id]
     if not wanted:
         return {}
     course_dir = output_dir / safe_filename(course_name, fallback='course')
+    index = LibraryIndex.scan(course_dir)
     found: dict[str, str] = {}
-    try:
-        entries = sorted(entry for entry in course_dir.iterdir() if entry.is_file() and entry.suffix != '.part')
-    except OSError:
-        return {}
-    for entry in entries:
-        for content_id in wanted:
-            if content_id not in found and f'[{content_id}]' in entry.name:
-                found[content_id] = str(entry)
+    for content_id in wanted:
+        path = index.downloaded_path(content_id)
+        if path is not None:
+            found[content_id] = str(path)
     return found
 
 
@@ -216,7 +272,10 @@ def download_to_plan(
     should_cancel: Callable[[], bool] | None = None,
     expected_total_bytes: int | None = None,
 ) -> Path:
-    plan.course_dir.mkdir(parents=True, exist_ok=True)
+    if plan.library is not None:
+        plan.library.prepare()
+    else:
+        plan.course_dir.mkdir(parents=True, exist_ok=True)
     part_path = plan.file_path.with_suffix(plan.file_path.suffix + '.part')
     attempts = max(1, max_attempts)
     last_error: BaseException | None = None

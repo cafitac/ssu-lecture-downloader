@@ -56,3 +56,7 @@ transcripts/
 frontend/src-tauri/target/
 frontend/src-tauri/gen/schemas/
 frontend/src-tauri/resources/backend-sidecar/
+
+# Local symlinks to the project's agent-skills instructions (owner-approved chore)
+/AGENTS.md
+/CLAUDE.md

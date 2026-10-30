@@ -679,6 +679,7 @@ def transcribe_with_remote(
             model=model,
             language=request.language,
             overwrite=request.overwrite,
+            paths=request.paths,
         )
     except OSError as exc:
         return TranscriptionResult(ok=False, audio_path=audio_path, segments=cues, error_code='transcript_write_failed', message=str(exc)[:500])

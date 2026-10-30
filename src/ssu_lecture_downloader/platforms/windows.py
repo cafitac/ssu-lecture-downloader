@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from ssu_lecture_downloader.core.library_layout import WINDOWS_RULES, PathRules
 from ssu_lecture_downloader.platforms.base import ProcessHandle
 
 _MESSAGE = "Windows support is not implemented yet (platform split sprint 2): {what}"
@@ -54,3 +55,8 @@ class WindowsPlatform:
     # SecretFileWriter
     def write_private(self, path: Path, data: bytes) -> None:
         raise _todo("private file write")
+
+    # PathRulesProvider
+    def path_rules(self) -> PathRules:
+        # Usable before the rest of the adapter exists: pure data, no OS calls.
+        return WINDOWS_RULES

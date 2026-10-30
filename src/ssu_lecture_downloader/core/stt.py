@@ -10,8 +10,10 @@ from contextlib import AbstractContextManager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic.json_schema import SkipJsonSchema
 
+from ssu_lecture_downloader.core.library_layout import LecturePaths
 from ssu_lecture_downloader.core.progress import emit_progress
 from ssu_lecture_downloader.core.stt_cues import TranscriptSegment, format_srt
 
@@ -65,6 +67,16 @@ class TranscriptionRequest(BaseModel):
     condition_on_previous_text: bool = False
     initial_prompt: str | None = DEFAULT_STT_INITIAL_PROMPT
     overwrite: bool = False
+    # Explicit files of one library lecture (set by the artifact pipeline only). None keeps the standalone
+    # naming `<audio stem>.transcript.*` next to the audio. Never read from an HTTP body.
+    paths: SkipJsonSchema[LecturePaths | None] = Field(default=None, exclude=True)
+
+    @field_validator('paths', mode='before')
+    @classmethod
+    def _paths_are_internal(cls, value: Any) -> Any:
+        if value is not None and not isinstance(value, LecturePaths):
+            raise ValueError('paths is not accepted from a request')
+        return value
 
 
 class TranscriptionResult(BaseModel):
@@ -155,14 +167,23 @@ def write_transcript_files(
     model: str,
     language: str,
     overwrite: bool,
+    paths: LecturePaths | None = None,
 ) -> TranscriptionResult:
     audio_path = audio_path.expanduser()
-    text_path, md_path, json_path = transcript_output_paths(audio_path, output_dir)
-    srt_path = transcript_srt_path(audio_path, output_dir)
-    existing = [path for path in (text_path, md_path, json_path) if path.exists()]
+    if paths is None:
+        text_path, md_path, json_path = transcript_output_paths(audio_path, output_dir)
+        srt_path = transcript_srt_path(audio_path, output_dir)
+        existing = [path for path in (text_path, md_path, json_path) if path.exists()]
+    else:
+        text_path, md_path, json_path, srt_path = (paths.targets[role] for role in ('text', 'md', 'json', 'srt'))
+        # `<stem> 자막.txt` is committed last: leftovers of an interrupted run (.srt/.md/.json without it) are rewritten.
+        existing = [path for path in (text_path,) if path.exists()]
     if existing and not overwrite:
         return TranscriptionResult(ok=False, audio_path=audio_path, text_path=text_path, md_path=md_path, json_path=json_path, srt_path=srt_path, segments=segments, error_code='transcript_exists', message='이미 생성된 STT 파일이 있습니다.')
-    text_path.parent.mkdir(parents=True, exist_ok=True)
+    if paths is not None:
+        paths.prepare()
+    for target in (srt_path, md_path, json_path, text_path):
+        target.parent.mkdir(parents=True, exist_ok=True)
     text = '\n'.join(f'[{_format_timestamp(segment.start)}] {segment.text.strip()}' for segment in segments if segment.text.strip()).strip() + '\n'
     md = '\n'.join([
         f'# {audio_path.stem} transcript',
@@ -321,6 +342,6 @@ def transcribe_audio(
     except Exception as exc:
         return TranscriptionResult(ok=False, audio_path=audio_path, error_code=type(exc).__name__, message=str(exc)[:500])
     try:
-        return write_transcript_files(audio_path=audio_path, segments=segments, output_dir=request.output_dir, provider=request.provider, model=request.model, language=request.language, overwrite=request.overwrite)
+        return write_transcript_files(audio_path=audio_path, segments=segments, output_dir=request.output_dir, provider=request.provider, model=request.model, language=request.language, overwrite=request.overwrite, paths=request.paths)
     except OSError as exc:
         return TranscriptionResult(ok=False, audio_path=audio_path, segments=segments, error_code='transcript_write_failed', message=str(exc)[:500])

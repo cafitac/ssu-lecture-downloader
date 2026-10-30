@@ -1135,3 +1135,40 @@ def test_polling_a_finished_job_never_touches_the_service(tmp_path):
     polled = [client.get(f"/api/download/jobs/{job['job_id']}") for _ in range(5)]
 
     assert all(response.status_code == 200 and response.json()['status'] == 'succeeded' for response in polled)
+
+
+def test_course_detail_marks_lectures_and_materials_stored_in_the_week_layout_or_the_old_flat_one(tmp_path):
+    from ssu_lecture_downloader.core.library_layout import CourseLayout, LibraryTarget
+
+    store = FakeCredentialStore(CredentialPair(username='student-id', password='secret-password'))
+
+    class DetailService(FakeService):
+        def get_course_detail(self, username, password, *, course_id, course_name=None):
+            result = super().get_course_detail(username, password, course_id=course_id, course_name=course_name)
+            items = [item.model_copy(update={'content_id': cid}) for item, cid in zip(result.content_items, ['new-lecture', 'old-lecture'])]
+            items.append(items[1].model_copy(update={'content_id': 'new-material', 'module_item_id': 9}))
+            return CourseDetailResult(ok=True, error_code=None, course=result.course, lectures=result.lectures, content_items=items)
+
+    course_dir = tmp_path / 'UX방법론'
+    layout = CourseLayout.plan(
+        course_dir,
+        [
+            LibraryTarget(key='1', title='새 강의', kind='lecture', content_id='new-lecture', module_item_id='1', week_position=1),
+            LibraryTarget(key='3', title='새 자료', kind='material', content_id='new-material', module_item_id='3', week_position=1, extension='pdf'),
+        ],
+        course_id='44070',
+    )
+    lecture = layout.lecture('1')
+    material = layout.material('3')
+    lecture.prepare()
+    material.prepare()
+    lecture.targets['text'].write_text('자막')
+    material.target.write_bytes(b'pdf')
+    (course_dir / '옛 강의 [old-lecture].mp4').write_bytes(b'1234')
+    client = TestClient(create_app(service_factory=DetailService, default_output_dir=tmp_path, credential_store=store))
+
+    items = client.get('/api/courses/44070', params={'course_name': 'UX방법론'}).json()['content_items']
+
+    assert items[0]['downloaded_path'] == str(lecture.targets['text'])
+    assert items[1]['downloaded_path'] == str(course_dir / '옛 강의 [old-lecture].mp4')
+    assert items[2]['downloaded_path'] == str(material.target)

@@ -364,7 +364,7 @@ def test_service_native_plan_uses_head_redirect_target_for_native_transfer(tmp_p
     assert result.result.ok is True
     assert result.native_download is not None
     assert result.native_download.download_url == 'https://ssu-toast.commonscdn.com/video.mp4?redacted=1'
-    assert result.native_download.output_path.endswith('자료_구조/테스트 강의 [content-1].mp4')
+    assert result.native_download.output_path.endswith('자료_구조/01주차/강의 1/강의 1.mp4')
 
 
 def test_service_plans_and_downloads_lecture_to_safe_path(tmp_path: Path):
@@ -385,7 +385,7 @@ def test_service_plans_and_downloads_lecture_to_safe_path(tmp_path: Path):
     assert result.ok is True
     assert result.written is True
     assert result.file_size == 4
-    assert result.output_path.endswith('자료_구조/테스트 강의 [content-1].mp4')
+    assert result.output_path.endswith('자료_구조/01주차/강의 1/강의 1.mp4')
     assert Path(result.output_path).read_bytes() == b'1234'
     assert 'download_progress' in [event['stage'] for event in events]
     assert events[-1]['stage'] == 'download_done'
@@ -477,7 +477,7 @@ def test_service_plans_pdf_material_to_pdf_path(tmp_path: Path):
     assert result.ok is True
     assert result.written is False
     assert result.download_size == 2048
-    assert result.output_path.endswith('자료_구조/강의자료 PDF [pdf-content-1].pdf')
+    assert result.output_path.endswith('자료_구조/01주차/강의자료 PDF.pdf')
 
 
 def test_service_plans_readystream_video_to_mp4_path(tmp_path: Path):
@@ -510,7 +510,7 @@ def test_service_plans_readystream_video_to_mp4_path(tmp_path: Path):
 
     assert result.ok is True
     assert result.written is False
-    assert result.output_path.endswith('국제상무론/계약의 기본조건 2 [63b26d5c58048].mp4')
+    assert result.output_path.endswith('국제상무론/01주차/강의 1/강의 1.mp4')
 
 
 def test_service_batch_can_plan_selected_pdf_material(tmp_path: Path):
@@ -546,7 +546,7 @@ def test_service_batch_can_plan_selected_pdf_material(tmp_path: Path):
     assert result.ok is True
     assert [item.module_item_id for item in result.items] == [112]
     assert result.items[0].written is False
-    assert result.items[0].output_path.endswith('자료_구조/강의자료 PDF [pdf-content-1].pdf')
+    assert result.items[0].output_path.endswith('자료_구조/01주차/강의자료 PDF.pdf')
     assert any(event['stage'] == 'planned' for event in events)
     assert events[-1]['stage'] == 'batch_prepare_done'
     assert events[-1]['resolved_count'] == 1

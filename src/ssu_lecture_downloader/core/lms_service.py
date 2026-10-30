@@ -25,10 +25,18 @@ from ssu_lecture_downloader.core.download import (
     DownloadCancelled,
     DownloadPlan,
     download_to_plan,
-    plan_download_path,
+    normalize_media_extension,
+    plan_library_download,
+    safe_filename,
 )
 from ssu_lecture_downloader.core.errors import is_session_lost, is_signed_url_failure, response_status
 from ssu_lecture_downloader.core.http_client import HttpClient
+from ssu_lecture_downloader.core.library_layout import (
+    CourseLayout,
+    LecturePaths,
+    LibraryTarget,
+    material_extension,
+)
 from ssu_lecture_downloader.core.lms import (
     DEFAULT_TERM_ID_CANDIDATES,
     LearningXLister,
@@ -37,6 +45,7 @@ from ssu_lecture_downloader.core.lms import (
     latest_current_term,
     learningx_api_headers,
 )
+from ssu_lecture_downloader.core.library_meta import VIDEO_EXTENSIONS
 from ssu_lecture_downloader.core.login_flow import LoginDiscoveryResult
 from ssu_lecture_downloader.core.media import (
     AttendanceItemMedia,
@@ -281,6 +290,8 @@ class BatchDownloadResult:
     course_id: int | str
     course_name: str
     items: list[BatchDownloadItemResult]
+    # Internal (never serialised: `batch_payload` builds explicit keys): module_item_id -> where each lecture's files go.
+    library_paths: dict[str, LecturePaths] = dataclasses.field(default_factory=dict, compare=False, repr=False)
 
     @property
     def total_count(self) -> int:
@@ -395,17 +406,58 @@ def _failure(cls: type[T], error_code: str | None, **fixed: Any) -> T:
     return cls(**values)
 
 
-def _planned_file(resolved: _ResolvedMediaInternal, *, output_dir: Path, course_name: str, fallback_title: str, conflict_strategy: str) -> tuple[DownloadPlan, int | None]:
+def _library_target(item: Any) -> LibraryTarget:
+    """The layout input of one LMS content item (what the app list shows: title, week, module)."""
+    video = item.kind == "video"
+    return LibraryTarget(
+        key=str(item.module_item_id),
+        title=item.title or "",
+        kind="lecture" if video else "material",
+        content_id=item.content_id,
+        module_item_id=str(item.module_item_id),
+        week_position=item.week_position,
+        module_name=item.module_name,
+        lesson_position=item.lesson_position,
+        extension=None if video else material_extension(item.inner_content_type, item.file_name),
+    )
+
+
+def _course_layout(content_items: Iterable[Any], *, course_id: int | str, course_name: str, output_dir: Path) -> CourseLayout:
+    """Names for every downloadable item of the course, assigned in one pass (see `CourseLayout`)."""
+    placeable = {"video", "material", "unknown"}  # the media server decides later what an "unknown" item really is
+    targets = [_library_target(item) for item in content_items if item.module_item_id is not None and (item.downloadable or item.kind in placeable)]
+    return CourseLayout.plan(output_dir / safe_filename(course_name, fallback="course"), targets, course_id=str(course_id))
+
+
+def _planned_file(
+    resolved: _ResolvedMediaInternal,
+    *,
+    layout: CourseLayout,
+    key: int | str,
+    output_dir: Path,
+    fallback_title: str,
+    conflict_strategy: str,
+) -> tuple[DownloadPlan, int | None]:
     """Where a resolved item would be written, and the size of what is already there."""
     result = resolved.result
-    plan = plan_download_path(
-        output_dir=output_dir,
-        course_name=course_name,
-        lecture_title=result.title or fallback_title,
-        content_id=result.content_id or "content",
-        extension=resolved.extension or "mp4",
-        conflict_strategy=conflict_strategy,
-    )
+    extension = resolved.extension or "mp4"
+    item_key = str(key)
+    is_video = normalize_media_extension(extension) in VIDEO_EXTENSIONS
+    planned = layout.lecture(item_key) if is_video else layout.material(item_key, extension)
+    if planned is None:
+        planned = layout.ensure_kind(
+            item_key,
+            "lecture" if is_video else "material",
+            title=result.title or fallback_title,
+            content_id=result.content_id,
+            extension=None if is_video else material_extension(extension, None),
+        )
+    if isinstance(planned, LecturePaths):
+        planned = layout.bind_identity(item_key, result.content_id) or planned
+        planned = planned.with_resolved_title(result.title)
+    plan = plan_library_download(output_dir=output_dir, library=planned, extension=extension, conflict_strategy=conflict_strategy)
+    if isinstance(plan.library, LecturePaths):
+        layout.record(item_key, plan.library)
     file_size = plan.file_path.stat().st_size if plan.file_exists and plan.file_path.exists() else None
     return plan, file_size
 
@@ -960,7 +1012,8 @@ class SsuLectureService:
                 DownloadLectureResult, login_result.error_code, dry_run=dry_run, written=False, course_id=course_id, module_item_id=module_item_id
             )
 
-        plan, file_size = _planned_file(resolved, output_dir=output_dir, course_name=course_name, fallback_title="lecture", conflict_strategy=conflict_strategy)
+        layout = self._single_item_layout(username, password, course_id=course_id, course_name=course_name, output_dir=output_dir)
+        plan, file_size = _planned_file(resolved, layout=layout, key=module_item_id, output_dir=output_dir, fallback_title="lecture", conflict_strategy=conflict_strategy)
         written = False
         skipped = False
         if plan.file_exists and conflict_strategy == 'skip':
@@ -1024,6 +1077,21 @@ class SsuLectureService:
                 raise
             transfer(fresh)
 
+    def _single_item_layout(self, username: str, password: str, *, course_id: int | str, course_name: str, output_dir: Path) -> CourseLayout:
+        """The course plan a single download places its item in (module list is cached by the resolution just done)."""
+
+        def load() -> list:
+            return LearningXLister(self.http).extract_course_content_items(self._course_modules(course_id))
+
+        content_items: list = []
+        try:
+            login_result, loaded = self._authenticated(username, password, load)
+            if login_result.ok and loaded is not None:
+                content_items = loaded
+        except Exception:  # noqa: BLE001 - no week information is better than no download: the item goes to 기타
+            logging.getLogger(__name__).debug("module list unavailable for the folder plan (course_id=%s)", course_id, exc_info=True)
+        return _course_layout(content_items, course_id=course_id, course_name=course_name, output_dir=output_dir)
+
     def native_download_plan(
         self,
         username: str,
@@ -1044,8 +1112,12 @@ class SsuLectureService:
             )
             return NativeDownloadPlanResult(result=failed, native_download=None)
 
-        plan, file_size = _planned_file(resolved, output_dir=output_dir, course_name=course_name, fallback_title="lecture", conflict_strategy=conflict_strategy)
+        layout = self._single_item_layout(username, password, course_id=course_id, course_name=course_name, output_dir=output_dir)
+        plan, file_size = _planned_file(resolved, layout=layout, key=module_item_id, output_dir=output_dir, fallback_title="lecture", conflict_strategy=conflict_strategy)
         skipped = plan.file_exists and conflict_strategy == 'skip'
+        if not skipped and plan.library is not None:
+            # The desktop shell writes the bytes itself, so the folder and its hidden metadata are made here.
+            plan.library.prepare()
         download_result = _download_result(resolved.result, plan, dry_run=True, written=False, skipped=skipped, file_size=file_size, conflict_strategy=conflict_strategy)
         return NativeDownloadPlanResult(
             result=download_result,
@@ -1192,8 +1264,14 @@ class SsuLectureService:
         conflict_strategy: str = 'skip',
         on_progress: Callable[[dict[str, Any]], None] | None = None,
         should_cancel: Callable[[], bool] | None = None,
+        module_name: str | None = None,
+        week_position: int | str | None = None,
     ) -> CanvasFileDownloadResult:
-        """Save one Canvas file into the course folder (same `.part` -> rename handling as lectures)."""
+        """Save one Canvas file into its week folder (same `.part` -> rename handling as lectures).
+
+        `module_name` / `week_position` come from the page item the file was opened from; without them the
+        week is taken from a "n주차" in the file title, else `기타`.
+        """
 
         def failure(code: str | None) -> CanvasFileDownloadResult:
             return CanvasFileDownloadResult(
@@ -1207,14 +1285,18 @@ class SsuLectureService:
             return failure("canvas_file_unavailable")
 
         stem, extension = _split_file_name(file.display_name)
-        plan = plan_download_path(
-            output_dir=output_dir,
-            course_name=course_name,
-            lecture_title=stem,
+        target = LibraryTarget(
+            key=f"canvas-{file_id}",
+            title=stem,
+            kind="canvas_file",
             content_id=f"canvas-{file_id}",
+            week_position=week_position,
+            module_name=module_name,
             extension=extension or "bin",
-            conflict_strategy=conflict_strategy,
         )
+        layout = CourseLayout.plan(output_dir / safe_filename(course_name, fallback="course"), [target], course_id="")
+        library = layout.ensure(target)
+        plan = plan_library_download(output_dir=output_dir, library=library, extension=extension or "bin", conflict_strategy=conflict_strategy)
         if plan.file_exists and conflict_strategy == 'skip':
             emit_progress(on_progress, {'stage': 'download_skipped', 'output_path': str(plan.file_path)})
             return CanvasFileDownloadResult(
@@ -1314,6 +1396,8 @@ class SsuLectureService:
             return BatchDownloadResult(ok=False, error_code=login_result.error_code, dry_run=dry_run, course_id=course_id, course_name=course_name, items=[])
 
         selected_lectures = _select_batch_lectures(content_items, module_item_ids=module_item_ids, include_completed=include_completed)
+        # Folder names for the whole course are decided here, before the parallel resolution (single thread, plan order).
+        layout = _course_layout(content_items, course_id=course_id, course_name=course_name, output_dir=output_dir)
         total = len(selected_lectures)
         numbered = list(enumerate(selected_lectures, start=1))
 
@@ -1328,7 +1412,7 @@ class SsuLectureService:
                 total=total,
                 lecture=lecture,
                 course_id=course_id,
-                course_name=course_name,
+                layout=layout,
                 output_dir=output_dir,
                 dry_run=dry_run,
                 conflict_strategy=conflict_strategy,
@@ -1397,6 +1481,7 @@ class SsuLectureService:
             course_id=course_id,
             course_name=course_name,
             items=items,
+            library_paths=layout.recorded(),
         )
 
     def _plan_batch_item(
@@ -1407,7 +1492,7 @@ class SsuLectureService:
         total: int,
         lecture: Any,
         course_id: int | str,
-        course_name: str,
+        layout: CourseLayout,
         output_dir: Path,
         dry_run: bool,
         conflict_strategy: str,
@@ -1417,7 +1502,7 @@ class SsuLectureService:
         module_item_id = lecture.module_item_id
         resolved = self._resolve_media_cached(client, course_id=course_id, module_item_id=module_item_id)
         result = resolved.result
-        plan, file_size = _planned_file(resolved, output_dir=output_dir, course_name=course_name, fallback_title=lecture.title or "lecture", conflict_strategy=conflict_strategy)
+        plan, file_size = _planned_file(resolved, layout=layout, key=module_item_id, output_dir=output_dir, fallback_title=lecture.title or "lecture", conflict_strategy=conflict_strategy)
         title = result.title or lecture.title
         item_kwargs = {"course_id": course_id, "module_item_id": module_item_id, "lecture": lecture, "dry_run": dry_run, "resolved": resolved, "plan": plan, "title": title, "file_size": file_size, "conflict_strategy": conflict_strategy}
         if dry_run:

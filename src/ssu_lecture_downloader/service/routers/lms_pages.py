@@ -68,6 +68,8 @@ def build_router(ctx: AppContext) -> APIRouter:
                 course_name=request.course_name,
                 output_dir=output_dir,
                 conflict_strategy=request.conflict_strategy,
+                module_name=request.module_name,
+                week_position=request.week_position,
             )
         )
         if not result.ok:

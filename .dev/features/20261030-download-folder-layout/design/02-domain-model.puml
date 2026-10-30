@@ -1,0 +1,163 @@
+@startuml download-folder-layout-domain
+title Download folder layout — domain model (PROPOSED; CURRENT parts marked)
+skinparam packageStyle rectangle
+hide empty members
+
+package "core (layout + metadata)" as core {
+
+  class LibraryLayout <<pure functions, core/library_layout.py>> {
+    + week_folder(week_position, module_name) : str
+    + lecture_stem(title) : str
+    + lecture_dir(course_dir, week, stem, content_id, index) : Path
+    + visible_names(stem, video_ext, audio_ext) : VisibleNames
+    + material_name(title, ext) : str
+    --
+    rules : PathRules (platform)
+  }
+
+  class PathRules <<value object>> {
+    max_name_bytes : 255
+    stem_max_bytes : 150
+    reserved_names : set (Windows only)
+    max_path_chars : int? (Windows 240)
+    + safe_name(text) : str
+  }
+
+  class LecturePaths <<value object>> {
+    lecture_dir : Path
+    stem : str
+    targets : {video, audio, srt, text, md, json}
+    existing : {role -> Path?} (new layout first, then legacy)
+    + exists(role) : bool
+    + source_video() : Path?
+  }
+
+  class LibraryIndex <<scan, per course folder>> {
+    + scan(course_dir) : LibraryIndex
+    + locate(content_id) : LecturePaths?
+    + locate_material(content_id) : Path?
+    + legacy_files(content_id) : map<role, Path>
+    + downloaded_path(content_id) : Path?
+    --
+    depth ≤ 2, symlinks not followed
+  }
+
+  class ItemMeta <<file .ssu/item.json, schema 1>> {
+    content_id
+    module_item_id
+    course_id
+    kind = lecture
+    lms_title
+    resolved_title
+    stem
+    week_folder
+    created_by : download | migration
+    app_version
+    layout_version = 1
+    created_at / updated_at
+  }
+
+  class MaterialsMeta <<file <week>/.ssu/materials.json>> {
+    entries : map<content_id, {file_name, kind, title}>
+  }
+
+  class LegacyNameParser <<pure>> {
+    + parse(name) : LegacyName?
+    --
+    "<title> [<id>]( (n))?<suffix>"
+  }
+}
+
+package "core (tidy-up)" as mig {
+  class MigrationRunner <<core/library_migration.py>> {
+    + plan(root, course_catalog) : TidyPlan
+    + apply(plan, should_cancel) : RunResult
+    + undo(run_id, should_cancel) : RunResult
+    + runs(root) : list<RunSummary>
+  }
+
+  class TidyPlan <<in memory, TTL 30 min, single use>> {
+    plan_id
+    root
+    moves : list<PlannedMove>
+    skips : list<Skip>
+    created_at
+  }
+
+  class PlannedMove <<value object>> {
+    source : Path
+    destination : Path
+    size
+    mtime_ns
+    inode
+    content_id
+    role
+    lecture_dir
+  }
+
+  class Journal <<file <root>/.ssu/migrations/<run_id>.jsonl>> {
+    + append(line) (fsync)
+    + read(run_id) : list<line>
+  }
+
+  class ExclusiveMove <<pure helper>> {
+    + move(src, dst) : moved | exists | changed
+    --
+    link+unlink (APFS) / check+rename fallback
+  }
+}
+
+package "service" as service {
+  class LibraryLock <<in AppContext>> {
+    tidy_running : bool
+    + begin_tidy(registries) : ok | library_busy
+    + check_download_start() : ok | library_tidy_running
+  }
+
+  class LecturePipeline <<from PL-PY-PIPELINE>> {
+    + run() : LectureResult
+    --
+    paths : LecturePaths (was _ItemPaths)
+  }
+
+  class Planner <<CURRENT plan_download_path, extended>> {
+    + plan(target : LibraryTarget, strategy) : DownloadPlan
+  }
+
+  class LibraryRouter <<service/routers/library.py>> {
+    GET legacy-summary
+    POST tidy/plan|apply|undo jobs
+    GET tidy/runs
+  }
+}
+
+LibraryLayout --> PathRules
+Planner --> LibraryIndex : dedup (new + legacy)
+Planner --> LibraryLayout : new targets
+LibraryIndex --> ItemMeta : reads
+LibraryIndex --> MaterialsMeta : reads
+LibraryIndex --> LegacyNameParser : legacy fallback
+LecturePipeline --> LecturePaths
+LecturePipeline --> ItemMeta : writes/updates
+MigrationRunner --> LegacyNameParser
+MigrationRunner --> LibraryLayout
+MigrationRunner --> LibraryIndex : merge into existing lecture dirs
+MigrationRunner --> TidyPlan
+TidyPlan "1" *-- "*" PlannedMove
+MigrationRunner --> Journal
+MigrationRunner --> ExclusiveMove
+LibraryRouter --> MigrationRunner
+LibraryRouter --> LibraryLock
+
+note as N1
+  Invariants
+  I1 No visible file or folder name contains the content id.
+  I2 A lecture's identity on disk is .ssu/item.json content_id; one content_id → at most one lecture dir per course.
+  I3 A download job never moves, renames or deletes a legacy file; it only reads it as a source.
+  I4 The tidy-up never deletes a user file and never replaces an existing path.
+  I5 Every move has a journal intent line before it and a done line after it.
+  I6 Undo touches only paths named in done lines of its run, and only when the moved file is unchanged.
+  I7 Tidy-up and Python download jobs never run at the same time (LibraryLock).
+  I8 "<stem> 자막.txt" is the last file of a transcript set to be committed.
+end note
+@enduml

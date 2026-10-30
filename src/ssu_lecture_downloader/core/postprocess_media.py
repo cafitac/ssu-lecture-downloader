@@ -32,6 +32,8 @@ class AudioExtractionRequest(BaseModel):
     output_dir: Path | None = None
     format: AudioFormat = 'wav'
     overwrite: bool = False
+    # Exact file to write (the artifact pipeline names it `<lecture> 음성.<format>`). None: `<input stem>.<format>` in `output_dir`.
+    output_path: Path | None = None
 
 
 class AudioExtractionResult(BaseModel):
@@ -817,7 +819,7 @@ def extract_audio(
     should_cancel: Callable[[], bool] | None = None,
 ) -> AudioExtractionResult:
     input_path = request.input_path.expanduser()
-    output_path = plan_audio_output_path(input_path, request.output_dir, request.format)
+    output_path = request.output_path.expanduser() if request.output_path else plan_audio_output_path(input_path, request.output_dir, request.format)
 
     def failure(code: str, message: str, install_hint: str | None = None) -> AudioExtractionResult:
         return AudioExtractionResult(ok=False, input_path=input_path, output_path=output_path, error_code=code, message=message, install_hint=install_hint)

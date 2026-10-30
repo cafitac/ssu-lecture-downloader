@@ -25,6 +25,7 @@ from typing import Any
 
 from ssu_lecture_downloader.core import postprocess_media, stt
 from ssu_lecture_downloader.core.jobs import Job, JobOutcome
+from ssu_lecture_downloader.core.library_layout import LecturePaths, explicit_lecture_paths
 from ssu_lecture_downloader.service.api_models import ArtifactDownloadRequest
 from ssu_lecture_downloader.service.app_context import AppContext
 from ssu_lecture_downloader.service.payloads import artifact_payload, batch_payload
@@ -35,25 +36,13 @@ logger = logging.getLogger(__name__)
 CANCELLED = "cancelled"
 
 
-@dataclass(frozen=True)
-class _ItemPaths:
-    video: Path
-    audio: Path
-    text: Path
-    md: Path
-    json: Path
-    srt: Path
-
-    @classmethod
-    def for_video(cls, video_path: Path, audio_format: str) -> _ItemPaths:
-        audio = postprocess_media.plan_audio_output_path(video_path, video_path.parent, audio_format)  # type: ignore[arg-type]
-        text, md, json_path = stt.transcript_output_paths(audio, video_path.parent)
-        return cls(video=video_path, audio=audio, text=text, md=md, json=json_path, srt=stt.transcript_srt_path(audio, video_path.parent))
-
-    @property
-    def transcript_exists(self) -> bool:
-        # The .txt is committed last by write_transcript_files, so it marks a complete set.
-        return self.text.exists()
+def _fallback_paths(video_path: Path, audio_format: str) -> LecturePaths:
+    """Files named after the video (`<video stem>.<format>`, `.transcript.*`): for an item the plan gave no library entry."""
+    audio = postprocess_media.plan_audio_output_path(video_path, video_path.parent, audio_format)  # type: ignore[arg-type]
+    text, md, json_path = stt.transcript_output_paths(audio, video_path.parent)
+    return explicit_lecture_paths(
+        video_path.parent, stem=video_path.stem, video=video_path, audio=audio, srt=stt.transcript_srt_path(audio, video_path.parent), text=text, md=md, json=json_path, audio_format=audio_format
+    )
 
 
 @dataclass(frozen=True)
@@ -115,7 +104,7 @@ class LecturePipeline:
         output_path = getattr(item, "output_path", None)
         if not output_path:
             return None
-        paths = _ItemPaths.for_video(Path(output_path), request.audio_format)
+        paths = owner.lecture_paths(item)
         outputs = owner.outputs
         video_exists = paths.video.exists()
 
@@ -169,7 +158,7 @@ class LecturePipeline:
         owner = self.owner
         return owner.ctx.gates.hold(MEDIA, should_cancel=owner.should_cancel, on_wait=lambda: owner.emit({"stage": "audio_waiting", "step": step, **self.context}))
 
-    def _ensure_mp4(self, item: Any, paths: _ItemPaths) -> str | None:
+    def _ensure_mp4(self, item: Any, paths: LecturePaths) -> str | None:
         owner = self.owner
         with self._media_slot("mp4"):
             video_result = postprocess_media.ensure_playable_mp4(
@@ -181,7 +170,7 @@ class LecturePipeline:
         owner.add_artifact({"kind": "mp4", **video_result.model_dump(mode="json"), "file_exists": getattr(item, "file_exists", False), "skipped": getattr(item, "skipped", False)})
         return None if video_result.ok else (video_result.error_code or "video_reconstruction_failed")
 
-    def _ensure_audio(self, paths: _ItemPaths, video_exists: bool) -> tuple[str | None, Path]:
+    def _ensure_audio(self, paths: LecturePaths, video_exists: bool) -> tuple[str | None, Path]:
         owner = self.owner
         request = owner.request
         if paths.audio.exists() and not request.overwrite_artifacts:
@@ -193,7 +182,8 @@ class LecturePipeline:
             return "source_video_not_found", paths.audio
         with self._media_slot("audio"):
             owner.emit({"stage": "extracting_audio", **self.context, "output_path": str(paths.video)})
-            audio_request = postprocess_media.AudioExtractionRequest(input_path=paths.video, output_dir=paths.video.parent, format=request.audio_format, overwrite=request.overwrite_artifacts)
+            paths.prepare()
+            audio_request = postprocess_media.AudioExtractionRequest(input_path=paths.video, output_dir=paths.lecture_dir, output_path=paths.targets["audio"], format=request.audio_format, overwrite=request.overwrite_artifacts)
             audio_result = postprocess_media.extract_audio(audio_request, on_progress=self._with_context(), should_cancel=owner.should_cancel)
         owner.add_artifact({"kind": request.audio_format, **audio_result.model_dump(mode="json")})
         if not audio_result.ok:
@@ -202,7 +192,7 @@ class LecturePipeline:
         owner.emit({"stage": "audio_done", **self.context, "output_path": str(audio_path), "file_size": audio_result.file_size, "progress_percent": 100})
         return None, audio_path
 
-    def _ensure_transcript(self, paths: _ItemPaths, audio_path: Path) -> str | None:
+    def _ensure_transcript(self, paths: LecturePaths, audio_path: Path) -> str | None:
         owner = self.owner
         request = owner.request
         if paths.transcript_exists and not request.overwrite_artifacts:
@@ -213,7 +203,7 @@ class LecturePipeline:
             return "audio_not_found"
         use_remote = request.stt_provider != "fake" and owner.ctx.remote_stt.is_enabled()
         provider = "remote" if use_remote else request.stt_provider
-        stt_request = stt.TranscriptionRequest(audio_path=audio_path, output_dir=paths.video.parent, provider=request.stt_provider, language=request.stt_language, model=request.stt_model, overwrite=request.overwrite_artifacts)
+        stt_request = stt.TranscriptionRequest(audio_path=audio_path, output_dir=paths.lecture_dir, provider=request.stt_provider, language=request.stt_language, model=request.stt_model, overwrite=request.overwrite_artifacts, paths=paths)
 
         def transcribe(**options: Any) -> stt.TranscriptionResult:
             owner.emit({"stage": "transcribing", **self.context, "output_path": str(audio_path), "provider": provider, "model": request.stt_model, "remote": use_remote})
@@ -266,6 +256,8 @@ class ArtifactPipeline:
         self._teardown = threading.Event()
         self._lectures: dict[str, LecturePipeline] = {}
         self._executor: ThreadPoolExecutor | None = None
+        # Where each lecture's files go, from the plan (module_item_id -> LecturePaths).
+        self.library_paths: dict[str, LecturePaths] = {}
 
     # ------------------------------------------------------------------ helpers
 
@@ -285,6 +277,13 @@ class ArtifactPipeline:
 
     def on_progress(self, event: dict[str, Any]) -> None:
         self.emit(event)
+
+    def lecture_paths(self, item: Any) -> LecturePaths:
+        """The lecture's files from the plan; an item without a plan entry keeps the names derived from its video path."""
+        planned = self.library_paths.get(str(getattr(item, "module_item_id", None)))
+        if planned is None:
+            return _fallback_paths(Path(str(item.output_path)), self.request.audio_format)
+        return planned.with_audio_format(self.request.audio_format)
 
     def add_artifact(self, artifact: dict[str, Any]) -> None:
         with self._artifacts_lock:
@@ -317,6 +316,7 @@ class ArtifactPipeline:
             include_completed=request.mode == "all",
         )
         plan_items = list(plan_result.items)
+        self.library_paths = dict(getattr(plan_result, "library_paths", None) or {})
         if not plan_result.ok and not any(getattr(item, "output_path", None) for item in plan_items):
             # Nothing can be processed: login / plan level failure, the job itself fails.
             codes = {getattr(item, "error_code", None) for item in plan_items}
@@ -447,7 +447,7 @@ class ArtifactPipeline:
     def _needs_video(self, item: Any) -> bool:
         """Does any requested artifact still require the source video bytes?"""
         request = self.request
-        paths = _ItemPaths.for_video(Path(str(item.output_path)), request.audio_format)
+        paths = self.lecture_paths(item)
         overwrite = request.overwrite_artifacts
         video_exists = paths.video.exists()
         needs_mp4_file = "mp4" in self.outputs and (overwrite or not video_exists)

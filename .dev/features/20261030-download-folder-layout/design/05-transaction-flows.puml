@@ -1,0 +1,162 @@
+@startuml flow1-download-into-layout
+title Flow 1 — Artifact job writes into the week → lecture layout, dedup over both layouts (PROPOSED)
+participant "routers/download.py\nPOST /api/download/artifacts/jobs" as R
+participant "LibraryLock" as K
+participant "ArtifactPipeline\n(PL-PY-PIPELINE)" as P
+participant "LmsService batch plan" as L
+participant "LibraryIndex(course_dir)" as I
+participant "LibraryLayout" as Y
+participant "LecturePipeline Lk" as LP
+participant "filesystem" as FS
+
+R -> K : check_download_start()
+alt tidy-up running
+  K --> R : 409 library_tidy_running
+end
+R -> P : run()
+P -> L : dry-run plan (CURRENT) with content items (week_position, module_name, title, lesson_position)
+L -> I : scan(course_dir) once per planning call
+I -> FS : list <week>/<lecture>/.ssu/item.json, <week>/.ssu/materials.json, legacy [id] files in course root
+L -> L : sort planned items by (lesson_position, content_id)  [single thread]
+loop each planned item
+  alt content_id found in new layout
+    I --> L : LecturePaths(existing lecture dir)
+  else found only in legacy names
+    I --> L : LecturePaths(new targets, existing roles = legacy files)
+  else not found
+    L -> Y : week_folder + stem + lecture_dir (suffix " (n)" if taken by another id / foreign)
+    Y --> L : LecturePaths(new targets)
+  end
+  L -> L : video role exists → skipped (output_path = existing file, maybe legacy)
+end
+P -> L : download needed videos (on_item_ready per lecture, PL-PY-PIPELINE)
+L -> FS : mkdir lecture dir; write .ssu/item.json (tmp + replace); download <stem>.mp4.part → <stem>.mp4
+L --> P : on_item_ready(item with LecturePaths)
+P -> LP : submit
+LP -> FS : audio → "<stem> 음성.mp3" (source = new or legacy video)
+LP -> FS : srt → .ssu/transcript.md → .ssu/transcript.json → "<stem> 자막.txt" (last)
+LP -> FS : update item.json (updated_at)
+LP -> FS : remove source video only if written by this job and mp4 not requested (CURRENT rule)
+note over LP
+  Never touches a legacy file except reading it.
+  A legacy [id].transcript.txt or [id].txt satisfies TXT → transcript skipped.
+end note
+@enduml
+
+@startuml flow2-tidy-plan
+title Flow 2 — Tidy-up preview (plan), read-only (PROPOSED)
+actor 학생 as U
+participant "UI TidyDialog" as UI
+participant "routers/library.py" as R
+participant "LibraryLock" as K
+participant "MigrationRunner.plan" as M
+participant "LmsService (read only)" as L
+participant "filesystem" as FS
+
+U -> UI : "정리하기" on the notice / "폴더 정리…" in Settings
+UI -> R : POST /api/library/tidy/plan/jobs {output_dir}
+R -> K : begin_plan() — any Python download/artifact job running?
+alt busy
+  K --> R : 409 library_busy
+end
+R -> M : plan(root) in a background job
+M -> FS : list course folders under root (depth 1), files in each (depth 2) — lstat, no symlink follow
+M -> M : LegacyNameParser → candidates grouped by content_id; others → skip(unknown_file | partial_download | not_a_regular_file)
+M -> L : course list (current term) → match folder name == safe(course name)
+alt folder not matched
+  M -> M : skip(course_not_matched) for its files
+else matched
+  M -> L : course content items (cached module list)
+  M -> FS : LibraryIndex.scan(course) — existing new-layout lectures
+  M -> M : target per content_id: existing lecture dir (merge) or LibraryLayout path\n(id not listed → 기타/<title> per Q6); role mapping (07 § Name mapping)
+  M -> M : destination already exists → skip(destination_exists); legacy .txt + .transcript.txt → skip(duplicate_transcript)
+end
+M -> M : TidyPlan(plan_id, moves with size/mtime_ns/inode, skips) kept in memory (TTL 30 min)
+M --> UI : job result: plan_id, counts, moves (from → to), skips (path, reason)
+UI --> U : preview list + "정리하기" / "취소"
+note over M : No write of any kind during planning (AC7).
+@enduml
+
+@startuml flow3-tidy-apply
+title Flow 3 — Tidy-up apply with write-ahead journal and exclusive move (PROPOSED)
+actor 학생 as U
+participant "UI TidyDialog" as UI
+participant "routers/library.py" as R
+participant "LibraryLock" as K
+participant "MigrationRunner.apply" as M
+participant "Journal" as J
+participant "ExclusiveMove" as X
+participant "filesystem" as FS
+
+U -> UI : press "정리하기" (explicit confirmation)
+UI -> R : POST /api/library/tidy/apply/jobs {plan_id}   [plan_id from Flow 2 result]
+R -> K : begin_tidy()
+alt download job running
+  K --> R : 409 library_busy
+else plan expired / used
+  R --> UI : 409 tidy_plan_expired → UI re-runs Flow 2
+end
+R -> M : apply(plan) in a background job (tidy_running = true)
+M -> J : header(run_id, root, counts)
+loop each lecture group (deterministic order)
+  M -> FS : mkdir week / lecture / .ssu as needed
+  M -> J : mkdir lines (only for dirs this run created)
+  loop each planned move of the group
+    M -> FS : lstat(source), exists(destination)
+    alt source missing / size or mtime_ns changed
+      M -> J : skip(source_missing | source_changed)
+    else destination exists
+      M -> J : skip(destination_exists)
+    else ok
+      M -> J : intent(source, destination, size, mtime_ns, inode)  fsync
+      M -> X : move(source, destination)
+      X -> FS : link(src, dst) [fails if dst exists] ; unlink(src)\n(fallback: exists check + rename)
+      M -> J : done(...) fsync
+    end
+  end
+  M -> FS : write/update .ssu/item.json (created_by migration) or week .ssu/materials.json
+  M -> J : meta_written(path, previous bytes or null)
+  M -> M : should_cancel? → stop after the current move (journal stays consistent)
+end
+M --> UI : run result (moved, skipped by reason, run_id, undo_available)
+K -> K : tidy_running = false (finally)
+note over M
+  Crash between intent and done: next plan sees the source gone and the destination present
+  with the journaled inode → nothing to do; link done but unlink not done → same inode at both
+  names → finishing step unlinks the source name only.
+end note
+@enduml
+
+@startuml flow4-tidy-undo
+title Flow 4 — Undo one run from its journal (PROPOSED)
+participant "UI (result dialog or Settings)" as UI
+participant "routers/library.py" as R
+participant "LibraryLock" as K
+participant "MigrationRunner.undo" as M
+participant "Journal" as J
+participant "filesystem" as FS
+
+UI -> R : GET /api/library/tidy/runs → newest run with undo_available
+UI -> R : POST /api/library/tidy/undo/jobs {run_id}
+R -> K : begin_tidy() (same rules as apply)
+R -> M : undo(run_id)
+M -> J : read lines; ignore done lines that already have undo_done
+loop done lines in reverse seq
+  M -> FS : lstat(destination); exists(source)
+  alt destination missing or changed (size / mtime_ns / inode)
+    M -> J : undo_skip(reason)
+  else original path occupied
+    M -> J : undo_skip(destination_exists)
+  else ok
+    M -> FS : exclusive move destination → source
+    M -> J : undo_done
+  end
+end
+loop meta_written lines in reverse
+  M -> FS : restore previous bytes, or remove the file the run created
+end
+loop mkdir lines in reverse
+  M -> FS : rmdir if empty (never recursive)
+end
+M --> UI : result (restored, skipped by reason)
+@enduml
