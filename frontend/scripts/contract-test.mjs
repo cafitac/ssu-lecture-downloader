@@ -1991,7 +1991,804 @@ const assistSource = readFileSync('src-tauri/src/assets/watch_assist.js', 'utf8'
   assert.ok(ci.includes('run: npm run tauri:build -- --bundles app\n'), 'ci.yml PR build uses the unsigned tauri:build script');
   assert.ok(!ci.includes('run: npm run tauri:build:release'), 'PR CI never runs the signed build');
 
-  // Inert: nothing in the frontend source uses the update plugins yet (AU-UPDATE-UI adds that).
-  const frontendSource = readTree('src', ['.ts', '.tsx']).map((file) => readFileSync(file, 'utf8')).join('\n');
-  assert.ok(!/plugin-updater|plugin-process|update_install_guard|prepare_for_update/.test(frontendSource), 'the updater must stay inert until AU-UPDATE-UI');
+  // The update plugins and the two update commands are reached through one adapter file only
+  // (AU-UPDATE-UI-BASIC added src/lib/updater.ts); nothing else in the frontend source touches them.
+  const frontendSource = readTree('src', ['.ts', '.tsx']).filter((file) => file !== join('src', 'lib', 'updater.ts')).map((file) => readFileSync(file, 'utf8')).join('\n');
+  assert.ok(!/@tauri-apps\/plugin-(updater|process)|invoke(<[^>]*>)?\(\s*['"](update_install_guard|prepare_for_update)['"]/.test(frontendSource), 'only src/lib/updater.ts may use the update plugins and commands');
+}
+
+// ---------------------------------------------------------------------------
+// AU-UPDATE-UI-BASIC: the update notice (chip + non-modal panel) and the install flow.
+// The plugin and command calls are mocked; nothing here touches a network or a real app.
+// ---------------------------------------------------------------------------
+{
+  for (const file of ['src/lib/appUpdate.ts', 'src/lib/updater.ts', 'src/lib/trackedWork.ts', 'src/hooks/useAppUpdate.ts', 'src/components/UpdateChip.tsx', 'src/styles/update.css']) {
+    assert.ok(existsSync(file), `missing ${file}`);
+  }
+  const au = await import('../src/lib/appUpdate.ts');
+  const { isTrackedWorkBusy, anyTransferBusy } = await import('../src/lib/trackedWork.ts');
+
+  // Exact Korean copy.
+  assert.equal(au.BUSY_NOTICE, '작업이 끝난 뒤 다시 시도해 주세요');
+  assert.equal(au.CHECK_INTERVAL_MS, 6 * 60 * 60 * 1000);
+  assert.equal(au.LATER_HIDE_MS, 24 * 60 * 60 * 1000);
+
+  // A fake clock: timers fire only when the test advances time.
+  function fakeClock() {
+    let now = 0;
+    let nextId = 1;
+    const timers = new Map();
+    const api = {
+      setTimeout: (callback, ms) => { const id = nextId++; timers.set(id, { callback, at: now + ms, every: null }); return id; },
+      clearTimeout: (id) => { timers.delete(id); },
+      setInterval: (callback, ms) => { const id = nextId++; timers.set(id, { callback, at: now + ms, every: ms }); return id; },
+      clearInterval: (id) => { timers.delete(id); },
+    };
+    async function advance(ms) {
+      const end = now + ms;
+      for (;;) {
+        const due = [...timers.entries()].filter(([, timer]) => timer.at <= end).sort((a, b) => a[1].at - b[1].at)[0];
+        if (!due) break;
+        const [id, timer] = due;
+        now = timer.at;
+        if (timer.every === null) timers.delete(id);
+        else timer.at += timer.every;
+        timer.callback();
+        await flush();
+      }
+      now = end;
+    }
+    return { api, advance, pending: () => timers.size };
+  }
+  const flush = async () => { for (let i = 0; i < 20; i += 1) await Promise.resolve(); };
+
+  const deferred = () => {
+    let resolve; let reject;
+    const promise = new Promise((res, rej) => { resolve = res; reject = rej; });
+    return { promise, resolve, reject };
+  };
+
+  /** A mocked plugin API that records every call in order. */
+  function mockApi(options = {}) {
+    const calls = [];
+    const update = {
+      version: '1.2.3',
+      notes: '- 자막 만들기가 빨라졌어요',
+      download: async (onProgress) => {
+        calls.push('download');
+        onProgress({ downloaded: 0, total: 1000 });
+        onProgress({ downloaded: 400, total: 1000 });
+        if (options.download) await options.download();
+        onProgress({ downloaded: 1000, total: 1000 });
+      },
+      install: async () => { calls.push('install'); if (options.install) await options.install(); },
+      close: async () => { calls.push('close'); },
+    };
+    const guards = [...(options.guards ?? [])];
+    const api = {
+      check: async () => {
+        calls.push('check');
+        if (options.checkError) throw new Error('offline');
+        return options.noUpdate ? null : update;
+      },
+      installGuard: async () => {
+        calls.push('guard');
+        if (options.guardError) throw new Error('guard unavailable');
+        return guards.length > 0 ? guards.shift() : { status: 'allowed' };
+      },
+      prepare: async () => { calls.push('prepare'); if (options.prepare) await options.prepare(); },
+      restartBackend: async () => { calls.push('restart'); if (options.restart) await options.restart(); },
+      relaunch: async () => { calls.push('relaunch'); if (options.relaunch) await options.relaunch(); },
+    };
+    return { api, calls, update };
+  }
+
+  function setup(options = {}, busy = () => false) {
+    const mock = mockApi(options);
+    const clock = fakeClock();
+    const logs = [];
+    const controller = au.createUpdateController({ api: mock.api, isWorkBusy: busy, timers: clock.api, log: (message) => logs.push(message) });
+    return { ...mock, clock, logs, controller };
+  }
+  const guardRefused = { status: 'refused', reason: 'download_active' };
+
+  // Launch check, then every 6 h; a failed or empty check is only logged and shows nothing.
+  {
+    const t = setup({ noUpdate: true });
+    t.controller.start();
+    await flush();
+    assert.deepEqual(t.calls, ['check']);
+    assert.equal(au.isChipVisible(t.controller.getState()), false);
+    await t.clock.advance(au.CHECK_INTERVAL_MS);
+    assert.deepEqual(t.calls, ['check', 'check'], 'second check after 6 h');
+    t.controller.stop();
+    await t.clock.advance(au.CHECK_INTERVAL_MS * 3);
+    assert.equal(t.calls.length, 2, 'stop clears the timer');
+    assert.equal(t.clock.pending(), 0);
+
+    const failing = setup({ checkError: true });
+    failing.controller.start();
+    await flush();
+    assert.equal(failing.controller.getState().phase, 'idle');
+    assert.equal(au.isChipVisible(failing.controller.getState()), false);
+    assert.ok(failing.logs.some((line) => line.includes('check failed')), 'a failed check is logged');
+    failing.controller.stop();
+  }
+
+  // AC8: an update that is found never interrupts. The controller works with no DOM at all, and the
+  // notification and sound APIs would throw if anything reached for them; only the state changes.
+  {
+    const trap = () => { throw new Error('the update notice must not touch this'); };
+    const saved = { Notification: globalThis.Notification, Audio: globalThis.Audio, document: globalThis.document, alert: globalThis.alert };
+    globalThis.Notification = trap;
+    globalThis.Audio = trap;
+    globalThis.alert = trap;
+    globalThis.document = new Proxy({}, { get: trap });
+    try {
+      const t = setup();
+      t.controller.start();
+      await flush();
+      const state = t.controller.getState();
+      assert.equal(state.phase, 'available');
+      assert.equal(au.isChipVisible(state), true);
+      assert.equal(au.chipLabel(state), '새 버전 1.2.3');
+      assert.equal(state.notes, '- 자막 만들기가 빨라졌어요');
+      assert.deepEqual(t.calls, ['check'], 'finding an update installs, downloads and stops nothing');
+      assert.equal(state.notice, null);
+      t.controller.stop();
+    } finally {
+      for (const [key, value] of Object.entries(saved)) {
+        if (value === undefined) delete globalThis[key];
+        else globalThis[key] = value;
+      }
+    }
+  }
+
+  // 나중에: the chip hides for 24 h; the 6 h checks inside the window are skipped; then it asks again.
+  {
+    const t = setup();
+    t.controller.start();
+    await flush();
+    t.controller.later();
+    assert.equal(au.isChipVisible(t.controller.getState()), false);
+    await t.clock.advance(au.LATER_HIDE_MS - 1000);
+    assert.equal(t.calls.filter((call) => call === 'check').length, 1, 'ticks inside the 24 h window do not check');
+    assert.equal(au.isChipVisible(t.controller.getState()), false);
+    await t.clock.advance(1000);
+    assert.equal(t.calls.filter((call) => call === 'check').length, 2, 'checked again when the 24 h are over');
+    assert.equal(au.isChipVisible(t.controller.getState()), true);
+    t.controller.stop();
+  }
+
+  // Busy: tracked UI work or a refusing guard keeps the flow in the panel and starts nothing.
+  {
+    let busy = true;
+    const t = setup({}, () => busy);
+    t.controller.start();
+    await flush();
+    await t.controller.update();
+    assert.equal(t.controller.getState().phase, 'available');
+    assert.equal(t.controller.getState().notice, '작업이 끝난 뒤 다시 시도해 주세요');
+    assert.deepEqual(t.calls, ['check'], 'tracked work blocks before any download or guard call');
+    busy = false;
+    await t.controller.update();
+    assert.equal(t.controller.getState().notice, null, 'the message goes away on the next try');
+    assert.deepEqual(t.calls, ['check', 'guard', 'download', 'guard', 'prepare', 'install', 'relaunch']);
+    t.controller.stop();
+
+    const refused = setup({ guards: [guardRefused] });
+    refused.controller.start();
+    await flush();
+    await refused.controller.update();
+    assert.equal(refused.controller.getState().notice, '작업이 끝난 뒤 다시 시도해 주세요');
+    assert.deepEqual(refused.calls, ['check', 'guard'], 'a refusing guard stops before the download');
+    refused.controller.stop();
+  }
+
+  // Happy path: order, progress, relaunch.
+  {
+    const gate = deferred();
+    const t = setup({ download: () => gate.promise });
+    t.controller.start();
+    await flush();
+    const seen = [];
+    t.controller.subscribe(() => seen.push(t.controller.getState().phase));
+    const running = t.controller.update();
+    await flush();
+    let state = t.controller.getState();
+    assert.equal(state.phase, 'downloading');
+    assert.equal(au.progressPercent(state.progress), 40);
+    assert.equal(au.progressText(state.progress), '내려받는 중이에요 40%');
+    assert.equal(au.chipLabel(state), '새 버전 1.2.3 · 받는 중 40%');
+    // A second click while the flow is in flight does nothing.
+    await t.controller.update();
+    assert.equal(t.calls.filter((call) => call === 'download').length, 1);
+    gate.resolve();
+    await running;
+    assert.deepEqual(t.calls, ['check', 'guard', 'download', 'guard', 'prepare', 'install', 'relaunch']);
+    assert.equal(t.controller.getState().phase, 'relaunching');
+    assert.ok(seen.indexOf('guarding') < seen.indexOf('downloading') && seen.indexOf('downloading') < seen.indexOf('installing') && seen.indexOf('installing') < seen.indexOf('relaunching'));
+    assert.ok(!t.calls.includes('restart'), 'a successful install never restarts the backend');
+    t.controller.stop();
+  }
+
+  // The guard is checked again after the download (work may have started meanwhile).
+  {
+    const late = setup({ guards: [{ status: 'allowed' }, guardRefused] });
+    late.controller.start();
+    await flush();
+    await late.controller.update();
+    assert.deepEqual(late.calls, ['check', 'guard', 'download', 'guard', 'close', 'check'], 'refused at the re-check: bytes dropped (close), checked again, no prepare, no install');
+    assert.equal(late.controller.getState().phase, 'available');
+    assert.equal(late.controller.getState().notice, '작업이 끝난 뒤 다시 시도해 주세요');
+    assert.equal(late.controller.getState().version, '1.2.3');
+    await late.controller.update();
+    assert.equal(late.calls.filter((call) => call === 'download').length, 2, 'the next click downloads again');
+    assert.equal(late.controller.getState().phase, 'relaunching');
+    late.controller.stop();
+
+    // When the check after the refusal finds nothing, the next click asks again before it downloads.
+    let lost = false;
+    const gone = setup({ guards: [{ status: 'allowed' }, guardRefused] });
+    const realCheck = gone.api.check;
+    gone.api.check = async () => (lost ? null : realCheck());
+    gone.controller.start();
+    await flush();
+    lost = true;
+    await gone.controller.update();
+    assert.equal(gone.controller.getState().phase, 'available');
+    assert.equal(gone.controller.getState().notice, '작업이 끝난 뒤 다시 시도해 주세요');
+    lost = false;
+    await gone.controller.update();
+    assert.equal(gone.controller.getState().phase, 'relaunching', 'asks again, then installs');
+    gone.controller.stop();
+
+    let busy = false;
+    const uiBusy = setup({ download: async () => { busy = true; } }, () => busy);
+    uiBusy.controller.start();
+    await flush();
+    await uiBusy.controller.update();
+    assert.ok(!uiBusy.calls.includes('prepare') && !uiBusy.calls.includes('install'));
+    assert.deepEqual(uiBusy.calls.slice(-2), ['close', 'check'], 'tracked work seen at the re-check also drops the bytes');
+    assert.equal(uiBusy.controller.getState().notice, '작업이 끝난 뒤 다시 시도해 주세요');
+    uiBusy.controller.stop();
+  }
+
+  // Download failure: Korean error with retry, the old app is untouched, no restart is needed.
+  {
+    let fail = true;
+    const t = setup({ download: async () => { if (fail) throw new Error('network'); } });
+    t.controller.start();
+    await flush();
+    await t.controller.update();
+    const state = t.controller.getState();
+    assert.equal(state.phase, 'failed');
+    assert.equal(state.error, '업데이트를 내려받지 못했어요. 인터넷 연결을 확인하고 다시 시도해 주세요.');
+    assert.equal(state.canRetry, true);
+    assert.ok(!t.calls.includes('prepare') && !t.calls.includes('restart'));
+    fail = false;
+    await t.controller.update();
+    assert.equal(t.controller.getState().phase, 'relaunching', '다시 시도 runs the flow again');
+    t.controller.stop();
+  }
+
+  // prepare_for_update failures. Refused: back to the waiting message. backend_starting / unavailable:
+  // nothing was stopped, so no restart. An unknown failure may have stopped it: restart to be safe.
+  {
+    const refused = setup({ prepare: async () => { throw { code: 'refused', reason: 'watch_active' }; } });
+    refused.controller.start();
+    await flush();
+    await refused.controller.update();
+    assert.equal(refused.controller.getState().phase, 'available');
+    assert.equal(refused.controller.getState().notice, '작업이 끝난 뒤 다시 시도해 주세요');
+    assert.ok(!refused.calls.includes('install') && !refused.calls.includes('restart'));
+    assert.deepEqual(refused.calls.slice(-3), ['prepare', 'close', 'check'], 'a refusing prepare drops the bytes as well');
+    refused.controller.stop();
+
+    const unavailable = setup({ prepare: async () => { throw { code: 'backend_unavailable' }; } });
+    unavailable.controller.start();
+    await flush();
+    await unavailable.controller.update();
+    assert.equal(unavailable.controller.getState().phase, 'failed');
+    assert.equal(unavailable.controller.getState().error, '업데이트를 준비하지 못했어요. 다시 시도해 주세요.');
+    assert.equal(unavailable.controller.getState().canRetry, true);
+    assert.ok(!unavailable.calls.includes('install') && !unavailable.calls.includes('restart'), 'nothing was stopped, so no restart');
+    unavailable.controller.stop();
+
+    const starting = setup({ prepare: async () => { throw { code: 'backend_starting' }; } });
+    starting.controller.start();
+    await flush();
+    await starting.controller.update();
+    assert.equal(starting.controller.getState().error, '앱이 아직 시작하는 중이에요. 잠시 후 다시 시도해 주세요.');
+    assert.ok(!starting.calls.includes('install') && !starting.calls.includes('restart'));
+    starting.controller.stop();
+
+    const unknown = setup({ prepare: async () => { throw new Error('ipc'); } });
+    unknown.controller.start();
+    await flush();
+    await unknown.controller.update();
+    assert.equal(unknown.controller.getState().error, '업데이트를 준비하지 못했어요. 다시 시도해 주세요.');
+    assert.deepEqual(unknown.calls.slice(-2), ['prepare', 'restart']);
+    assert.ok(!unknown.calls.includes('install'));
+    assert.equal(unknown.controller.getState().canRetry, true);
+    unknown.controller.stop();
+
+    // ... and when that restart does not bring the backend back, the copy asks to reopen the app, with no retry.
+    const unknownDead = setup({ prepare: async () => { throw new Error('ipc'); }, restart: async () => { throw new Error('no'); } });
+    unknownDead.controller.start();
+    await flush();
+    await unknownDead.controller.update();
+    assert.equal(unknownDead.controller.getState().error, au.INSTALL_FAILED_RESTART);
+    assert.equal(unknownDead.controller.getState().canRetry, false);
+    unknownDead.controller.stop();
+  }
+
+  // Install failure: no restart is offered or called between prepare Ok and the install result; a failure
+  // then restarts the backend and shows a Korean error with retry.
+  {
+    const installGate = deferred();
+    let failInstall = true;
+    const t = setup({ install: async () => { if (failInstall) await installGate.promise; } });
+    t.controller.start();
+    await flush();
+    const running = t.controller.update();
+    await flush();
+    assert.equal(t.controller.getState().phase, 'installing');
+    assert.deepEqual(t.calls.slice(-2), ['prepare', 'install']);
+    assert.ok(!t.calls.includes('restart'), 'no backend restart while the install is pending');
+    assert.equal(t.controller.getState().canRetry, false, 'nothing to retry or restart yet');
+    await t.controller.update();
+    await t.controller.update();
+    assert.equal(t.calls.filter((call) => call === 'prepare').length, 1);
+    installGate.reject(new Error('swap failed'));
+    await running;
+    assert.deepEqual(t.calls.slice(-3), ['prepare', 'install', 'restart'], 'restart comes after the install result');
+    let state = t.controller.getState();
+    assert.equal(state.phase, 'failed');
+    assert.equal(state.error, '업데이트를 설치하지 못했어요. 지금 쓰던 버전은 그대로 쓸 수 있어요. 다시 시도해 주세요.');
+    assert.equal(state.canRetry, true);
+    failInstall = false;
+    await t.controller.update();
+    state = t.controller.getState();
+    assert.equal(state.phase, 'relaunching', 'retry installs and relaunches');
+    assert.equal(t.calls.at(-1), 'relaunch');
+    t.controller.stop();
+
+    // Every recovery attempt is announced once, successful or not (the app re-reads its backend status).
+    let restored = 0;
+    const announced = au.createUpdateController({ ...{ api: setup({ install: async () => { throw new Error('x'); } }).api, isWorkBusy: () => false, timers: fakeClock().api }, onRecoveryAttempted: () => { restored += 1; } });
+    announced.start();
+    await flush();
+    await announced.update();
+    assert.equal(restored, 1);
+    announced.stop();
+    const silent = au.createUpdateController({ api: setup({ install: async () => { throw new Error('x'); }, restart: async () => { throw new Error('no'); } }).api, isWorkBusy: () => false, timers: fakeClock().api, onRecoveryAttempted: () => { restored += 1; } });
+    silent.start();
+    await flush();
+    await silent.update();
+    assert.equal(restored, 2, 'a failed recovery is announced too, so the app shows the real backend state');
+    silent.stop();
+
+    // The restart itself failing asks for a manual reopen.
+    const both = setup({ install: async () => { throw new Error('swap failed'); }, restart: async () => { throw new Error('no'); } });
+    both.controller.start();
+    await flush();
+    await both.controller.update();
+    assert.equal(both.controller.getState().error, '업데이트를 설치하지 못했어요. 앱을 한 번 닫았다가 다시 열어 주세요.');
+    // The copy says to close and reopen, so no "다시 시도" is offered next to it (and the panel shows none).
+    assert.equal(both.controller.getState().canRetry, false);
+    assert.equal(au.chipLabel(both.controller.getState()), '새 버전 1.2.3 · 앱을 다시 열어 주세요');
+    const callsBefore = both.calls.length;
+    await both.controller.update();
+    both.controller.later();
+    assert.equal(both.calls.length, callsBefore, 'no retry flow starts');
+    assert.equal(both.controller.getState().phase, 'failed');
+    both.controller.stop();
+  }
+
+  // The install worked but the relaunch did not: say so, no retry, never restart the (stopped) backend.
+  {
+    const t = setup({ relaunch: async () => { throw new Error('exit'); } });
+    t.controller.start();
+    await flush();
+    await t.controller.update();
+    const state = t.controller.getState();
+    assert.equal(state.phase, 'failed');
+    assert.equal(state.error, '업데이트는 설치됐어요. 앱을 닫았다가 다시 열면 새 버전으로 시작해요.');
+    assert.equal(state.canRetry, false);
+    assert.ok(!t.calls.includes('restart'));
+    const before = t.calls.length;
+    await t.controller.update();
+    assert.equal(t.calls.length, before, 'no retry offered');
+    t.controller.stop();
+  }
+
+  // Tracked work helper.
+  {
+    const idle = { downloadActive: false, componentsInstalling: false, attachmentSaving: false };
+    assert.equal(isTrackedWorkBusy(idle), false);
+    assert.equal(isTrackedWorkBusy({ ...idle, downloadActive: true }), true);
+    assert.equal(isTrackedWorkBusy({ ...idle, componentsInstalling: true }), true);
+    assert.equal(isTrackedWorkBusy({ ...idle, attachmentSaving: true }), true);
+    const { busyAfterBackendStatus } = await import('../src/lib/trackedWork.ts');
+    assert.equal(busyAfterBackendStatus(true, 'ready'), true, 'kept while the backend is ready');
+    assert.equal(busyAfterBackendStatus(true, 'failed'), false, 'no job survives a dead sidecar');
+    assert.equal(busyAfterBackendStatus(true, 'starting'), false);
+    assert.equal(busyAfterBackendStatus(false, 'ready'), false);
+    assert.equal(anyTransferBusy({}), false);
+    assert.equal(anyTransferBusy({ a: { transfers: { f1: 'done', f2: 'error' } } }), false);
+    assert.equal(anyTransferBusy({ a: { transfers: { f1: 'done' } }, b: { transfers: { f2: 'busy' } } }), true);
+  }
+
+  // The adapter against a mocked Tauri bridge: which plugin calls and commands are made, in which form.
+  {
+    const bridgeCalls = [];
+    const savedWindow = Object.getOwnPropertyDescriptor(globalThis, 'window');
+    const savedInternals = Object.getOwnPropertyDescriptor(globalThis, '__TAURI_INTERNALS__');
+    globalThis.window = globalThis;
+    globalThis.__TAURI_INTERNALS__ = {
+      transformCallback: (callback) => { const id = 9000 + bridgeCalls.length; globalThis[`_${id}`] = callback; return id; },
+      unregisterCallback() {},
+      invoke: async (command, args) => {
+        bridgeCalls.push(command);
+        if (command === 'plugin:updater|check') return { rid: 7, currentVersion: '0.1.0', version: '0.2.0', body: '  ', rawJson: {} };
+        if (command === 'plugin:updater|download') {
+          args.onEvent.onmessage({ event: 'Started', data: { contentLength: 200 } });
+          args.onEvent.onmessage({ event: 'Progress', data: { chunkLength: 50 } });
+          args.onEvent.onmessage({ event: 'Progress', data: { chunkLength: 100 } });
+          args.onEvent.onmessage({ event: 'Finished' });
+          return undefined;
+        }
+        if (command === 'update_install_guard') return { status: 'allowed' };
+        if (command === 'backend_supervision_status') return { state: 'ready', mode: 'managed', error: null, log_path: null };
+        return null;
+      },
+    };
+    try {
+      const { tauriUpdateApi } = await import('../src/lib/updater.ts');
+      const found = await tauriUpdateApi.check();
+      assert.equal(found.version, '0.2.0');
+      assert.equal(found.notes, null, 'blank release notes count as none');
+      const steps = [];
+      await found.download((step) => steps.push(step));
+      assert.deepEqual(steps.at(-1), { downloaded: 150, total: 200 });
+      await found.install();
+      assert.deepEqual(await tauriUpdateApi.installGuard(), { status: 'allowed' });
+      await tauriUpdateApi.prepare();
+      await tauriUpdateApi.restartBackend();
+      await tauriUpdateApi.relaunch();
+      await found.close();
+      assert.deepEqual(
+        [...new Set(bridgeCalls)],
+        ['plugin:updater|check', 'plugin:updater|download', 'plugin:updater|install', 'update_install_guard', 'prepare_for_update', 'backend_restart', 'backend_supervision_status', 'plugin:process|restart', 'plugin:resources|close'],
+      );
+    } finally {
+      if (savedWindow) Object.defineProperty(globalThis, 'window', savedWindow);
+      else delete globalThis.window;
+      if (savedInternals) Object.defineProperty(globalThis, '__TAURI_INTERNALS__', savedInternals);
+      else delete globalThis.__TAURI_INTERNALS__;
+    }
+  }
+
+  // The component, rendered with real React on the server. The notice is a chip plus an opt-in panel:
+  // no dialog, overlay, modal flag, autofocus or live alert; the other top-bar controls are not touched.
+  {
+    const { createServer } = await import('vite');
+    const React = (await import('react')).default;
+    const { renderToStaticMarkup } = await import('react-dom/server');
+    const server = await createServer({ root: process.cwd(), server: { middlewareMode: true, hmr: false, watch: null }, appType: 'custom', logLevel: 'error', optimizeDeps: { noDiscovery: true } });
+    try {
+      const { UpdateChipView, UpdateChip } = await server.ssrLoadModule('/src/components/UpdateChip.tsx');
+      const { BackendScreen } = await server.ssrLoadModule('/src/components/Screens.tsx');
+      const failedStatus = { state: 'failed', mode: 'failed', error: 'x', log_path: null };
+      const normal = renderToStaticMarkup(React.createElement(BackendScreen, { status: failedStatus, onRetry() {} }));
+      assert.ok(normal.includes('다시 시도</button>'), 'the backend screen offers its retry');
+      const blocked = renderToStaticMarkup(React.createElement(BackendScreen, { status: failedStatus, onRetry() {}, retryBlockedText: '업데이트하는 중이에요' }));
+      assert.ok(blocked.includes('업데이트하는 중이에요') && !blocked.includes('다시 시도</button>'), 'while an update installs the retry is replaced by a status line');
+      const base = { phase: 'available', version: '1.2.3', notes: '- 빨라졌어요', hidden: false, progress: null, notice: null, error: null, canRetry: false };
+      const render = (state, open) => renderToStaticMarkup(React.createElement(UpdateChipView, { state, open, onToggle() {}, onUpdate() {}, onLater() {} }));
+      const noInterruption = (html) => {
+        assert.ok(!/role="(alertdialog|dialog|alert)"|aria-modal|autofocus|<dialog|class="[^"]*(overlay|backdrop|toast)/i.test(html), `interrupting markup in: ${html}`);
+        assert.ok(!/\sdisabled(=|\s|>)/.test(html.replace(/<button type="button" class="btn btn-sm update-go" disabled/g, '')), 'the notice disables no other control');
+      };
+
+      // Closed: one small button, nothing else.
+      const closed = render(base, false);
+      assert.match(closed, /^<div class="update-anchor"><button[^>]*class="update-chip"[^>]*aria-expanded="false"[^>]*>.*새 버전 1\.2\.3<\/button><\/div>$/);
+      noInterruption(closed);
+      const heldView = (state, busyHeld) => renderToStaticMarkup(React.createElement(UpdateChipView, { state, open: true, busyHeld, onToggle() {}, onUpdate() {}, onLater() {} }));
+      assert.ok(heldView(base, true).includes('앞에서 하던 작업이 끝났는지 확인하려면 다시 로그인해 주세요'), 'the login-screen panel says that earlier work may still run');
+      assert.ok(!heldView(base, false).includes('앞에서 하던 작업'), 'no hint when nothing is held');
+      const cornerHtml = renderToStaticMarkup(React.createElement(UpdateChip, { update: { state: base, update() {}, later() {} }, corner: true }));
+      assert.match(cornerHtml, /^<div class="update-host update-corner"><div class="update-anchor"><button[^>]*class="update-chip"/);
+      noInterruption(cornerHtml);
+      assert.equal(renderToStaticMarkup(React.createElement(UpdateChip, { update: { state: { ...base, hidden: true }, update() {}, later() {} }, corner: true })), '<div class="update-host update-corner"></div>');
+      assert.equal(render({ ...base, hidden: true }, false), '', '나중에 hides the chip');
+      assert.equal(render({ ...base, phase: 'idle', version: null }, false), '', 'no release: no chip');
+      assert.equal(render({ ...base, phase: 'checking', version: null }, false), '', 'a check in progress shows nothing');
+
+      // Open panel: notes and both buttons, a plain section.
+      const opened = render(base, true);
+      noInterruption(opened);
+      assert.match(opened, /<section class="update-panel"/);
+      assert.ok(opened.includes('- 빨라졌어요') && opened.includes('지금 업데이트') && opened.includes('나중에'));
+      assert.ok(render({ ...base, notes: null }, true).includes('변경 내용이 따로 적혀 있지 않아요.'));
+
+      // Busy message, progress, error with retry.
+      const busy = render({ ...base, notice: au.BUSY_NOTICE }, true);
+      assert.ok(busy.includes('작업이 끝난 뒤 다시 시도해 주세요') && busy.includes('지금 업데이트'));
+      noInterruption(busy);
+      const downloading = render({ ...base, phase: 'downloading', progress: { downloaded: 420, total: 1000 } }, true);
+      assert.ok(downloading.includes('내려받는 중이에요 42%') && downloading.includes('aria-valuenow="42"') && downloading.includes('새 버전 1.2.3 · 받는 중 42%'));
+      assert.ok(!downloading.includes('지금 업데이트') && !downloading.includes('나중에'), 'no buttons while the install runs');
+      noInterruption(downloading);
+      const installing = render({ ...base, phase: 'installing' }, true);
+      assert.ok(installing.includes('설치하는 중이에요') && !installing.includes('다시 시도') && !installing.includes('재시작') && !installing.includes('다시 켜기'), 'no restart offered while installing');
+      const failed = render({ ...base, phase: 'failed', error: au.INSTALL_FAILED, canRetry: true }, true);
+      assert.ok(failed.includes('다시 시도') && failed.includes(au.INSTALL_FAILED));
+      const stuck = render({ ...base, phase: 'failed', error: au.RELAUNCH_FAILED, canRetry: false }, true);
+      assert.ok(stuck.includes(au.RELAUNCH_FAILED) && !stuck.includes('다시 시도</button>'));
+      noInterruption(failed);
+    } finally {
+      await server.close();
+    }
+
+    // Source rules for the interactive part (events, focus, sound, notifications).
+    const chipSource = readFileSync('src/components/UpdateChip.tsx', 'utf8');
+    const hookSource = readFileSync('src/hooks/useAppUpdate.ts', 'utf8');
+    for (const [name, source] of [['UpdateChip.tsx', chipSource], ['useAppUpdate.ts', hookSource], ['appUpdate.ts', readFileSync('src/lib/appUpdate.ts', 'utf8')]]) {
+      assert.ok(!/autoFocus|showModal|createPortal|aria-modal|role="(dialog|alertdialog|alert)"|Notification|new Audio|AudioContext|alert\(|confirm\(|setFocus|sendNotification|preventDefault|stopPropagation|focusTrap|\.blur\(/.test(source), `${name} must not interrupt`);
+    }
+    assert.equal((chipSource.match(/\.focus\(/g) ?? []).length, 1, 'only Esc inside the panel returns focus to the chip');
+    assert.ok(/event\.key !== 'Escape'/.test(chipSource) && /addEventListener\('mousedown'/.test(chipSource), 'Esc and an outside click close the panel');
+    assert.ok(/if \(!open\) return undefined;/.test(chipSource), 'the listeners exist only while the panel is open');
+    assert.ok(/<UpdateChip update=\{update\} \/>/.test(readFileSync('src/components/TopBar.tsx', 'utf8')), 'TopBar mounts the chip');
+    // One controller for the whole app, created in App above every early return: the check needs
+    // neither the backend nor a session, and "나중에" survives sign-out and sign-in.
+    const appSource = readFileSync('src/App.tsx', 'utf8');
+    assert.equal(readTree('src', ['.ts', '.tsx']).filter((file) => readFileSync(file, 'utf8').includes('useAppUpdate(')).length, 2, 'the hook is defined once and called once');
+    const appFn = appSource.slice(appSource.indexOf('export function App()'));
+    assert.ok(appFn.indexOf('useAppUpdate(') > 0 && appFn.indexOf('useAppUpdate(') < appFn.indexOf('BackendScreen') && appFn.indexOf('useAppUpdate(') < appFn.indexOf('SessionGate'), 'the controller is created before the backend and session branches');
+    assert.equal((appSource.match(/<UpdateChip update=\{update\} corner( busyHeld=\{workBusy\})? \/>/g) ?? []).length, 2, 'corner chip on the backend-failure screen and on the login screen');
+    // The workspace reports tracked work up and never clears it on unmount (a job may still run behind the login screen);
+    // sign-out waits for tracked work, like it does for downloads.
+    assert.ok(/onWorkBusyChange\(workBusy\)/.test(appSource) && !/onWorkBusyChange\(false\)/.test(appSource), 'unmount keeps the last busy value');
+    assert.ok(/workBusy=\{workBusy\}/.test(appSource), 'the settings dialog gets the tracked-work flag');
+    assert.ok(/disabled=\{signingOut \|\| busy \|\| workBusy\}/.test(readFileSync('src/components/SettingsDialog.tsx', 'utf8')), 'sign-out waits for component installs and attachment saves');
+    // While an update installs, the backend screen's retry would restart the backend under the installer.
+    assert.ok(/retryBlockedText=\{installing \? '업데이트하는 중이에요' : undefined\}/.test(appSource) && /isInstalling\(update\.state\.phase\)/.test(appSource), 'backend retry replaced while installing');
+    assert.ok(/useAppUpdate\(workBusy, \{ onRecoveryAttempted: refresh \}\)/.test(appSource), 'every recovery attempt makes the app re-read its status');
+    assert.ok(/setWorkBusy\(\(held\) => busyAfterBackendStatus\(held, status\.state\)\)/.test(appSource), 'a held busy flag is dropped when the backend is not ready');
+    assert.ok(/<UpdateChip update=\{update\} corner busyHeld=\{workBusy\} \/>/.test(appSource), 'the login-screen chip explains a held busy flag');
+    assert.ok(/const refresh = useCallback\(\(\) => setAttempt/.test(readFileSync('src/hooks/useBackendStatus.ts', 'utf8')));
+    const updateCss = readFileSync('src/styles/update.css', 'utf8');
+    assert.ok(!/inset:\s*0|backdrop/.test(updateCss), 'no full-screen layer');
+    assert.deepEqual(updateCss.match(/[^}]*position:\s*fixed[^}]*/g)?.map((rule) => rule.trim().split('{')[0].trim()), ['.update-host.update-corner'], 'only the small corner chip is fixed');
+    assert.ok(readFileSync('src/styles.css', 'utf8').includes("@import './styles/update.css';"));
+  }
+}
+
+// ---------------------------------------------------------------------------
+// AU-UPDATE-UI-BASIC repair: backend recovery after a failed install, and the hook lifecycle.
+// ---------------------------------------------------------------------------
+{
+  const tauriBridge = (handlers) => {
+    const calls = [];
+    const saved = { window: Object.getOwnPropertyDescriptor(globalThis, 'window'), internals: Object.getOwnPropertyDescriptor(globalThis, '__TAURI_INTERNALS__') };
+    globalThis.window = globalThis;
+    globalThis.__TAURI_INTERNALS__ = {
+      transformCallback: () => 1,
+      unregisterCallback() {},
+      invoke: async (command, args) => {
+        calls.push(command);
+        return handlers[command] ? handlers[command](args) : null;
+      },
+    };
+    const restore = () => {
+      if (saved.window) Object.defineProperty(globalThis, 'window', saved.window);
+      else delete globalThis.window;
+      if (saved.internals) Object.defineProperty(globalThis, '__TAURI_INTERNALS__', saved.internals);
+      else delete globalThis.__TAURI_INTERNALS__;
+    };
+    return { calls, restore };
+  };
+  const desktop = await import('../src/lib/desktop.ts');
+  const { recoverBackend, waitForBackendSettled } = await import('../src/lib/updater.ts');
+
+  // After backend_restart the cached connection (old port, old token) must not survive. A request made
+  // while the sidecar is still starting caches the old port with no token, so the reset comes only
+  // after the status left `starting`.
+  {
+    let connections = 0;
+    let statusCalls = 0;
+    const requestedWhileStarting = [];
+    const statuses = ['starting', 'starting', 'ready'];
+    const bridge = tauriBridge({
+      backend_api_connection: () => { connections += 1; return { base_url: `http://127.0.0.1:${9000 + connections}`, token: connections === 1 ? 'old' : 'new' }; },
+      backend_supervision_status: async () => {
+        const state = statuses[Math.min(statusCalls, statuses.length - 1)];
+        statusCalls += 1;
+        if (state === 'starting') requestedWhileStarting.push((await desktop.backendApiConnection()).baseUrl); // a request during the restart
+        return { state, mode: 'managed', error: null, log_path: null };
+      },
+    });
+    try {
+      desktop.resetBackendConnection();
+      assert.equal((await desktop.backendApiConnection()).token, 'old');
+      assert.equal((await desktop.backendApiConnection()).token, 'old');
+      assert.equal(connections, 1, 'the connection is cached');
+      await recoverBackend({ intervalMs: 5, timeoutMs: 2000 });
+      assert.ok(bridge.calls.indexOf('backend_restart') < bridge.calls.indexOf('backend_supervision_status'), 'status is read after the restart');
+      assert.ok(statusCalls >= 3, 'waited until the status was no longer starting');
+      assert.deepEqual(requestedWhileStarting, ['http://127.0.0.1:9001', 'http://127.0.0.1:9001'], 'while the backend is starting nothing new is cached (no reset before it settled)');
+      assert.equal(connections, 1);
+      const next = await desktop.backendApiConnection();
+      assert.equal(connections, 2, 'the next connection request after recovery asks backend_api_connection again');
+      assert.deepEqual(next, { baseUrl: 'http://127.0.0.1:9002', token: 'new' });
+      assert.equal((await desktop.backendApiConnection()).baseUrl, 'http://127.0.0.1:9002');
+      assert.equal(connections, 2);
+    } finally {
+      desktop.resetBackendConnection();
+      bridge.restore();
+    }
+  }
+
+  // A backend that stays down, or never leaves `starting`, makes the recovery reject (bounded wait).
+  {
+    let statusCalls = 0;
+    const bridge = tauriBridge({ backend_supervision_status: () => { statusCalls += 1; return { state: 'failed', mode: 'failed', error: 'x', log_path: null }; } });
+    try {
+      await assert.rejects(recoverBackend({ intervalMs: 5, timeoutMs: 500 }));
+    } finally { bridge.restore(); }
+    let starting = 0;
+    const slow = tauriBridge({ backend_supervision_status: () => { starting += 1; return { state: 'starting', mode: 'checking', error: null, log_path: null }; } });
+    try {
+      assert.equal(await waitForBackendSettled({ intervalMs: 5, timeoutMs: 60 }), null, 'gives up after the timeout');
+    } finally { slow.restore(); }
+
+    // The wait leaves no timer behind (polling stopped, deadline cleared), observed by tracking live timers.
+    const live = new Set();
+    const realSet = globalThis.setTimeout; const realClear = globalThis.clearTimeout;
+    globalThis.setTimeout = (callback, ms, ...rest) => { const handle = realSet((...args) => { live.delete(handle); callback(...args); }, ms, ...rest); live.add(handle); return handle; };
+    globalThis.clearTimeout = (handle) => { live.delete(handle); realClear(handle); };
+    const quiet = tauriBridge({ backend_supervision_status: () => ({ state: 'starting', mode: 'checking', error: null, log_path: null }) });
+    try {
+      assert.equal(await waitForBackendSettled({ intervalMs: 5, timeoutMs: 40 }), null);
+      for (let i = 0; i < 30; i += 1) await Promise.resolve();
+      assert.equal(live.size, 0, 'no polling or deadline timer survives the end of the wait');
+    } finally {
+      globalThis.setTimeout = realSet; globalThis.clearTimeout = realClear;
+      quiet.restore();
+    }
+
+    // Still `starting` at the bound: the recovery rejects and leaves the cached connection alone.
+    let fetches = 0;
+    const stuck = tauriBridge({
+      backend_api_connection: () => { fetches += 1; return { base_url: 'http://127.0.0.1:9100', token: 'old' }; },
+      backend_supervision_status: () => ({ state: 'starting', mode: 'checking', error: null, log_path: null }),
+    });
+    try {
+      desktop.resetBackendConnection();
+      await desktop.backendApiConnection();
+      await assert.rejects(recoverBackend({ intervalMs: 5, timeoutMs: 30 }));
+      await desktop.backendApiConnection();
+      assert.equal(fetches, 1, 'a timeout while `starting` does not reset the cached connection');
+    } finally {
+      desktop.resetBackendConnection();
+      stuck.restore();
+    }
+
+    // One documented bound, at least Rust's 90 s startup timeout plus a margin.
+    const updaterModule = await import('../src/lib/updater.ts');
+    assert.match(readFileSync('src-tauri/src/backend.rs', 'utf8'), /const BACKEND_STARTUP_TIMEOUT: Duration = Duration::from_secs\(90\);/);
+    assert.equal(updaterModule.BACKEND_STARTUP_TIMEOUT_MS, 90_000);
+    assert.ok(updaterModule.BACKEND_RECOVERY_TIMEOUT_MS >= 90_000 + 10_000, 'the recovery wait outlasts a backend start');
+    assert.equal((readFileSync('src/lib/updater.ts', 'utf8').match(/timeoutMs = /g) ?? []).length, 1);
+    assert.ok(statusCalls >= 1);
+  }
+
+  // The hook (React hooks replaced by a recording fake): it starts the controller under the Tauri
+  // runtime, never outside it, and stops it on unmount.
+  {
+    const { createServer } = await import('vite');
+    const fakeReact = `
+      let slots; let index; let effects;
+      export const __begin = () => { slots = []; index = 0; effects = []; };
+      export const __effects = () => effects;
+      const slot = (init) => { const i = index++; if (!(i in slots)) slots[i] = init(); return i; };
+      export const __rerender = () => { index = 0; effects = []; };
+      export const useRef = (value) => slots[slot(() => ({ current: value }))];
+      export const useState = (init) => {
+        const i = slot(() => (typeof init === 'function' ? init() : init));
+        return [slots[i], (value) => { slots[i] = typeof value === 'function' ? value(slots[i]) : value; }];
+      };
+      export const useCallback = (callback) => callback;
+      export const useMemo = (compute) => compute();
+      export const useEffect = (effect) => { effects.push(effect); };
+      export const useSyncExternalStore = (subscribe, getSnapshot) => getSnapshot();
+    `;
+    const server = await createServer({
+      root: process.cwd(),
+      server: { middlewareMode: true, hmr: false, watch: null },
+      appType: 'custom',
+      logLevel: 'error',
+      optimizeDeps: { noDiscovery: true },
+      ssr: { noExternal: ['react'] },
+      plugins: [{ name: 'fake-react', enforce: 'pre', resolveId: (id) => (id === 'react' ? '\0fake-react' : null), load: (id) => (id === '\0fake-react' ? fakeReact : null) }],
+    });
+    try {
+      const fake = await server.ssrLoadModule('\0fake-react');
+      const { useAppUpdate } = await server.ssrLoadModule('/src/hooks/useAppUpdate.ts');
+      const installs = { set: 0, cleared: 0 };
+      const realSet = globalThis.setInterval; const realClear = globalThis.clearInterval;
+      globalThis.setInterval = (callback, ms) => { installs.set += 1; return realSet(callback, ms); };
+      globalThis.clearInterval = (handle) => { installs.cleared += 1; return realClear(handle); };
+      const runHook = async (inTauri) => {
+        const bridge = inTauri ? tauriBridge({}) : null;
+        if (!inTauri) delete globalThis.__TAURI_INTERNALS__;
+        const calls = [];
+        const api = { check: async () => { calls.push('check'); return null; }, installGuard: async () => ({ status: 'allowed' }), prepare: async () => {}, restartBackend: async () => {}, relaunch: async () => {} };
+        fake.__begin();
+        const result = useAppUpdate(false, { api });
+        const cleanups = fake.__effects().map((effect) => effect()).filter(Boolean);
+        for (let i = 0; i < 20; i += 1) await Promise.resolve();
+        const checkedAtMount = [...calls];
+        cleanups.forEach((cleanup) => cleanup());
+        bridge?.restore();
+        return { result, checkedAtMount };
+      };
+      try {
+        const outside = await runHook(false);
+        assert.deepEqual(outside.checkedAtMount, [], 'no check outside the Tauri runtime');
+        assert.equal(installs.set, 0);
+        const inside = await runHook(true);
+        assert.deepEqual(inside.checkedAtMount, ['check'], 'checks at mount under the Tauri runtime, without any session or backend');
+        assert.equal(installs.set, 1, 'the 6 h timer is set');
+        assert.equal(installs.cleared, 1, 'and cleared on unmount');
+        assert.equal(inside.result.state.phase === 'idle' || inside.result.state.phase === 'checking', true);
+        assert.equal(typeof inside.result.update, 'function');
+        assert.equal(typeof inside.result.later, 'function');
+      } finally {
+        globalThis.setInterval = realSet;
+        globalThis.clearInterval = realClear;
+      }
+
+      // The auth-error path of a download: a running job whose poll comes back "session expired" is made
+      // terminal in state, so `active` (the busy flag the app update reads) drops before the workspace is
+      // replaced by the login screen.
+      const { useDownloads } = await server.ssrLoadModule('/src/hooks/useDownloads.ts');
+      const realFetch = globalThis.fetch;
+      const realTimeout = globalThis.setTimeout;
+      const responses = [{ job_id: 'job-1', status: 'running' }, { job_id: 'job-1', status: 'failed', error_code: 'session_expired' }];
+      globalThis.fetch = async () => ({ ok: true, status: 200, json: async () => responses.shift() });
+      const pollTicks = [];
+      globalThis.setTimeout = (callback, ms, ...rest) => (ms === 1500 ? pollTicks.push(callback) : realTimeout(callback, ms, ...rest));
+      let cleanups = [];
+      try {
+        let authErrors = 0;
+        const options = { downloadDir: '/x', onAuthError: () => { authErrors += 1; }, onError() {} };
+        fake.__begin();
+        const render = () => { fake.__rerender(); return useDownloads(options); };
+        let downloads = useDownloads(options);
+        assert.equal(downloads.active, false);
+        const started = await downloads.start({ courseId: 1, courseName: 'c', kind: 'material', outputs: ['mp4'], items: [{ id: 'a', rawId: 1, title: 't', sizeBytes: null }] });
+        downloads = render();
+        assert.equal(started, true);
+        assert.equal(downloads.active, true, 'a running job is busy');
+        cleanups = fake.__effects().map((effect) => effect()).filter(Boolean);
+        assert.equal(pollTicks.length, 1, 'the job is polled');
+        pollTicks[0]();
+        for (let i = 0; i < 40; i += 1) await Promise.resolve();
+        downloads = render();
+        assert.equal(authErrors, 1, 'the login screen is requested');
+        assert.equal(downloads.active, false, 'the failed job is terminal, so no busy flag is left behind');
+      } finally {
+        cleanups.forEach((cleanup) => cleanup());
+        globalThis.fetch = realFetch;
+        globalThis.setTimeout = realTimeout;
+      }
+    } finally {
+      await server.close();
+    }
+  }
 }

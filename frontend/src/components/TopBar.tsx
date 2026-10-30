@@ -3,6 +3,8 @@ import { GRADES_LABEL } from '../lib/grades';
 import type { TermSummary } from '../lib/types';
 import { watchAllHint, watchAllLabel } from '../lib/watch';
 import { RefreshIcon, SettingsIcon } from './Icons';
+import type { AppUpdate } from '../hooks/useAppUpdate';
+import { UpdateChip } from './UpdateChip';
 
 /** LMS term names when the backend has them; otherwise this term vs. earlier ones. */
 function termName(term: TermSummary, currentId: number | null): string {
@@ -26,6 +28,8 @@ interface Props {
   watchAllCount: number;
   watchAllLoading: boolean;
   queueActive: boolean;
+  /** The app update notice (state of the App-level controller). */
+  update: AppUpdate;
   onWatchAll: () => void;
   onToggleDeadlines: () => void;
   onToggleGrades: () => void;
@@ -34,7 +38,7 @@ interface Props {
   onOpenSettings: () => void;
 }
 
-export function TopBar({ terms, termId, listState, busy, dueSoonCount, deadlinesOpen, gradesOpen, watchAllCount, watchAllLoading, queueActive, onWatchAll, onToggleDeadlines, onToggleGrades, onTermChange, onRefresh, onOpenSettings }: Props) {
+export function TopBar({ terms, termId, listState, busy, dueSoonCount, deadlinesOpen, gradesOpen, watchAllCount, watchAllLoading, queueActive, update, onWatchAll, onToggleDeadlines, onToggleGrades, onTermChange, onRefresh, onOpenSettings }: Props) {
   const currentTermId = terms.find((term) => term.is_current)?.term_id ?? null;
   const loading = listState === 'loading';
   return (
@@ -53,6 +57,7 @@ export function TopBar({ terms, termId, listState, busy, dueSoonCount, deadlines
         </select>
       )}
       <span className="topbar-spacer" />
+      <UpdateChip update={update} />
       <button
         type="button"
         className="btn btn-sm"
