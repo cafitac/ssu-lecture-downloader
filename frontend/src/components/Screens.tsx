@@ -1,6 +1,7 @@
 import type { FormEvent, ReactNode } from 'react';
-import { DIAGNOSTICS_SAVED_TEXT, useDiagnosticsSave } from '../hooks/useDiagnosticsSave';
-import type { DiagnosticsOutcome } from '../hooks/useDiagnosticsSave';
+import { useDiagnosticsSave } from '../hooks/useDiagnosticsSave';
+import { DIAGNOSTICS_SAVED_TEXT } from '../lib/diagnosticsSave';
+import type { DiagnosticsOutcome } from '../lib/diagnosticsSave';
 import type { BackendSupervisionStatus } from '../lib/types';
 import { AlertIcon } from './Icons';
 
