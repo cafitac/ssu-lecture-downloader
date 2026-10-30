@@ -235,7 +235,7 @@ STD_KWARGS = {
 
 def test_launch_spawns_chrome_in_its_own_session_with_exact_argv_and_std_streams(tmp_path):
     env = _manager(tmp_path)
-    proc, client, _events = env.manager._launch(SimpleNamespace(stop=threading.Event()))
+    proc, client, _events = env.manager._launch(SimpleNamespace(run_id="test-run", stop=threading.Event()))
     try:
         popen = FakePopen.instances[0]
         assert proc is popen
@@ -262,7 +262,7 @@ def test_background_launch_goes_through_open_and_records_the_chrome_main_pid(tmp
         (12, f"/x/Google Chrome Helper --type=renderer --user-data-dir={profile}"),
     ]
     env = _manager(tmp_path, background=True, rows=rows)
-    proc, client, _events = env.manager._launch(SimpleNamespace(stop=threading.Event()))
+    proc, client, _events = env.manager._launch(SimpleNamespace(run_id="test-run", stop=threading.Event()))
     try:
         popen = FakePopen.instances[0]
         assert proc is popen
@@ -298,7 +298,7 @@ def _background_launched(tmp_path, *, ignore_term):
     profile = tmp_path / "support" / "chrome-watch-profile"
     rows = [(11, f"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome --user-data-dir={profile}")]
     env = _manager(tmp_path, background=True, ignore_term=ignore_term, rows=rows)
-    proc, client, _events = env.manager._launch(SimpleNamespace(stop=threading.Event()))
+    proc, client, _events = env.manager._launch(SimpleNamespace(run_id="test-run", stop=threading.Event()))
     client.close()
     assert _pidfile(env).read_text(encoding="utf-8") == "11"
     return env, proc

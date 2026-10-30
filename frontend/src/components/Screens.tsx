@@ -1,4 +1,7 @@
 import type { FormEvent, ReactNode } from 'react';
+import { useDiagnosticsSave } from '../hooks/useDiagnosticsSave';
+import { DIAGNOSTICS_SAVED_TEXT } from '../lib/diagnosticsSave';
+import type { DiagnosticsOutcome } from '../lib/diagnosticsSave';
 import type { BackendSupervisionStatus } from '../lib/types';
 import { AlertIcon } from './Icons';
 
@@ -60,6 +63,36 @@ export function LoginScreen({ notice, busy, onSubmit }: LoginProps) {
   );
 }
 
+interface DiagnosticsViewProps {
+  busy: boolean;
+  outcome: DiagnosticsOutcome | null;
+  onSave: () => void;
+  onReveal: () => void;
+}
+
+/** Secondary action of the failure screen: the logs are what explains why the server did not start. */
+export function DiagnosticsButtonView({ busy, outcome, onSave, onReveal }: DiagnosticsViewProps) {
+  return (
+    <div className="center-diagnostics">
+      <button type="button" className="btn btn-sm btn-ghost" disabled={busy} onClick={onSave}>
+        {busy ? <><Spinner />저장하는 중…</> : '진단 파일 저장'}
+      </button>
+      {outcome?.ok && (
+        <>
+          <p className="center-fine" role="status">{DIAGNOSTICS_SAVED_TEXT}</p>
+          <button type="button" className="btn btn-sm btn-ghost" onClick={onReveal}>폴더에서 보기</button>
+        </>
+      )}
+      {outcome && !outcome.ok && <p className="center-fine" role="alert">{outcome.text}</p>}
+    </div>
+  );
+}
+
+function DiagnosticsButton() {
+  const diagnostics = useDiagnosticsSave();
+  return <DiagnosticsButtonView busy={diagnostics.busy} outcome={diagnostics.outcome} onSave={() => void diagnostics.save()} onReveal={() => void diagnostics.reveal()} />;
+}
+
 interface BackendProps {
   /** Set while an app update runs: the retry is replaced by this status line, so it cannot restart the backend under the installer. */
   retryBlockedText?: string;
@@ -86,6 +119,7 @@ export function BackendScreen({ status, onRetry, retryBlockedText }: BackendProp
         {retryBlockedText
           ? <p className="center-status" role="status"><Spinner />{retryBlockedText}</p>
           : <button type="button" className="btn btn-lg" onClick={onRetry}>다시 시도</button>}
+        <DiagnosticsButton />
       </CenterCard>
     );
   }

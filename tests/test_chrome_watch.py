@@ -1,4 +1,5 @@
 import json
+import logging
 import signal
 import threading
 import time
@@ -239,7 +240,8 @@ def test_websocket_transport_talks_to_a_real_local_socket_server():
 # ------------------------------------------------------------------------ queue behavior
 
 
-def test_queue_plays_every_lecture_in_one_tab_and_closes_chrome(tmp_path):
+def test_queue_plays_every_lecture_in_one_tab_and_closes_chrome(tmp_path, caplog):
+    caplog.set_level(logging.INFO, logger=cw.logger.name)
     harness = Harness(tmp_path, [FakePlayer(resume=True), FakePlayer()])
     started = harness.manager.start(items(2))
     assert started["state"] in {"starting", "playing"} and started["total"] == 2
@@ -266,7 +268,17 @@ def test_queue_plays_every_lecture_in_one_tab_and_closes_chrome(tmp_path):
     assert popen.kwargs["start_new_session"] is True
     assert (4242, signal.SIGTERM) in harness.kills.calls
     assert not (harness.profile.parent / "chrome-watch.pid").exists()
+    assert "chrome_watch chrome_stop run_id=" in caplog.text
     assert harness.profile.is_dir()  # the profile stays
+    messages = [record.getMessage() for record in caplog.records if record.name == cw.logger.name]
+    for event in ("run_start", "item_start", "item_end", "run_end", "progress"):
+        assert any(message.startswith(f"chrome_watch {event} ") for message in messages)
+    assert "state=finished phase=playing error_code=- done_count=2 skipped_count=0" in messages[-1]
+    assert any("kind=resume ok=True" in message for message in messages)
+    assert any("kind=front ok=True" in message for message in messages)
+    assert any("action=minimize" in message for message in messages)
+    for message in messages:
+        assert not any(secret.lower() in message.lower() for secret in ("cookie", "token", "http", "://", "?", "1주차", "UX방법론"))
 
 
 def test_start_button_and_resume_yes_are_pressed_with_trusted_mouse_events(tmp_path):
@@ -308,11 +320,17 @@ def test_helper_script_is_installed_for_new_documents_and_never_fakes_playback(t
     assert binding["params"] == {"name": "ssuWatchSignal"}
 
 
-def test_a_stalled_lecture_is_reloaded_once_then_skipped_with_a_visible_notice(tmp_path):
+def test_a_stalled_lecture_is_reloaded_once_then_skipped_with_a_visible_notice(tmp_path, caplog):
+    caplog.set_level(logging.INFO, logger=cw.logger.name)
     harness = Harness(tmp_path, [FakePlayer(stall=True), FakePlayer()])
     harness.manager.start(items(2))
     status = harness.finish()
 
+    harness.wait_thread()
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("chrome_watch stall " in message and "seconds_without_progress=" in message and "action=skip" in message for message in messages)
+    assert any("chrome_watch skip " in message and "reason=stalled" in message for message in messages)
+    assert any("chrome_watch item_end " in message and "module_item_id=1 outcome=skipped elapsed_seconds=" in message for message in messages)
     assert status["state"] == "finished"
     assert [item["state"] for item in status["items"]] == ["skipped", "done"]
     assert status["items"][0]["reason"] == cw.STALL_SKIP_REASON
@@ -346,7 +364,8 @@ def test_next_skips_the_current_lecture_as_a_user_choice(tmp_path):
     assert not [n for n in status["notices"] if n["kind"] == "skipped"]  # no alarm for a deliberate skip
 
 
-def test_stop_kills_the_chrome_process_group_and_keeps_the_profile(tmp_path):
+def test_stop_kills_the_chrome_process_group_and_keeps_the_profile(tmp_path, caplog):
+    caplog.set_level(logging.INFO, logger=cw.logger.name)
     harness = Harness(tmp_path, [FakePlayer(stall=True)])
     harness.manager.start(items(1))
     harness.wait(lambda s: len(harness.browser.navigations) >= 1)
@@ -354,6 +373,8 @@ def test_stop_kills_the_chrome_process_group_and_keeps_the_profile(tmp_path):
     assert status["state"] == "stopped" and status["active"] is False
     harness.wait_thread()
     assert (4242, signal.SIGTERM) in harness.kills.calls
+    assert "chrome_watch user_stop run_id=" in caplog.text
+    assert "chrome_watch chrome_stop run_id=" in caplog.text
     assert harness.profile.is_dir()
     assert not (harness.profile.parent / "chrome-watch.pid").exists()
 
@@ -445,7 +466,35 @@ def test_a_lecture_whose_plan_fails_is_skipped_and_the_queue_goes_on(tmp_path):
     assert status["notices"][0]["kind"] == "skipped"
 
 
-def test_a_lost_lms_login_fails_the_run_with_the_error_code(tmp_path):
+@pytest.mark.parametrize("failure, reason_code", [
+    (cw.ChromeWatchPlanError("service_error"), "service_error"),
+    (cw.ChromeWatchPlanError("network_timeout"), "network_timeout"),
+    (RuntimeError("private detail"), "plan_exception"),
+    (None, "launch_url_missing"),
+    (cw.ChromeWatchPlanError("unsafe code\n"), "plan_error"),
+])
+def test_plan_skip_logs_explicit_reason_code(tmp_path, caplog, failure, reason_code):
+    caplog.set_level(logging.INFO, logger=cw.logger.name)
+
+    def plan(*args):
+        if failure is not None:
+            raise failure
+        return {"launch_url": ""}
+
+    harness = Harness(tmp_path, [], plan=plan)
+    harness.manager.start(items(1))
+    status = harness.finish()
+    harness.wait_thread()
+    assert status["state"] == "finished" and status["skipped_count"] == 1
+    messages = [record.getMessage() for record in caplog.records]
+    assert any(message.startswith("chrome_watch skip ") and message.endswith(f" reason={reason_code}") for message in messages)
+    assert status["items"][0]["reason"] == cw.plan_error_reason(failure.code if isinstance(failure, cw.ChromeWatchPlanError) else None)
+    if reason_code == "plan_exception":
+        assert any(message.startswith("chrome_watch plan_failed run_id=") and message.endswith(" error=RuntimeError") for message in messages)
+
+
+def test_a_lost_lms_login_fails_the_run_with_the_error_code(tmp_path, caplog):
+    caplog.set_level(logging.INFO, logger=cw.logger.name)
     def plan(course_id, module_item_id, course_name):
         raise cw.ChromeWatchPlanError("session_expired", auth=True)
 
@@ -455,9 +504,13 @@ def test_a_lost_lms_login_fails_the_run_with_the_error_code(tmp_path):
     assert status["state"] == "failed" and status["error_code"] == "session_expired"
     harness.wait_thread()
     assert (4242, signal.SIGTERM) in harness.kills.calls
+    assert "chrome_watch run_failed run_id=" in caplog.text
+    assert "error_code=session_expired" in caplog.text
+    assert "state=failed phase=" in caplog.text
 
 
-def test_closing_the_chrome_window_ends_the_run_with_a_clear_code(tmp_path):
+def test_closing_the_chrome_window_ends_the_run_with_a_clear_code(tmp_path, caplog):
+    caplog.set_level(logging.INFO, logger=cw.logger.name)
     harness = Harness(tmp_path, [FakePlayer(stall=True)])
     harness.manager.start(items(1))
     harness.wait(lambda s: len(harness.browser.navigations) >= 1)
@@ -465,15 +518,22 @@ def test_closing_the_chrome_window_ends_the_run_with_a_clear_code(tmp_path):
     status = harness.finish()
     assert status["state"] == "failed" and status["error_code"] == "chrome_window_closed"
     assert "Chrome 창이 닫혀" in status["error_message"]
+    harness.wait_thread()
+    assert "chrome_watch window_closed run_id=" in caplog.text
+    assert "chrome_watch chrome_stop run_id=" in caplog.text
 
 
-def test_a_dropped_connection_ends_the_run(tmp_path):
+def test_a_dropped_connection_ends_the_run(tmp_path, caplog):
+    caplog.set_level(logging.INFO, logger=cw.logger.name)
     harness = Harness(tmp_path, [FakePlayer(stall=True)])
     harness.manager.start(items(1))
     harness.wait(lambda s: len(harness.browser.navigations) >= 1)
     harness.browser.incoming.put(None)
     status = harness.finish()
     assert status["state"] == "failed" and status["error_code"] == "chrome_closed"
+    harness.wait_thread()
+    assert "chrome_watch cdp_disconnected run_id=" in caplog.text
+    assert "reason=CdpClosed expected=false" in caplog.text
 
 
 def test_status_payload_while_playing_carries_position_and_course(tmp_path):
@@ -637,3 +697,29 @@ def test_leave_site_prompts_are_answered_without_waiting():
     assert sent[-1]["method"] == "Page.handleJavaScriptDialog" and sent[-1]["params"] == {"accept": True} and sent[-1]["sessionId"] == "S1"
     source = open(cw.__file__, encoding="utf-8").read()
     assert '"Page.javascriptDialogOpening"' in source and 'params.get("type") == "beforeunload"' in source
+
+
+@pytest.mark.parametrize("failure", ["process_exit", "worker_error"])
+def test_worker_failure_diagnostics(tmp_path, caplog, monkeypatch, failure):
+    caplog.set_level(logging.INFO, logger=cw.logger.name)
+    harness = Harness(tmp_path, [FakePlayer(stall=True)])
+    if failure == "worker_error":
+        def fail_attach(self):
+            raise RuntimeError("test worker failure")
+
+        monkeypatch.setattr(cw._Playback, "attach_page", fail_attach)
+    harness.manager.start(items(1))
+    if failure == "process_exit":
+        harness.wait(lambda s: len(harness.browser.navigations) >= 1)
+        monkeypatch.setattr(FakePopen.instances[0], "poll", lambda: 7)
+    status = harness.finish()
+    harness.wait_thread()
+    assert status["state"] == "failed"
+    if failure == "process_exit":
+        assert "exit_code=7 expected=false" in caplog.text
+        assert "chrome_watch chrome_exit run_id=" in caplog.text
+        assert "chrome_watch window_closed run_id=" in caplog.text
+    else:
+        record = next(r for r in caplog.records if "chrome_watch worker_error run_id=" in r.getMessage())
+        assert record.exc_info is not None
+        assert status["error_code"] == "chrome_watch_error"

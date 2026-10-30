@@ -23,6 +23,7 @@ import atexit
 import json
 import logging
 import queue
+import re
 import threading
 import time
 import uuid
@@ -362,6 +363,7 @@ class ChromeWatchManager:
             run = self._run
             thread = run.thread if run is not None and run.active else None
             if run is not None and run.active:
+                logger.info("chrome_watch user_stop run_id=%s", run.run_id)
                 run.stop.set()
         if thread is not None:
             thread.join(self.timings.stop_join)
@@ -398,7 +400,7 @@ class ChromeWatchManager:
             if thread is not None and thread.is_alive():
                 thread.join(self.timings.stop_join)  # a finished run may still be closing its Chrome
         except Exception:  # noqa: BLE001 - exit path
-            logger.exception("chrome watch shutdown")
+            logger.exception("chrome_watch shutdown_error")
         self._kill_stale()
 
     # ---------------------------------------------------------------------- status
@@ -477,6 +479,7 @@ class ChromeWatchManager:
     def _work(self, run: _Run) -> None:
         proc: Any = None
         client: CdpClient | None = None
+        logger.info("chrome_watch run_start run_id=%s item_count=%s background=%s", run.run_id, len(run.items), self._background_launch)
         try:
             proc, client, events = self._launch(run)
             playback = _Playback(self, run, client, events, proc)
@@ -501,17 +504,20 @@ class ChromeWatchManager:
             with self._lock:
                 run.state = "stopped"
         except _WindowClosed:
+            logger.info("chrome_watch window_closed run_id=%s", run.run_id)
             self._fail(run, "chrome_window_closed", "Chrome 창이 닫혀 자동 재생을 멈췄어요.")
         except ChromeWatchError as exc:
+            logger.info("chrome_watch run_failed run_id=%s error_code=%s", run.run_id, exc.code or type(exc).__name__)
             self._fail(run, exc.code, exc.message)
-        except (CdpClosed, CdpTimeout):
+        except (CdpClosed, CdpTimeout) as exc:
+            logger.info("chrome_watch cdp_disconnected run_id=%s reason=%s expected=%s", run.run_id, type(exc).__name__, str(run.stop.is_set()).lower())
             if run.stop.is_set():
                 with self._lock:
                     run.state = "stopped"
             else:
                 self._fail(run, "chrome_closed", "Chrome과의 연결이 끊겨 자동 재생을 멈췄어요.")
         except Exception:  # noqa: BLE001 - the worker must always leave a terminal state
-            logger.exception("chrome watch worker failed")
+            logger.exception("chrome_watch worker_error run_id=%s", run.run_id)
             self._fail(run, "chrome_watch_error", "자동 재생 중 예상하지 못한 오류가 생겼어요.")
         finally:
             with self._lock:
@@ -520,6 +526,12 @@ class ChromeWatchManager:
                 client.close()
             if proc is not None:
                 self._terminate(proc)
+                logger.info("chrome_watch chrome_stop run_id=%s exit_code=%s", run.run_id, proc.poll())
+            logger.info(
+                "chrome_watch run_end run_id=%s state=%s phase=%s error_code=%s done_count=%s skipped_count=%s",
+                run.run_id, run.state, run.phase, run.error_code or "-", sum(item.state == "done" for item in run.items),
+                sum(item.state == "skipped" for item in run.items),
+            )
 
     def _fail(self, run: _Run, code: str, message: str, *, level: str = "error") -> None:
         if run.stop.is_set():
@@ -563,6 +575,8 @@ class ChromeWatchManager:
                 sleep=self._sleep,
             )
         except ChromeWatchError as exc:
+            if exc.code == "chrome_exited":
+                logger.info("chrome_watch chrome_exit run_id=%s exit_code=%s expected=%s", run.run_id, proc.poll(), str(run.stop.is_set()).lower())
             self._terminate(proc)
             if run.stop.is_set():
                 raise _Stopped() from exc
@@ -571,6 +585,7 @@ class ChromeWatchManager:
             self._chrome_pid = self._process_tree.find_main_pid(profile)
             if self._chrome_pid is not None:
                 self._write_pidfile(self._chrome_pid)
+        logger.info("chrome_watch chrome_launch run_id=%s pid=%s pid_found=%s", run.run_id, self._chrome_pid, self._chrome_pid is not None)
         events: "queue.Queue[tuple[str, dict[str, Any], str | None]]" = queue.Queue()
         try:
             transport = self._connect(f"ws://127.0.0.1:{port}{path}")
@@ -587,6 +602,7 @@ class ChromeWatchManager:
             events.put((method, params, session))
 
         client = CdpClient(transport, on_event, default_timeout=self.timings.call_timeout)
+        logger.info("chrome_watch cdp_connected run_id=%s", run.run_id)
         holder.append(client)
         return proc, client, events
 
@@ -658,6 +674,7 @@ class _Playback:
         """Un-minimize without bringing Chrome to the front."""
         if not self.page_target:
             return
+        logger.info("chrome_watch window run_id=%s action=restore", self.run.run_id)
         try:
             window = self.call("Browser.getWindowForTarget", {"targetId": self.page_target})
             if "windowId" in window:
@@ -668,6 +685,7 @@ class _Playback:
     def minimize_window(self) -> None:
         if not self.page_target:
             return
+        logger.info("chrome_watch window run_id=%s action=minimize", self.run.run_id)
         try:
             window = self.call("Browser.getWindowForTarget", {"targetId": self.page_target})
             if "windowId" in window:
@@ -842,17 +860,21 @@ class _Playback:
             run.duration = None
             run.paused = False
         run.skip.clear()
+        started = self.m._clock()
+        logger.info("chrome_watch item_start run_id=%s index=%s total=%s module_item_id=%s", run.run_id, index + 1, len(run.items), item.module_item_id)
         outcome = self._play_item(item)
         with self.m._lock:
             if outcome == "done":
                 item.state = "done"
+            logger.info("chrome_watch item_end run_id=%s module_item_id=%s outcome=%s elapsed_seconds=%.1f", run.run_id, item.module_item_id, outcome, self.m._clock() - started)
             run.position = None
             run.duration = None
 
-    def skip_item(self, item: WatchItem, reason: str, *, notice: str | None = None, level: str = "error") -> str:
+    def skip_item(self, item: WatchItem, reason: str, reason_code: str, *, notice: str | None = None, level: str = "error") -> str:
         with self.m._lock:
             item.state = "skipped"
             item.reason = reason
+        logger.info("chrome_watch skip run_id=%s module_item_id=%s reason=%s", self.run.run_id, item.module_item_id, reason_code)
         if notice:
             self.m._notice(self.run, "skipped", level, notice, item_title=item.title, reason=reason)
         return "skipped"
@@ -871,6 +893,9 @@ class _Playback:
         self._open(plan)
         clock = self.m._clock
         activity_at = clock()
+        progress_started = activity_at
+        milestones: set[int] = set()
+        next_progress_at = activity_at + 300
         last_poll = 0.0
         last_front = -1e9
         last_resume = -1e9
@@ -882,7 +907,7 @@ class _Playback:
             if run.stop.is_set():
                 raise _Stopped()
             if run.skip.is_set():
-                return self.skip_item(item, USER_SKIP_REASON)
+                return self.skip_item(item, USER_SKIP_REASON, "user_skip")
             self.pump(timings.tick)
             self.check_alive()
             now = clock()
@@ -930,6 +955,7 @@ class _Playback:
                         # other windows, not activated) for the rest of the run.
                         minimized_at = None
                         run.auto_minimize = False
+                        logger.info("chrome_watch window run_id=%s action=minimize_paused", run.run_id)
                         self.restore_window()
                         self.m._notice(run, "minimize_paused", "info", MINIMIZE_FALLBACK_NOTICE)
                     elif minimized_at is not None and now - minimized_at > MINIMIZE_CHECK_SECONDS:
@@ -940,18 +966,31 @@ class _Playback:
                         run.position = float(video.get("time") or 0)
                         run.duration = None
                         run.paused = bool(video.get("paused"))
+                duration = run.duration or self.expected_duration
+                if duration and run.position is not None and main is not None:
+                    for percent in (25, 50, 75):
+                        if percent not in milestones and run.position >= duration * percent / 100:
+                            milestones.add(percent)
+                            logger.info("chrome_watch progress run_id=%s module_item_id=%s percent=%s", run.run_id, item.module_item_id, percent)
+                elif not duration and now >= next_progress_at:
+                    logger.info("chrome_watch progress run_id=%s module_item_id=%s elapsed_seconds=%.1f", run.run_id, item.module_item_id, now - progress_started)
+                    next_progress_at = now + 300
                 main_playing = main is not None and not main[2]["video"].get("paused")
                 resume_report = next((r for r in fresh if r[2].get("resume")), None)
                 front_report = next((r for r in fresh if r[2].get("front")), None)
                 if resume_report is not None and resume_clicks < timings.resume_max_clicks and now - last_resume >= timings.resume_click_every:
                     last_resume = now
                     resume_clicks += 1
-                    if self.click(resume_report[0], resume_report[1], "yes"):
+                    clicked = self.click(resume_report[0], resume_report[1], "yes")
+                    logger.info("chrome_watch click run_id=%s kind=resume ok=%s", run.run_id, clicked)
+                    if clicked:
                         activity_at = now  # the player loads again after the answer
                 elif resume_report is None and front_report is not None and not main_playing and now - last_front >= timings.front_click_every:
                     last_front = now
-                    self.click(front_report[0], front_report[1], "front")
+                    clicked = self.click(front_report[0], front_report[1], "front")
+                    logger.info("chrome_watch click run_id=%s kind=front ok=%s", run.run_id, clicked)
             if now - activity_at >= timings.stall_after:
+                logger.info("chrome_watch stall run_id=%s module_item_id=%s seconds_without_progress=%.1f action=%s paused=%s accepting=%s phase=%s", run.run_id, item.module_item_id, now - activity_at, "skip" if retried else "stalled_reload", run.paused, self.accepting, run.phase)
                 activity_at = now
                 if not retried:
                     retried = True
@@ -966,7 +1005,7 @@ class _Playback:
                     activity_at = clock()
                 else:
                     text = f"‘{item.title}’ 재생이 멈춰 건너뛰었어요. {MINIMIZED_HINT}"
-                    return self.skip_item(item, STALL_SKIP_REASON, notice=text)
+                    return self.skip_item(item, STALL_SKIP_REASON, "stalled", notice=text)
 
     def check_alive(self) -> None:
         if self.window_closed:
@@ -975,7 +1014,9 @@ class _Playback:
             if self.run.stop.is_set():
                 raise _Stopped()
             raise CdpClosed("connection closed")
-        if self.proc.poll() is not None:
+        exit_code = self.proc.poll()
+        if exit_code is not None:
+            logger.info("chrome_watch chrome_exit run_id=%s exit_code=%s expected=%s", self.run.run_id, exit_code, str(self.run.stop.is_set()).lower())
             if self.run.stop.is_set():
                 raise _Stopped()
             raise _WindowClosed()
@@ -987,17 +1028,18 @@ class _Playback:
             if exc.auth:
                 raise ChromeWatchError(exc.code, "LMS 로그인이 풀렸어요. 다시 로그인해 주세요.") from exc
             reason = plan_error_reason(exc.code)
-            return self.skip_item(item, reason, notice=f"‘{item.title}’ {reason}")
+            reason_code = exc.code if re.fullmatch(r"[a-z_]+", exc.code) else "plan_error"
+            return self.skip_item(item, reason, reason_code, notice=f"‘{item.title}’ {reason}")
         except Exception as exc:  # noqa: BLE001 - one lecture must not end the queue
-            logger.warning("chrome watch plan failed: %s", type(exc).__name__)
+            logger.warning("chrome_watch plan_failed run_id=%s error=%s", self.run.run_id, type(exc).__name__)
             reason = plan_error_reason(None)
-            return self.skip_item(item, reason, notice=f"‘{item.title}’ {reason}")
+            return self.skip_item(item, reason, "plan_exception", notice=f"‘{item.title}’ {reason}")
         if self.run.stop.is_set():
             raise _Stopped()
         launch_url = plan.get("launch_url")
         if not isinstance(launch_url, str) or not launch_url.startswith("https://"):
             reason = plan_error_reason(None)
-            return self.skip_item(item, reason, notice=f"‘{item.title}’ {reason}")
+            return self.skip_item(item, reason, "launch_url_missing", notice=f"‘{item.title}’ {reason}")
         duration = plan.get("duration")
         if isinstance(duration, (int, float)) and duration > 0 and item.duration is None:
             item.duration = float(duration)
