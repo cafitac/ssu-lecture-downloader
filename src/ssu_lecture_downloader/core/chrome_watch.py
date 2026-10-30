@@ -901,28 +901,34 @@ class _Playback:
         needs_attach = False
         while True:
             try:
+                recovered_navigation = False
                 if needs_attach:
-                    self._recover_page()
+                    recovered_navigation = self._recover_page(plan)
                     needs_attach = False
-                outcome = plan if isinstance(plan, str) else self._play_item(item, plan)
+                outcome = plan if isinstance(plan, str) else self._play_item(item, plan, already_open=recovered_navigation)
                 break
             except (_RendererGone, CdpClosed, CdpTimeout, CdpError) as exc:
-                if isinstance(exc, (CdpTimeout, CdpError)) and not needs_attach:
+                self.pump(0)
+                if run.stop.is_set():
+                    raise _Stopped() from exc
+                if self.window_closed:
+                    raise _WindowClosed() from exc
+                if isinstance(exc, (CdpTimeout, CdpError)) and not needs_attach and not (self.renderer_gone or self.connection_closed or self.client.closed):
                     raise
                 if isinstance(exc, CdpClosed):
                     self.connection_closed = True
                 if run.stop.is_set():
                     raise _Stopped() from exc
-                if isinstance(exc, CdpClosed) or self.connection_closed:
+                if isinstance(exc, CdpClosed) or self.connection_closed or self.client.closed:
                     self._wait_for_exit()
-                elif not self._process_alive():
-                    raise CdpClosed("Chrome exited") from exc
+                if not self._process_alive():
+                    raise ChromeWatchError("chrome_quit_unexpectedly", "Chrome이 갑자기 종료되어 자동 재생을 멈췄어요.") from exc
                 if recoveries >= 3:
                     raise ChromeWatchError("chrome_recover_exhausted", "Chrome 연결이 반복해서 끊겨 자동 재생을 멈췄어요.") from exc
                 if recoveries:
                     self._recovery_pause(self.m.timings.reconnect_backoff)
                 recoveries += 1
-                cause = "renderer_gone" if self.renderer_gone else "cdp_closed"
+                cause = "cdp_closed" if self.connection_closed or self.client.closed else "renderer_gone"
                 logger.info("chrome_watch recover run_id=%s module_item_id=%s attempt=%s cause=%s", run.run_id, item.module_item_id, recoveries, cause)
                 with self.m._lock:
                     run.phase = PHASE_OPENING
@@ -947,7 +953,7 @@ class _Playback:
             self.m._notice(self.run, "skipped", level, notice, item_title=item.title, reason=reason)
         return "skipped"
 
-    def _play_item(self, item: WatchItem, plan: dict[str, Any]) -> str:
+    def _play_item(self, item: WatchItem, plan: dict[str, Any], *, already_open: bool = False) -> str:
         run = self.run
         timings = self.m.timings
         try:
@@ -955,7 +961,8 @@ class _Playback:
         except (TypeError, ValueError):
             self.expected_duration = None
         retried = False
-        self._open(plan)
+        if not already_open:
+            self._open(plan)
         clock = self.m._clock
         activity_at = clock()
         progress_started = activity_at
@@ -1092,15 +1099,22 @@ class _Playback:
         while True:
             if self.run.stop.is_set():
                 raise _Stopped()
+            self.pump(0)
+            if self.window_closed:
+                raise _WindowClosed()
             if not self._process_alive():
-                raise CdpClosed("Chrome exited")
+                raise ChromeWatchError("chrome_quit_unexpectedly", "Chrome이 갑자기 종료되어 자동 재생을 멈췄어요.")
             if self.m._clock() >= deadline:
                 return
             self.m._sleep(self.m.timings.port_poll)
 
-    def _recover_page(self) -> None:
+    def _recover_page(self, plan: dict[str, Any]) -> bool:
+        self.pump(0)
         if self.run.stop.is_set():
             raise _Stopped()
+        if self.window_closed:
+            raise _WindowClosed()
+        navigated = False
         if self.connection_closed or self.client.closed:
             self.client.close()
             try:
@@ -1124,41 +1138,62 @@ class _Playback:
                 raise CdpClosed("reconnect failed") from exc
             with self.m._lock:
                 self.run.client = self.client
-        else:
-            for session in list(self.sessions):
-                self.safe_call("Target.detachFromTarget", {"sessionId": session})
-            # Discard events from the old sessions before attaching again.
-            while True:
-                try:
-                    self.events.get_nowait()
-                except queue.Empty:
-                    break
-        self.child_targets.clear()
-        self.sessions.clear()
-        self.frames.clear()
-        self.session_root.clear()
-        self.contexts.clear()
-        self.reports.clear()
+        elif self.page_session is not None:
+            # A crashed renderer hangs on Page/Runtime.enable. Revive it on the
+            # existing session before any domain setup or re-attachment.
+            assert self.page_session is not None
+            self.child_targets.clear()
+            self.sessions = {self.page_session}
+            self.frames.clear()
+            self.session_root.clear()
+            self.contexts.clear()
+            self.reports.clear()
+            self.renderer_gone = False
+            self.accepting = self.ended = False
+            result = self.call("Page.navigate", {"url": plan["launch_url"]}, self.page_session)
+            if result.get("errorText"):
+                raise ChromeWatchError("chrome_navigation_failed", "강의 페이지를 열지 못했어요.")
+            navigated = True
+            # Navigation destroys the old iframe sessions; auto-attach rebuilds them.
+            self.safe_call("Target.detachFromTarget", {"sessionId": self.page_session})
+            # Retain a user close even when it arrives during session teardown.
+            self.pump(0)
+            if self.window_closed:
+                raise _WindowClosed()
+            if self.renderer_gone:
+                raise _RendererGone()
+        if not navigated:
+            self.child_targets.clear()
+            self.sessions.clear()
+            self.frames.clear()
+            self.session_root.clear()
+            self.contexts.clear()
+            self.reports.clear()
         self.page_session = None
         self.window_closed = self.connection_closed = self.renderer_gone = False
         self.crash_details.clear()
         self.crash_logged = False
-        self.accepting = self.ended = False
+        if not navigated:
+            self.accepting = self.ended = False
         if self.run.stop.is_set():
             raise _Stopped()
         self.attach_page()
+        if navigated:
+            # The navigation may have completed on the session just detached.
+            self.accepting = True
+        return navigated
 
     def check_alive(self) -> None:
         if self.run.stop.is_set():
             raise _Stopped()
+        if self.window_closed:
+            raise _WindowClosed()
         if self.renderer_gone:
             if not self.crash_logged:
                 item = self.run.items[self.run.index]
                 logger.warning("chrome_watch renderer_gone run_id=%s module_item_id=%s status=%s error_code=%s", self.run.run_id, item.module_item_id, self.crash_details.get("status", "unknown"), self.crash_details.get("errorCode", "unknown"))
                 self.crash_logged = True
             raise _RendererGone()
-        if self.window_closed:
-            raise _WindowClosed()
         if self.connection_closed or self.client.closed:
             if self.run.stop.is_set():
                 raise _Stopped()
@@ -1168,7 +1203,7 @@ class _Playback:
             logger.info("chrome_watch chrome_exit run_id=%s exit_code=%s expected=%s", self.run.run_id, exit_code, str(self.run.stop.is_set()).lower())
             if self.run.stop.is_set():
                 raise _Stopped()
-            raise ChromeWatchError("chrome_exited", "Chrome이 갑자기 종료되어 자동 재생을 멈췄어요.")
+            raise ChromeWatchError("chrome_quit_unexpectedly", "Chrome이 갑자기 종료되어 자동 재생을 멈췄어요.")
 
     def _fetch_plan(self, item: WatchItem) -> dict[str, Any] | str:
         try:
