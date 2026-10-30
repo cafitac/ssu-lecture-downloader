@@ -1,4 +1,5 @@
 import json
+import logging
 import signal
 import threading
 import time
@@ -239,7 +240,8 @@ def test_websocket_transport_talks_to_a_real_local_socket_server():
 # ------------------------------------------------------------------------ queue behavior
 
 
-def test_queue_plays_every_lecture_in_one_tab_and_closes_chrome(tmp_path):
+def test_queue_plays_every_lecture_in_one_tab_and_closes_chrome(tmp_path, caplog):
+    caplog.set_level(logging.INFO, logger=cw.logger.name)
     harness = Harness(tmp_path, [FakePlayer(resume=True), FakePlayer()])
     started = harness.manager.start(items(2))
     assert started["state"] in {"starting", "playing"} and started["total"] == 2
@@ -267,6 +269,12 @@ def test_queue_plays_every_lecture_in_one_tab_and_closes_chrome(tmp_path):
     assert (4242, signal.SIGTERM) in harness.kills.calls
     assert not (harness.profile.parent / "chrome-watch.pid").exists()
     assert harness.profile.is_dir()  # the profile stays
+    messages = [record.getMessage() for record in caplog.records if record.name == cw.logger.name]
+    for event in ("run_start", "item_start", "item_end", "run_end", "progress"):
+        assert any(message.startswith(f"chrome_watch {event} ") for message in messages)
+    assert "phase=finished done_count=2 skipped_count=0" in messages[-1]
+    for message in messages:
+        assert not any(secret in message.lower() for secret in ("cookie", "token", "http", "://", "?", "1주차", "UX방법론"))
 
 
 def test_start_button_and_resume_yes_are_pressed_with_trusted_mouse_events(tmp_path):
@@ -308,11 +316,16 @@ def test_helper_script_is_installed_for_new_documents_and_never_fakes_playback(t
     assert binding["params"] == {"name": "ssuWatchSignal"}
 
 
-def test_a_stalled_lecture_is_reloaded_once_then_skipped_with_a_visible_notice(tmp_path):
+def test_a_stalled_lecture_is_reloaded_once_then_skipped_with_a_visible_notice(tmp_path, caplog):
+    caplog.set_level(logging.INFO, logger=cw.logger.name)
     harness = Harness(tmp_path, [FakePlayer(stall=True), FakePlayer()])
     harness.manager.start(items(2))
     status = harness.finish()
 
+    harness.wait_thread()
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("chrome_watch stall " in message and "seconds_without_progress=" in message and "action=skip" in message for message in messages)
+    assert any("chrome_watch skip " in message and f'reason="{cw.STALL_SKIP_REASON}"' in message for message in messages)
     assert status["state"] == "finished"
     assert [item["state"] for item in status["items"]] == ["skipped", "done"]
     assert status["items"][0]["reason"] == cw.STALL_SKIP_REASON
