@@ -131,6 +131,11 @@ identifier = "allow-prepare-for-update"
 description = "Allows the main window to call `prepare_for_update`."
 commands.allow = ["prepare_for_update"]
 
+[[permission]]
+identifier = "allow-save-diagnostics"
+description = "Allows the main window to call `save_diagnostics`."
+commands.allow = ["save_diagnostics"]
+
 [[set]]
 identifier = "main-window-commands"
 description = "Every app command the main window uses."
@@ -160,4 +165,5 @@ permissions = [
   "allow-native-cancel-download-job",
   "allow-update-install-guard",
   "allow-prepare-for-update",
+  "allow-save-diagnostics",
 ]

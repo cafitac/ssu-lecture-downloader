@@ -25,6 +25,11 @@ fn open_url_in_browser(_url: String) -> &'static str {
 }
 
 #[tauri::command]
+fn save_diagnostics(_destination: String) -> &'static str {
+    "saved"
+}
+
+#[tauri::command]
 fn update_install_guard() -> &'static str {
     "guard"
 }
@@ -43,6 +48,7 @@ fn app() -> App<MockRuntime> {
             watch_signal,
             real_download_dir,
             open_url_in_browser,
+            save_diagnostics,
             update_install_guard,
             prepare_for_update
         ])
@@ -139,6 +145,10 @@ fn the_watch_pages_reach_nothing_but_the_signal_command() {
             "open_url_in_browser",
             serde_json::json!({ "url": "https://x.example" }),
         ),
+        (
+            "save_diagnostics",
+            serde_json::json!({ "destination": "/tmp/x.zip" }),
+        ),
         ("plugin:dialog|open", serde_json::json!({ "options": {} })),
         (
             "plugin:event|listen",
@@ -203,6 +213,15 @@ fn the_main_window_keeps_its_commands_but_has_no_watch_signal() {
             serde_json::json!({ "url": "https://x.example" })
         ),
         Ok("opened".to_string())
+    );
+    assert_eq!(
+        call(
+            &main,
+            "local",
+            "save_diagnostics",
+            serde_json::json!({ "destination": "/tmp/x.zip" })
+        ),
+        Ok("saved".to_string())
     );
     assert!(
         call(&main, "local", "watch_signal", signal_body()).is_err(),

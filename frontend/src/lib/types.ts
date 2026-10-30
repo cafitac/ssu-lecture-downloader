@@ -109,6 +109,12 @@ export interface DeadlineEntryDto {
   state: 'open' | 'late' | 'missed' | 'upcoming';
 }
 
+/** Result of the `save_diagnostics` command: where the zip went and which entries it holds. */
+export interface SavedDiagnostics {
+  path: string;
+  files: string[];
+}
+
 export interface RemindersStatus {
   enabled: boolean;
   /** The background LaunchAgent is installed (reminders while the app is closed). */

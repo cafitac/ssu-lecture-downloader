@@ -2490,6 +2490,25 @@ const assistSource = readFileSync('src-tauri/src/assets/watch_assist.js', 'utf8'
       assert.ok(normal.includes('다시 시도</button>'), 'the backend screen offers its retry');
       const blocked = renderToStaticMarkup(React.createElement(BackendScreen, { status: failedStatus, onRetry() {}, retryBlockedText: '업데이트하는 중이에요' }));
       assert.ok(blocked.includes('업데이트하는 중이에요') && !blocked.includes('다시 시도</button>'), 'while an update installs the retry is replaced by a status line');
+      // 진단 파일 저장: the failure screen offers it as a quiet secondary action, the Settings row as its own section.
+      assert.ok(normal.includes('class="btn btn-sm btn-ghost">진단 파일 저장</button>') && normal.indexOf('다시 시도</button>') < normal.indexOf('진단 파일 저장'), 'the failure screen carries 진단 파일 저장 after the retry');
+      assert.ok(blocked.includes('진단 파일 저장'), 'the diagnostics action stays while an update installs');
+      const { DiagnosticsButtonView } = await server.ssrLoadModule('/src/components/Screens.tsx');
+      const { DiagnosticsSectionView } = await server.ssrLoadModule('/src/components/Diagnostics.tsx');
+      const savedOutcome = { ok: true, path: '/Users/x/Desktop/ssu-진단-20261030-1105.zip' };
+      const failedOutcome = { ok: false, text: '진단 파일을 쓰지 못했어요. (disk full)' };
+      const sectionIdle = renderToStaticMarkup(React.createElement(DiagnosticsSectionView, { busy: false, outcome: null, onSave() {}, onReveal() {} }));
+      assert.ok(sectionIdle.startsWith('<section class="setting"><h3>문제 보내기</h3>') && sectionIdle.includes('>진단 파일 저장</button>'), 'Settings row: 문제 보내기 with the save button');
+      assert.ok(!/disabled|role="status"|role="alert"|폴더에서 보기/.test(sectionIdle), 'idle: enabled button, no result, no reveal');
+      const sectionBusy = renderToStaticMarkup(React.createElement(DiagnosticsSectionView, { busy: true, outcome: null, onSave() {}, onReveal() {} }));
+      assert.ok(/<button type="button" class="btn btn-sm" disabled="">.*저장하는 중…<\/button>/.test(sectionBusy), 'the button is disabled while saving');
+      const sectionSaved = renderToStaticMarkup(React.createElement(DiagnosticsSectionView, { busy: false, outcome: savedOutcome, onSave() {}, onReveal() {} }));
+      assert.ok(sectionSaved.includes('<p class="small" role="status">진단 파일을 저장했어요. 이 파일을 전달해 주세요.</p>') && sectionSaved.includes('폴더에서 보기'), 'success text and a Finder reveal');
+      const sectionFailed = renderToStaticMarkup(React.createElement(DiagnosticsSectionView, { busy: false, outcome: failedOutcome, onSave() {}, onReveal() {} }));
+      assert.ok(sectionFailed.includes('role="alert">진단 파일을 쓰지 못했어요. (disk full)</p>') && !sectionFailed.includes('폴더에서 보기'), 'failure is a plain Korean alert');
+      const screenSaved = renderToStaticMarkup(React.createElement(DiagnosticsButtonView, { busy: false, outcome: savedOutcome, onSave() {}, onReveal() {} }));
+      assert.ok(screenSaved.includes('진단 파일을 저장했어요. 이 파일을 전달해 주세요.') && screenSaved.includes('폴더에서 보기'));
+      assert.ok(/disabled=""/.test(renderToStaticMarkup(React.createElement(DiagnosticsButtonView, { busy: true, outcome: null, onSave() {}, onReveal() {} }))), 'the failure-screen button is disabled while saving');
       const base = { phase: 'available', version: '1.2.3', notes: '- 빨라졌어요', hidden: false, progress: null, notice: null, error: null, canRetry: false };
       const render = (state, open) => renderToStaticMarkup(React.createElement(UpdateChipView, { state, open, onToggle() {}, onUpdate() {}, onLater() {} }));
       const noInterruption = (html) => {
@@ -2599,6 +2618,52 @@ const assistSource = readFileSync('src-tauri/src/assets/watch_assist.js', 'utf8'
   };
   const desktop = await import('../src/lib/desktop.ts');
   const { recoverBackend, waitForBackendSettled } = await import('../src/lib/updater.ts');
+
+  // 진단 파일 저장: save dialog with the dated default name, then the command with the chosen path.
+  {
+    assert.equal(desktop.diagnosticsFileName(new Date(2026, 9, 30, 9, 5)), 'ssu-진단-20261030-0905.zip');
+    assert.equal(desktop.diagnosticsFileName(new Date(2026, 0, 2, 23, 59)), 'ssu-진단-20260102-2359.zip');
+    let dialogOptions;
+    let commandArgs;
+    const picked = tauriBridge({
+      'plugin:dialog|save': (args) => { dialogOptions = args.options; return '/Users/x/Desktop/diag.zip'; },
+      save_diagnostics: (args) => { commandArgs = args; return { path: args.destination, files: ['backend.log', 'info.json'] }; },
+    });
+    try {
+      const saved = await desktop.saveDiagnosticsFile(new Date(2026, 9, 30, 11, 5));
+      assert.deepEqual(saved, { path: '/Users/x/Desktop/diag.zip', files: ['backend.log', 'info.json'] });
+      assert.equal(dialogOptions.defaultPath, 'ssu-진단-20261030-1105.zip');
+      assert.deepEqual(commandArgs, { destination: '/Users/x/Desktop/diag.zip' });
+      assert.deepEqual(picked.calls, ['plugin:dialog|save', 'save_diagnostics']);
+    } finally { picked.restore(); }
+
+    // Cancelling the dialog writes nothing and is not an error.
+    const cancelled = tauriBridge({ 'plugin:dialog|save': () => null });
+    try {
+      assert.equal(await desktop.saveDiagnosticsFile(), null);
+      assert.deepEqual(cancelled.calls, ['plugin:dialog|save'], 'no command call after a cancel');
+    } finally { cancelled.restore(); }
+
+    // A failing command rejects with the Rust sentence, which the hook shows as it is.
+    const failing = tauriBridge({
+      'plugin:dialog|save': () => '/Users/x/Desktop/diag.zip',
+      save_diagnostics: () => { throw '저장할 위치에 파일을 만들지 못했어요. (denied)'; },
+    });
+    try {
+      const { friendlyError: describeFailure } = await import('../src/lib/errors.ts');
+      await assert.rejects(desktop.saveDiagnosticsFile(), (failure) => describeFailure(failure) === '저장할 위치에 파일을 만들지 못했어요. (denied)');
+    } finally { failing.restore(); }
+
+    // Outside the desktop app nothing is asked or written.
+    assert.equal(await desktop.saveDiagnosticsFile(), null);
+
+    // Wiring: Settings shows the row in the desktop app only; the hook disables the button while saving.
+    const settingsSource = readFileSync('src/components/SettingsDialog.tsx', 'utf8');
+    assert.ok(settingsSource.includes('{desktop && <DiagnosticsSection />}'), 'Settings mounts the 문제 보내기 row on desktop');
+    const hookSource = readFileSync('src/hooks/useDiagnosticsSave.ts', 'utf8');
+    assert.ok(/setBusy\(true\)[\s\S]*finally \{\s*setBusy\(false\)/.test(hookSource), 'busy covers the whole save');
+    assert.ok(readFileSync('src/components/Screens.tsx', 'utf8').includes('<DiagnosticsButton />'), 'the backend failure screen mounts the action');
+  }
 
   // After backend_restart the cached connection (old port, old token) must not survive. A request made
   // while the sidecar is still starting caches the old port with no token, so the reset comes only

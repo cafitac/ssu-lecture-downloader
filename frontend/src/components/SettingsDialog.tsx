@@ -11,6 +11,7 @@ import type { RemoteSttDraft } from '../lib/remoteStt';
 import type { RemoteSttKind, WatchDebugEvent, WatchMode } from '../lib/types';
 import { TIDY_COPY } from '../lib/tidy';
 import { CHROME_MISSING_NOTE, WATCH_MODE_DESCRIPTION, WATCH_MODE_LABEL } from '../lib/watch';
+import { DiagnosticsSection } from './Diagnostics';
 import { Dialog } from './Dialog';
 import { FolderIcon } from './Icons';
 import { Spinner } from './Screens';
@@ -394,6 +395,8 @@ export function SettingsDialog({ downloadDir, busy, workBusy, media, debugEvents
       <GradesSection grades={grades} />
 
       {desktop && <RemindersSection />}
+
+      {desktop && <DiagnosticsSection />}
 
       {debugEvents.length > 0 && <WatchDiagnostics events={debugEvents} />}
     </Dialog>
