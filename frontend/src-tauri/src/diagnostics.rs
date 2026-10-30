@@ -247,7 +247,11 @@ fn redact_line(line: &str) -> String {
             }
             let separator = skip_spaces(bytes, skip_quote(bytes, after_key));
             if separator < bytes.len() && (bytes[separator] == b'=' || bytes[separator] == b':') {
-                if let Some((start, end)) = read_value(bytes, separator + 1, rest_of_line) {
+                // Only the header form (`Cookie: a=b; c=d`, the key directly followed by `:`)
+                // takes the rest of the line. `cookies=2` or `cookie=a` stop at the value's end.
+                let header =
+                    rest_of_line && bytes[separator] == b':' && after_key == at + key.len();
+                if let Some((start, end)) = read_value(bytes, separator + 1, header) {
                     if line[start..end].trim() != REDACTED {
                         out.push_str(&line[at..start]);
                         out.push_str(REDACTED);
@@ -320,17 +324,67 @@ fn prepare_log(path: &Path) -> Option<String> {
     Some(text)
 }
 
-/// Writes the zip to `destination`. Returns the entry names.
+const GENERIC_SAVE_ERROR: &str =
+    "진단 파일을 저장하지 못했어요. 다른 폴더를 골라 다시 시도해 주세요.";
+const NO_PERMISSION_ERROR: &str =
+    "이 폴더에는 파일을 저장할 권한이 없어요. 다른 폴더를 골라 주세요.";
+const DISK_FULL_ERROR: &str = "저장 공간이 부족해요. 디스크 공간을 확보한 뒤 다시 시도해 주세요.";
+const NOT_A_FILE_ERROR: &str = "같은 이름의 폴더가 이미 있어요. 다른 이름이나 폴더를 골라 주세요.";
+
+/// Plain Korean for the user. The OS detail goes to stderr (the app's log channel), not to the UI.
+fn io_error_text(error: &std::io::Error) -> String {
+    eprintln!("diagnostics: {error}");
+    match error.kind() {
+        std::io::ErrorKind::PermissionDenied => NO_PERMISSION_ERROR,
+        std::io::ErrorKind::StorageFull => DISK_FULL_ERROR,
+        _ => GENERIC_SAVE_ERROR,
+    }
+    .to_string()
+}
+
+fn zip_error_text(error: &zip::result::ZipError) -> String {
+    match error {
+        zip::result::ZipError::Io(io) => io_error_text(io),
+        other => {
+            eprintln!("diagnostics: {other}");
+            GENERIC_SAVE_ERROR.to_string()
+        }
+    }
+}
+
+/// The destination with a `.zip` extension: appended when the user's name lacks one.
+fn with_zip_extension(destination: &Path) -> Option<PathBuf> {
+    let name = destination.file_name()?.to_string_lossy().to_string();
+    if name.to_ascii_lowercase().ends_with(".zip") {
+        Some(destination.to_path_buf())
+    } else {
+        Some(destination.with_file_name(format!("{name}.zip")))
+    }
+}
+
+/// Writes the zip to `destination` (`.zip` is appended when missing). Returns the entry names and
+/// the path that was written.
 ///
-/// The zip is written to a temporary file in the same folder and renamed over `destination` only
-/// once it is complete, so a failure never touches a file the user already has there (the save
-/// dialog may have been confirmed with "Replace"). On failure only the temporary file is removed.
+/// The zip is written to a temporary file in the same folder, flushed to disk and renamed over the
+/// destination only once it is complete, so a failure never touches a file the user already has
+/// there (the save dialog may have been confirmed with "Replace"). On failure only the temporary
+/// file is removed. A destination that exists but is not a regular file (a folder, a device) is
+/// refused; a symlink to a regular file is written through, so the link stays a link.
 pub(crate) fn write_bundle(
     destination: &Path,
     log_dir: &Path,
     info: &serde_json::Value,
 ) -> Result<SavedDiagnostics, String> {
-    let name = destination
+    let destination =
+        with_zip_extension(destination).ok_or_else(|| "저장할 파일 이름이 없어요.".to_string())?;
+    let target = match fs::metadata(&destination) {
+        Ok(metadata) if metadata.is_file() => {
+            fs::canonicalize(&destination).unwrap_or_else(|_| destination.clone())
+        }
+        Ok(_) => return Err(NOT_A_FILE_ERROR.to_string()),
+        Err(_) => destination.clone(),
+    };
+    let name = target
         .file_name()
         .ok_or_else(|| "저장할 파일 이름이 없어요.".to_string())?
         .to_string_lossy();
@@ -338,10 +392,9 @@ pub(crate) fn write_bundle(
         .duration_since(std::time::UNIX_EPOCH)
         .map(|elapsed| elapsed.as_nanos())
         .unwrap_or_default();
-    let temp = destination.with_file_name(format!(".{name}.{}-{nonce}.tmp", std::process::id()));
+    let temp = target.with_file_name(format!(".{name}.{}-{nonce}.tmp", std::process::id()));
     let result = write_bundle_to(&temp, log_dir, info).and_then(|files| {
-        fs::rename(&temp, destination)
-            .map_err(|error| format!("진단 파일을 저장하지 못했어요. ({error})"))?;
+        fs::rename(&temp, &target).map_err(|error| io_error_text(&error))?;
         Ok(SavedDiagnostics {
             path: destination.to_string_lossy().to_string(),
             files,
@@ -358,20 +411,20 @@ fn write_bundle_to(
     log_dir: &Path,
     info: &serde_json::Value,
 ) -> Result<Vec<String>, String> {
-    let file = File::create(path)
-        .map_err(|error| format!("저장할 위치에 파일을 만들지 못했어요. ({error})"))?;
+    let file = File::create(path).map_err(|error| io_error_text(&error))?;
     let mut zip = zip::ZipWriter::new(file);
     let options = zip::write::SimpleFileOptions::default()
         .compression_method(zip::CompressionMethod::Deflated);
-    let fail = |error: &dyn std::fmt::Display| format!("진단 파일을 쓰지 못했어요. ({error})");
+    let zip_fail = |error: zip::result::ZipError| zip_error_text(&error);
 
     let mut files = Vec::new();
     for name in LOG_FILES {
         let Some(text) = prepare_log(&log_dir.join(name)) else {
             continue;
         };
-        zip.start_file(name, options).map_err(|e| fail(&e))?;
-        zip.write_all(text.as_bytes()).map_err(|e| fail(&e))?;
+        zip.start_file(name, options).map_err(zip_fail)?;
+        zip.write_all(text.as_bytes())
+            .map_err(|error| io_error_text(&error))?;
         files.push(name.to_string());
     }
 
@@ -382,12 +435,17 @@ fn write_bundle_to(
             serde_json::json!(files.clone()),
         );
     }
-    let info_text = serde_json::to_string_pretty(&info).map_err(|e| fail(&e))?;
-    zip.start_file("info.json", options).map_err(|e| fail(&e))?;
-    zip.write_all(info_text.as_bytes()).map_err(|e| fail(&e))?;
+    let info_text = serde_json::to_string_pretty(&info).map_err(|error| {
+        eprintln!("diagnostics: {error}");
+        GENERIC_SAVE_ERROR.to_string()
+    })?;
+    zip.start_file("info.json", options).map_err(zip_fail)?;
+    zip.write_all(info_text.as_bytes())
+        .map_err(|error| io_error_text(&error))?;
     files.push("info.json".to_string());
 
-    zip.finish().map_err(|e| fail(&e))?;
+    let file = zip.finish().map_err(zip_fail)?;
+    file.sync_all().map_err(|error| io_error_text(&error))?;
     Ok(files)
 }
 
@@ -471,10 +529,10 @@ pub(crate) fn save_diagnostics(
         return Err("저장할 위치가 비어 있어요.".to_string());
     }
     let destination = PathBuf::from(destination);
-    let log_dir = app
-        .path()
-        .app_log_dir()
-        .map_err(|error| format!("앱 로그 폴더를 찾지 못했어요. ({error})"))?;
+    let log_dir = app.path().app_log_dir().map_err(|error| {
+        eprintln!("diagnostics: {error}");
+        "앱 로그 폴더를 찾지 못했어요.".to_string()
+    })?;
     let backend = app
         .try_state::<Arc<BackendManager>>()
         .map(|manager| manager.status());
@@ -565,7 +623,7 @@ mod tests {
     #[test]
     fn redacts_session_secret_key_and_signature_parameters() {
         for (input, expected) in [
-            ("cookie=abc123; other=1", "cookie=[redacted]"),
+            ("cookie=abc123; other=1", "cookie=[redacted]; other=1"),
             ("session=abc&x=1", "session=[redacted]&x=1"),
             ("JSESSIONID=ABCDEF; Path=/", "JSESSIONID=[redacted]; Path=/"),
             ("sid=abc x", "sid=[redacted] x"),
@@ -582,6 +640,38 @@ mod tests {
         ] {
             assert_eq!(redact(input), expected, "{input}");
         }
+    }
+
+    #[test]
+    fn only_the_header_form_takes_the_rest_of_the_line() {
+        // A diagnostic line from watch.log keeps everything but the value itself.
+        assert_eq!(
+            redact("plan ok cookies=2 launch=true viewer=true"),
+            "plan ok cookies=[redacted] launch=true viewer=true"
+        );
+        assert_eq!(
+            redact("cookie_count=3 launch=true"),
+            "cookie_count=[redacted] launch=true"
+        );
+        assert_eq!(
+            redact("cookie=a1 launch=true"),
+            "cookie=[redacted] launch=true"
+        );
+        // The header form redacts the whole header, whatever it contains.
+        assert_eq!(redact("Cookie: a=b; c=d"), "Cookie: [redacted]");
+        assert_eq!(
+            redact("Set-Cookie: a=b; Path=/; HttpOnly"),
+            "Set-Cookie: [redacted]"
+        );
+        assert_eq!(
+            redact("Authorization: Basic abc, realm=x"),
+            "Authorization: [redacted]"
+        );
+        assert_eq!(redact("cookie : a=b; c=d"), "cookie : [redacted]");
+        assert_eq!(
+            redact(r#"{"Cookie": "a=b; c=d", "Host": "x"}"#),
+            r#"{"Cookie": "[redacted]", "Host": "x"}"#
+        );
     }
 
     #[test]
@@ -728,14 +818,48 @@ mod tests {
     }
 
     #[test]
-    fn an_unwritable_destination_is_an_error_and_leaves_nothing_behind() {
+    fn a_missing_folder_is_a_plain_korean_error_and_leaves_nothing_behind() {
         let logs = temp_dir("fail-logs");
         let missing_parent = logs.join("no-such-folder").join("diag.zip");
         let error = write_bundle(&missing_parent, &logs, &serde_json::json!({}))
             .expect_err("no folder to write into");
-        assert!(error.contains("만들지 못했어요"), "{error}");
+        assert_eq!(error, GENERIC_SAVE_ERROR);
         assert!(!missing_parent.exists());
         fs::remove_dir_all(logs).ok();
+    }
+
+    #[test]
+    fn io_errors_become_a_cause_in_plain_korean_without_the_os_detail() {
+        use std::io::{Error, ErrorKind};
+        assert_eq!(
+            io_error_text(&Error::from(ErrorKind::PermissionDenied)),
+            NO_PERMISSION_ERROR
+        );
+        assert_eq!(
+            io_error_text(&Error::from_raw_os_error(13)),
+            NO_PERMISSION_ERROR
+        );
+        assert_eq!(
+            io_error_text(&Error::from(ErrorKind::StorageFull)),
+            DISK_FULL_ERROR
+        );
+        #[cfg(unix)]
+        assert_eq!(
+            io_error_text(&Error::from_raw_os_error(28)),
+            DISK_FULL_ERROR
+        );
+        assert_eq!(
+            io_error_text(&Error::new(ErrorKind::Other, "boom (os error 5)")),
+            GENERIC_SAVE_ERROR
+        );
+        for text in [
+            NO_PERMISSION_ERROR,
+            DISK_FULL_ERROR,
+            GENERIC_SAVE_ERROR,
+            NOT_A_FILE_ERROR,
+        ] {
+            assert!(!text.contains("os error") && !text.is_ascii(), "{text}");
+        }
     }
 
     #[cfg(unix)]
@@ -760,7 +884,10 @@ mod tests {
             fs::remove_dir_all(out).ok();
             return;
         }
-        assert!(result.is_err(), "{result:?}");
+        assert_eq!(
+            result.expect_err("no write permission"),
+            NO_PERMISSION_ERROR
+        );
         assert_eq!(fs::read(&destination).expect("kept"), b"the user's own zip");
         assert_eq!(leftovers(&out), ["diag.zip"], "no temporary file is left");
         fs::set_permissions(&destination, fs::Permissions::from_mode(0o644)).ok();
@@ -769,21 +896,78 @@ mod tests {
     }
 
     #[test]
-    fn a_save_that_fails_at_the_end_removes_only_its_temporary_file() {
-        let logs = temp_dir("rename-logs");
-        let out = temp_dir("rename-out");
-        // A folder cannot be replaced by a file: the zip is written, the final rename fails.
+    fn a_destination_that_is_a_folder_is_refused_and_nothing_is_created() {
+        let logs = temp_dir("dir-logs");
+        let out = temp_dir("dir-out");
         let destination = out.join("diag.zip");
         fs::create_dir_all(destination.join("keep")).expect("folder in the way");
 
         let error = write_bundle(&destination, &logs, &serde_json::json!({}))
-            .expect_err("rename over a folder fails");
-        assert!(error.contains("저장하지 못했어요"), "{error}");
+            .expect_err("a folder is not replaced");
+        assert_eq!(error, NOT_A_FILE_ERROR);
         assert!(
             destination.join("keep").is_dir(),
             "the user's folder is untouched"
         );
-        assert_eq!(leftovers(&out), ["diag.zip"], "the temporary file is gone");
+        assert_eq!(leftovers(&out), ["diag.zip"], "no temporary file is left");
+        fs::remove_dir_all(logs).ok();
+        fs::remove_dir_all(out).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_to_a_regular_file_is_written_through_and_stays_a_link() {
+        let logs = temp_dir("link-logs");
+        let out = temp_dir("link-out");
+        let real = out.join("real.zip");
+        let link = out.join("link.zip");
+        fs::write(&real, b"old").expect("real file");
+        std::os::unix::fs::symlink(&real, &link).expect("symlink");
+
+        let saved = write_bundle(&link, &logs, &serde_json::json!({})).expect("bundle");
+        assert_eq!(saved.path, link.to_string_lossy());
+        assert!(fs::symlink_metadata(&link)
+            .expect("link")
+            .file_type()
+            .is_symlink());
+        assert_eq!(
+            zip_entries(&real)[0].0,
+            "info.json",
+            "the target got the zip"
+        );
+        assert_eq!(leftovers(&out), ["link.zip", "real.zip"]);
+        fs::remove_dir_all(logs).ok();
+        fs::remove_dir_all(out).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_to_a_folder_is_refused() {
+        let logs = temp_dir("linkdir-logs");
+        let out = temp_dir("linkdir-out");
+        let folder = out.join("folder");
+        fs::create_dir_all(&folder).expect("folder");
+        let link = out.join("link.zip");
+        std::os::unix::fs::symlink(&folder, &link).expect("symlink");
+        let error = write_bundle(&link, &logs, &serde_json::json!({})).expect_err("refused");
+        assert_eq!(error, NOT_A_FILE_ERROR);
+        assert_eq!(leftovers(&out), ["folder", "link.zip"]);
+        fs::remove_dir_all(logs).ok();
+        fs::remove_dir_all(out).ok();
+    }
+
+    #[test]
+    fn the_zip_extension_is_appended_when_missing() {
+        let logs = temp_dir("ext-logs");
+        let out = temp_dir("ext-out");
+        let saved = write_bundle(&out.join("diag"), &logs, &serde_json::json!({})).expect("bundle");
+        assert_eq!(saved.path, out.join("diag.zip").to_string_lossy());
+        assert_eq!(leftovers(&out), ["diag.zip"]);
+        // An existing .zip name, in any case, is kept as it is.
+        let kept =
+            write_bundle(&out.join("Report.ZIP"), &logs, &serde_json::json!({})).expect("bundle");
+        assert_eq!(kept.path, out.join("Report.ZIP").to_string_lossy());
+        assert_eq!(leftovers(&out), ["Report.ZIP", "diag.zip"]);
         fs::remove_dir_all(logs).ok();
         fs::remove_dir_all(out).ok();
     }

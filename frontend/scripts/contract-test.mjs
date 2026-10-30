@@ -2496,7 +2496,7 @@ const assistSource = readFileSync('src-tauri/src/assets/watch_assist.js', 'utf8'
       const { DiagnosticsButtonView } = await server.ssrLoadModule('/src/components/Screens.tsx');
       const { DiagnosticsSectionView } = await server.ssrLoadModule('/src/components/Diagnostics.tsx');
       const savedOutcome = { ok: true, path: '/Users/x/Desktop/ssu-진단-20261030-1105.zip' };
-      const failedOutcome = { ok: false, text: '진단 파일을 쓰지 못했어요. (disk full)' };
+      const failedOutcome = { ok: false, text: '저장 공간이 부족해요. 디스크 공간을 확보한 뒤 다시 시도해 주세요.' };
       const sectionIdle = renderToStaticMarkup(React.createElement(DiagnosticsSectionView, { busy: false, outcome: null, onSave() {}, onReveal() {} }));
       assert.ok(sectionIdle.startsWith('<section class="setting"><h3>문제 보내기</h3>') && sectionIdle.includes('>진단 파일 저장</button>'), 'Settings row: 문제 보내기 with the save button');
       assert.ok(!/disabled|role="status"|role="alert"|폴더에서 보기/.test(sectionIdle), 'idle: enabled button, no result, no reveal');
@@ -2505,7 +2505,7 @@ const assistSource = readFileSync('src-tauri/src/assets/watch_assist.js', 'utf8'
       const sectionSaved = renderToStaticMarkup(React.createElement(DiagnosticsSectionView, { busy: false, outcome: savedOutcome, onSave() {}, onReveal() {} }));
       assert.ok(sectionSaved.includes('<p class="small" role="status">진단 파일을 저장했어요. 이 파일을 전달해 주세요.</p>') && sectionSaved.includes('폴더에서 보기'), 'success text and a Finder reveal');
       const sectionFailed = renderToStaticMarkup(React.createElement(DiagnosticsSectionView, { busy: false, outcome: failedOutcome, onSave() {}, onReveal() {} }));
-      assert.ok(sectionFailed.includes('role="alert">진단 파일을 쓰지 못했어요. (disk full)</p>') && !sectionFailed.includes('폴더에서 보기'), 'failure is a plain Korean alert');
+      assert.ok(sectionFailed.includes('role="alert">저장 공간이 부족해요. 디스크 공간을 확보한 뒤 다시 시도해 주세요.</p>') && !sectionFailed.includes('폴더에서 보기'), 'failure is a plain Korean alert');
       // The real SettingsDialog: the row exists in the desktop app (Tauri bridge present) and not in a plain browser.
       {
         const { SettingsDialog } = await server.ssrLoadModule('/src/components/SettingsDialog.tsx');
@@ -2672,11 +2672,11 @@ const assistSource = readFileSync('src-tauri/src/assets/watch_assist.js', 'utf8'
     // A failing command rejects with the Rust sentence, which the hook shows as it is.
     const failing = tauriBridge({
       'plugin:dialog|save': () => '/Users/x/Desktop/diag.zip',
-      save_diagnostics: () => { throw '저장할 위치에 파일을 만들지 못했어요. (denied)'; },
+      save_diagnostics: () => { throw '이 폴더에는 파일을 저장할 권한이 없어요. 다른 폴더를 골라 주세요.'; },
     });
     try {
       const { friendlyError: describeFailure } = await import('../src/lib/errors.ts');
-      await assert.rejects(desktop.saveDiagnosticsFile(), (failure) => describeFailure(failure) === '저장할 위치에 파일을 만들지 못했어요. (denied)');
+      await assert.rejects(desktop.saveDiagnosticsFile(), (failure) => describeFailure(failure) === '이 폴더에는 파일을 저장할 권한이 없어요. 다른 폴더를 골라 주세요.');
     } finally { failing.restore(); }
 
     // Outside the desktop app nothing is asked or written.
@@ -2692,7 +2692,7 @@ const assistSource = readFileSync('src-tauri/src/assets/watch_assist.js', 'utf8'
       };
       assert.deepEqual(await run(async () => ({ path: '/x/diag.zip', files: [] })), [{ busy: true, outcome: null }, { busy: false, outcome: { ok: true, path: '/x/diag.zip' } }], 'busy, then the saved path');
       assert.deepEqual(await run(async () => null), [{ busy: true, outcome: null }, { busy: false, outcome: null }], 'a cancelled dialog ends idle without a result');
-      assert.deepEqual(await run(async () => { throw '저장할 위치에 파일을 만들지 못했어요. (denied)'; }), [{ busy: true, outcome: null }, { busy: false, outcome: { ok: false, text: '저장할 위치에 파일을 만들지 못했어요. (denied)' } }], 'a Rust sentence is shown as it is');
+      assert.deepEqual(await run(async () => { throw '이 폴더에는 파일을 저장할 권한이 없어요. 다른 폴더를 골라 주세요.'; }), [{ busy: true, outcome: null }, { busy: false, outcome: { ok: false, text: '이 폴더에는 파일을 저장할 권한이 없어요. 다른 폴더를 골라 주세요.' } }], 'a Rust sentence is shown as it is');
       assert.deepEqual((await run(async () => { throw new Error('boom'); })).at(-1), { busy: false, outcome: { ok: false, text: DIAGNOSTICS_FAILED_TEXT } }, 'an unknown error gets the plain fallback');
       assert.equal(DIAGNOSTICS_SAVED_TEXT, '진단 파일을 저장했어요. 이 파일을 전달해 주세요.');
     }
