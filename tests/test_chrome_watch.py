@@ -1160,13 +1160,17 @@ def test_replayed_crash_during_revival_recovers(tmp_path, caplog):
         if len(browser.navigations) == 1:
             browser.emit("Target.targetCrashed", {"targetId": "T1", "status": "crashed", "errorCode": 9})
 
-    def replay_before_revival(message):
-        if message["method"] == "Page.navigate" and browser.navigations:
-            handle({"id": -1, "method": "Inspector.enable", "sessionId": PAGE_SESSION})
+    def replay_after_revival(message):
+        replay = message["method"] == "Page.navigate" and bool(browser.navigations)
         handle(message)
+        if replay:
+            # The stale notification follows the reload event, so only the
+            # reviving-session guard prevents it from marking the page crashed.
+            browser.emit("Inspector.targetCrashed", {}, PAGE_SESSION)
+            browser.crashed_sessions.clear()  # A replay does not crash the new renderer.
 
     browser.navigate = crash_once
-    browser.handle = replay_before_revival
+    browser.handle = replay_after_revival
     harness.manager.start(items(1))
     harness.wait_thread()
     assert harness.manager.status()["state"] == "finished"
@@ -1202,3 +1206,47 @@ def test_recovery_failure_discards_detached_session(tmp_path, monkeypatch):
     harness.wait_thread()
     assert harness.manager.status()["state"] == "finished"
     assert calls == 3
+
+
+@pytest.mark.parametrize("failure", ["timeout", "error"])
+def test_failed_same_session_revival_retries_navigate_first(tmp_path, monkeypatch, caplog, failure):
+    caplog.set_level(logging.INFO, logger=cw.logger.name)
+    harness = Harness(tmp_path, [FakePlayer()])
+    browser = harness.browser
+    navigate = browser.navigate
+    original = CdpClient.call
+    failed = False
+
+    def crash_once(message, url):
+        navigate(message, url)
+        if len(browser.navigations) == 1:
+            browser.emit("Target.targetCrashed", {"targetId": "T1", "status": "crashed", "errorCode": 9})
+
+    def call(client, method, *args, **kwargs):
+        nonlocal failed
+        if method == "Page.navigate" and browser.crashed_sessions and not failed:
+            failed = True
+            if failure == "timeout":
+                raise cw.CdpTimeout("revival timed out")
+            browser.fail_methods[method] = "revival failed"
+            try:
+                return original(client, method, *args, **kwargs)
+            finally:
+                browser.fail_methods.pop(method)
+                assert PAGE_SESSION in browser.crashed_sessions
+        return original(client, method, *args, **kwargs)
+
+    browser.navigate = crash_once
+    monkeypatch.setattr(CdpClient, "call", call)
+    harness.manager.start(items(1))
+    harness.wait_thread()
+    assert failed
+    assert harness.manager.status()["state"] == "finished"
+    assert len(browser.navigations) == 2
+    assert caplog.text.count("chrome_watch recover run_id=") == 2
+    assert caplog.text.count("chrome_watch renderer_gone run_id=") == 1
+    commands = browser.sent
+    first_navigation = next(i for i, command in enumerate(commands) if command["method"] == "Page.navigate")
+    revival_navigation = max(i for i, command in enumerate(commands) if command["method"] == "Page.navigate")
+    # No domain setup may run against the still-crashed target between attempts.
+    assert not any(command["method"] in {"Page.enable", "Runtime.enable"} for command in commands[first_navigation + 1:revival_navigation])

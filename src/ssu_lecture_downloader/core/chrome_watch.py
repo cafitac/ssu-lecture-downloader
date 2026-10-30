@@ -694,6 +694,7 @@ class _Playback:
         self.window_closed = False
         self.connection_closed = False
         self.reviving_session: str | None = None
+        self.revival_started = False
         self.renderer_gone = False
         self.crash_details: dict[str, Any] = {}
         self.crash_logged = False
@@ -811,6 +812,8 @@ class _Playback:
             self.crash_details.update({key: params[key] for key in ("status", "errorCode") if key in params})
         elif method == "Inspector.targetReloadedAfterCrash" and session == self.page_session:
             self.renderer_gone = False
+            if session == self.reviving_session:
+                self.revival_started = True
         elif method == "Target.attachedToTarget":
             info = params.get("targetInfo") or {}
             child = params.get("sessionId")
@@ -1114,10 +1117,13 @@ class _Playback:
             self.m._sleep(self.m.timings.port_poll)
 
     def _recover_page(self, plan: dict[str, Any]) -> bool:
+        self.revival_started = False
         try:
             return self._recover_page_attempt(plan)
         except Exception:
             self.pump(0)
+            if self.reviving_session is not None and not self.revival_started:
+                self.renderer_gone = True
             self._log_renderer_crash()
             self.page_session = None
             self.sessions.clear()
@@ -1176,10 +1182,11 @@ class _Playback:
             self.contexts.clear()
             self.reports.clear()
             self.renderer_gone = False
-            self.crash_details.clear()
-            self.crash_logged = False
             self.accepting = self.ended = False
             result = self.call("Page.navigate", {"url": plan["launch_url"]}, self.page_session)
+            self.revival_started = True
+            self.crash_details.clear()
+            self.crash_logged = False
             if result.get("errorText"):
                 raise ChromeWatchError("chrome_navigation_failed", "강의 페이지를 열지 못했어요.")
             navigated = True

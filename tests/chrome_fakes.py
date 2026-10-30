@@ -142,13 +142,13 @@ class FakeBrowser:
             return  # Real Chrome never replies until Page.navigate revives the target.
         if method == "Inspector.enable" and session in self.crashed_sessions:
             self.emit("Inspector.targetCrashed", {}, session)
+        if method in self.fail_methods:
+            self.incoming.put(json.dumps({"id": message["id"], "error": {"code": -32000, "message": self.fail_methods[method]}}))
+            return
         if method == "Page.navigate":
             if session in self.crashed_sessions:
                 self.emit("Inspector.targetReloadedAfterCrash", {}, session)
             self.crashed_sessions.clear()
-        if method in self.fail_methods:
-            self.incoming.put(json.dumps({"id": message["id"], "error": {"code": -32000, "message": self.fail_methods[method]}}))
-            return
         if method == "Target.getTargets":
             return self.reply(message, {"targetInfos": [{"targetId": "T1", "type": "page", "url": "about:blank"}]})
         if method == "Target.attachToTarget":
