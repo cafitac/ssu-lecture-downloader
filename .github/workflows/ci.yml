@@ -1,16 +1,14 @@
 name: CI
 
 on:
+  # PR CI already validates the exact merge result; develop pushes are not re-run.
   pull_request:
-    branches: [develop]
-  push:
     branches: [develop]
 
 concurrency:
-  # Pushes to develop get their own group (per SHA) so a pending run is never dropped.
-  group: ci-${{ github.ref }}-${{ github.event_name == 'push' && github.sha || 'pr' }}
-  # Pull request pushes supersede each other; runs on develop all finish.
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  # A newer push to the same pull request supersedes the running one.
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read

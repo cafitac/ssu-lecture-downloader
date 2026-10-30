@@ -108,10 +108,16 @@ cd frontend/src-tauri && cargo test
 
 ### CI
 
-GitHub Actions (`.github/workflows/ci.yml`) runs on every pull request to `develop` and every push
-to `develop`, on an Intel macOS runner (`macos-15-intel`, same architecture as the installed app):
-`uv run pytest`, `uv run lint-imports`, `npm run typecheck`, `npm run test:contract`, the backend sidecar build,
-`cargo test` and `npm run tauri build -- --bundles app` (no dmg, signing or upload).
+GitHub Actions (`.github/workflows/ci.yml`) runs on every pull request to `develop` (not again after
+the merge). Five jobs run in parallel:
+
+- `python` (ubuntu-latest): `uv run pytest` and `uv run lint-imports`.
+- `frontend` (ubuntu-latest): `npm run typecheck` and `npm run test:contract`.
+- `rust` (macos-15, Apple silicon): `cargo test`.
+- `bundle` (macos-15-intel, same architecture as the installed app): `tests/test_macos_invariants.py`,
+  the backend sidecar build and smoke test, and `npm run tauri:build -- --bundles app` (no dmg, signing or upload).
+- `windows` (windows-latest): `cargo check --lib`.
+
 `tests/test_macos_invariants.py` and `frontend/src-tauri/src/invariant_tests.rs` pin the macOS
 behavior (app-data paths, LaunchAgent, Chrome argv, sidecar location, local-STT gate) that
 platform-split changes must keep identical.
