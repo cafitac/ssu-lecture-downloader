@@ -42,7 +42,7 @@ from typing import Any, Protocol, cast
 
 from ssu_lecture_downloader import __version__
 from ssu_lecture_downloader.core.download import safe_filename
-from ssu_lecture_downloader.core.errors import PathTooLong
+from ssu_lecture_downloader.core.errors import PathTooLong, TidyRunNotFound
 from ssu_lecture_downloader.core.library_layout import (
     AUDIO_SUFFIX,
     CourseLayout,
@@ -99,10 +99,6 @@ LECTURE_ROLES = frozenset({'video', 'audio', 'srt', 'text', 'text_legacy', 'md',
 _ROLE_ORDER = {'video': 0, 'audio': 1, 'srt': 2, 'text': 3, 'text_legacy': 3, 'md': 4, 'json': 5, 'material': 6}
 # link() errors that mean "this volume has no hard links": fall back to check + rename.
 _LINK_UNSUPPORTED = frozenset(code for code in (errno.EXDEV, errno.EPERM, errno.ENOTSUP, errno.EOPNOTSUPP, errno.EMLINK, errno.ENOSYS) if code)
-
-
-class TidyRunNotFound(LookupError):
-    """No journal for the run id (or the id is not a run id)."""
 
 
 def _monotonic() -> float:
@@ -291,10 +287,29 @@ def _list_course_folder(folder: Path) -> tuple[list[_Found], list[tuple[Path, st
     return found, others
 
 
+def _disk_only_leftovers(found: list[_Found], index: LibraryIndex) -> set[Path]:
+    """Old files a preview will always leave (`duplicate_transcript`), knowable without the LMS: a copy `(n)` of a
+    transcript file, the oldest `.txt` next to a `.transcript.txt`, or next to a transcript text already in the lecture folder."""
+    leftovers: set[Path] = set()
+    main_text = {f.parsed.content_id for f in found if f.parsed.role == 'text' and f.parsed.duplicate is None}
+    for f in found:
+        role, content_id = f.parsed.role, f.parsed.content_id
+        if f.parsed.duplicate is not None and role in ('text', 'text_legacy', 'md', 'json'):
+            leftovers.add(f.path)
+        elif role == 'text_legacy':
+            lecture = index.lectures.get(content_id)
+            if content_id in main_text or (lecture is not None and 'text' in index.lecture_files(lecture)):
+                leftovers.add(f.path)
+    return leftovers
+
+
 def count_legacy_files(course_dir: Path) -> int:
-    """How many files directly inside `course_dir` still carry the old `[content id]` name."""
+    """How many files directly inside `course_dir` a tidy-up could still move: old `[content id]` names, without the
+    leftovers that need no LMS to know they stay (`.part` files, unknown names and duplicate transcripts)."""
     found, _ = _list_course_folder(course_dir)
-    return len(found)
+    if not found:
+        return 0
+    return len(found) - len(_disk_only_leftovers(found, LibraryIndex.scan(course_dir)))
 
 
 def legacy_summary(root: Path) -> dict[str, Any]:
@@ -367,7 +382,9 @@ def exclusive_move(source: Path, destination: Path) -> str:
     try:
         os.link(source, destination)
     except FileExistsError:
-        if _same_inode(source, destination):  # a half-finished earlier move: only the old name is left to remove
+        # Two names of one inode: a half-finished earlier move (the old name is left to remove), unless the file
+        # has only one name, i.e. the destination is the same entry spelled differently (case-insensitive volume).
+        if _same_inode(source, destination) and os.lstat(source).st_nlink >= 2:
             os.unlink(source)
             return 'moved'
         return 'exists'
@@ -378,7 +395,15 @@ def exclusive_move(source: Path, destination: Path) -> str:
             return 'exists'
         os.rename(source, destination)
         return 'moved'
-    os.unlink(source)
+    try:
+        os.unlink(source)
+    except OSError:
+        try:  # the link was ours and the old name cannot go: take the new name back so nothing half-moved is left
+            if _same_inode(source, destination):
+                os.unlink(destination)
+        except OSError:
+            pass
+        raise
     return 'moved'
 
 
@@ -497,6 +522,44 @@ def _resolve_inside(root: Path, relative: object) -> Path | None:
         except OSError:
             return None
     return current / parts[-1]
+
+
+def _visible(parts: list[str]) -> bool:
+    return all(part and part not in ('.', '..') and not part.startswith('.') for part in parts)
+
+
+def _move_shape_ok(source: object, destination: object) -> bool:
+    """A journaled move has the shape this module writes: `<course>/<file>` -> `<course>/<week>/[<lecture>/]<file>`, or the
+    lecture's `.ssu/transcript.md|json`. Anything else in a journal (planted or corrupt) is never acted on."""
+    if not isinstance(source, str) or not isinstance(destination, str):
+        return False
+    src, dst = source.split('/'), destination.split('/')
+    if len(src) != 2 or not 3 <= len(dst) <= 5 or dst[0] != src[0] or not _visible(src):
+        return False
+    if len(dst) == 5:
+        return dst[3] == '.ssu' and _visible(dst[:3]) and dst[4] in ('transcript.md', 'transcript.json')
+    return _visible(dst)
+
+
+def _meta_kind(destination: object) -> str | None:
+    """`item` for `<course>/<week>/<lecture>/.ssu/item.json`, `materials` for `<course>/<week>/.ssu/materials.json`, else None."""
+    if not isinstance(destination, str):
+        return None
+    parts = destination.split('/')
+    if len(parts) == 5 and parts[3:] == ['.ssu', ITEM_FILE_NAME] and _visible(parts[:3]):
+        return 'item'
+    if len(parts) == 4 and parts[2:] == ['.ssu', MATERIALS_FILE_NAME] and _visible(parts[:2]):
+        return 'materials'
+    return None
+
+
+def _mkdir_shape_ok(destination: object) -> bool:
+    if not isinstance(destination, str):
+        return False
+    parts = destination.split('/')
+    if parts[-1] == '.ssu':
+        return len(parts) in (3, 4) and _visible(parts[:-1])
+    return len(parts) in (2, 3) and _visible(parts)
 
 
 def _int_field(line: dict[str, Any], key: str) -> int | None:
@@ -899,7 +962,7 @@ class MigrationRunner:
         try:
             for line in dangling:
                 source, destination = _resolve_inside(root, line.get('source')), _resolve_inside(root, line.get('destination'))
-                if source is None or destination is None or os.path.lexists(source):
+                if source is None or destination is None or not _move_shape_ok(line.get('source'), line.get('destination')) or os.path.lexists(source):
                     continue
                 try:
                     info = os.lstat(destination)
@@ -932,22 +995,26 @@ class MigrationRunner:
         progress = _Throttle(on_progress, len(todo), self._clock)
         restored = 0
         skips: list[PlannedSkip] = []
+        stopped = False
+        pending = {(line.get('source'), line.get('destination')) for line in todo}  # moves still in their new place
         try:
             progress.tick(0, force=True)
             for index, line in enumerate(todo, start=1):
                 if should_cancel is not None and should_cancel():
+                    stopped = True
                     break
                 reason = self._undo_one(root, line)
                 if reason is None:
                     restored += 1
+                    pending.discard((line.get('source'), line.get('destination')))
                     journal.append('undo_done', source=line.get('source'), destination=line.get('destination'))
                 else:
                     skips.append(PlannedSkip(str(line.get('destination')), reason))
                     journal.append('undo_skip', source=line.get('source'), destination=line.get('destination'), reason=reason)
                 progress.tick(index)
             progress.tick(len(todo), force=True)
-            if not (should_cancel is not None and should_cancel()):
-                self._undo_meta(root, lines)
+            if not stopped:
+                self._undo_meta(root, lines, pending)
                 self._undo_dirs(root, lines)
         finally:
             journal.close()
@@ -956,7 +1023,7 @@ class MigrationRunner:
     @staticmethod
     def _undo_one(root: Path, line: dict[str, Any]) -> str | None:
         source, destination = _resolve_inside(root, line.get('source')), _resolve_inside(root, line.get('destination'))
-        if source is None or destination is None:
+        if source is None or destination is None or not _move_shape_ok(line.get('source'), line.get('destination')):
             return UNKNOWN_FILE
         try:
             info = os.lstat(destination)
@@ -974,21 +1041,29 @@ class MigrationRunner:
             return MOVE_FAILED
 
     @staticmethod
-    def _undo_meta(root: Path, lines: list[dict[str, Any]]) -> None:
-        """Take back the metadata the run wrote, but only while it is still byte-identical to what the run wrote."""
+    def _undo_meta(root: Path, lines: list[dict[str, Any]], pending: set[tuple[Any, Any]]) -> None:
+        """Take back the metadata the run wrote, but only the app's own metadata files, and only while a file is
+        still byte-identical to what the run wrote. A week keeps its `materials.json` while a material moved into
+        it by this run is still there."""
+        waiting_weeks = {'/'.join(str(destination).split('/')[:2]) for _, destination in pending if len(str(destination).split('/')) == 3}
+        max_b64 = (MAX_META_BYTES + 2) // 3 * 4
         for line in reversed([line for line in lines if line.get('op') == 'meta_written']):
-            path = _resolve_inside(root, line.get('destination'))
+            kind = _meta_kind(line.get('destination'))
+            path = _resolve_inside(root, line.get('destination')) if kind else None
             current = None if path is None else _read_small(path)
             if path is None or current is None or hashlib.sha256(current).hexdigest() != line.get('sha256'):
+                continue
+            if kind == 'materials' and '/'.join(str(line['destination']).split('/')[:2]) in waiting_weeks:
                 continue
             previous_b64 = line.get('previous_b64')
             if isinstance(previous_b64, str):
                 try:
-                    _write_bytes_atomically(path, base64.b64decode(previous_b64, validate=True))
+                    if len(previous_b64) <= max_b64:
+                        _write_bytes_atomically(path, base64.b64decode(previous_b64, validate=True))
                 except (binascii.Error, OSError):
                     pass
                 continue
-            if path.name == ITEM_FILE_NAME and _lecture_in_use(path.parent.parent):
+            if kind == 'item' and _lecture_in_use(path.parent.parent):
                 continue  # downloads added files since: the folder is a living lecture, keep its record
             try:
                 os.unlink(path)
@@ -998,7 +1073,7 @@ class MigrationRunner:
     @staticmethod
     def _undo_dirs(root: Path, lines: list[dict[str, Any]]) -> None:
         for line in reversed([line for line in lines if line.get('op') == 'mkdir']):
-            path = _resolve_inside(root, line.get('destination'))
+            path = _resolve_inside(root, line.get('destination')) if _mkdir_shape_ok(line.get('destination')) else None
             if path is None:
                 continue
             try:
@@ -1042,7 +1117,8 @@ def _lecture_destination(paths: LecturePaths, found: _Found, has_main_text: bool
         return None, UNKNOWN_FILE
     if parsed.duplicate is not None:  # Q5: a second copy of the lecture's video/audio/subtitles joins the lecture folder
         if role in ('video', 'audio', 'srt'):
-            return directory / f'{stem} ({parsed.duplicate}).{extension}', None
+            base = f'{stem}{AUDIO_SUFFIX}' if role == 'audio' else stem
+            return directory / f'{base} ({parsed.duplicate}).{extension}', None
         return None, DUPLICATE_TRANSCRIPT
     if role == 'video':
         return directory / f'{stem}.{extension}', None

@@ -12,12 +12,12 @@ from typing import Any
 from fastapi import APIRouter
 from pydantic import BaseModel
 
+from ssu_lecture_downloader.core.errors import TidyRunNotFound
 from ssu_lecture_downloader.core.jobs import Job, JobOutcome
 from ssu_lecture_downloader.core.library_migration import (
     RUN_ID_PATTERN,
     CatalogCourse,
     MigrationRunner,
-    TidyRunNotFound,
     legacy_summary,
     run_journal_path,
 )

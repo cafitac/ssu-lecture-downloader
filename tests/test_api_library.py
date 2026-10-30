@@ -167,6 +167,7 @@ def test_a_tidy_up_is_refused_while_a_download_job_runs_and_keeps_its_preview(ap
     try:
         assert error_code(api.apply(preview['plan_id'])) == 'library_busy'
         assert error_code(api.client.post('/api/library/tidy/plan/jobs', json={})) == 'library_busy'
+        assert error_code(api.client.post('/api/library/tidy/undo/jobs', json={'run_id': '20200101T000000Z-000000'})) == 'library_busy'
     finally:
         api.service.release.set()
     runner = next(thread for thread in threading.enumerate() if thread.name == f'ssu-job-{started.json()["job_id"][:8]}')

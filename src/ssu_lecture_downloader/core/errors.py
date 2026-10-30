@@ -27,6 +27,10 @@ class LibraryConflict(OSError):
     error_code = "library_conflict"
 
 
+class TidyRunNotFound(LookupError):
+    """No journal for the run id (or the id is not a run id)."""
+
+
 def stable_error_code(exc: BaseException) -> str:
     """The code a failed item reports: the exception's own stable `error_code` when it has one, else its class name."""
     code = getattr(exc, "error_code", None)

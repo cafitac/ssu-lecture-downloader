@@ -72,6 +72,18 @@ rules); added: `move_failed` (see decisions to confirm).
 - No entry in `/api/health` capabilities (`health.py` is not owned); the UI can probe `GET /api/library/tidy/runs` (404 on an old backend).
 - The legacy summary counts attributable files of every course folder (no LMS), so it can exceed what a preview moves when some folders are `course_not_matched`.
 
+## Review cycle 1 repairs
+
+- Undo trusts the journal only by shape: a `done` line must be `<course>/<file>` -> `<course>/<week>/[<lecture>/]<file>` (or the lecture's `.ssu/transcript.md|json`), a `mkdir` line a week/lecture/`.ssu` folder, a `meta_written` line exactly `<course>/<week>/<lecture>/.ssu/item.json` or `<course>/<week>/.ssu/materials.json`; `previous_b64` is bounded to the metadata size cap. Anything else is skipped (and never unlinked or overwritten), also in crash recovery. The tampered-journal test now names in-root user files (pdf, docx) with their real size, mtime, inode and hash.
+- `TidyRunNotFound` moved to `core/errors.py` (path added by coordinator decision, next to `PathTooLong` / `LibraryConflict`).
+- `exclusive_move`: a destination that is the same entry as the source (case-only spelling on a case-insensitive volume, one name only) is `exists`, never an unlink; when the link worked but the old name cannot be removed, the new name is taken back and the error re-raised (the file is skipped as `move_failed`).
+- Undo keeps a week's `materials.json` while a material this run moved into that week is still in its new place; undo cleans up (metadata, folders) unless the loop actually stopped on cancel.
+- `legacy_file_count` / the summary no longer count files a preview always leaves for disk-only reasons (`duplicate_transcript`: a copy `(n)` of a transcript file, the oldest `.txt` next to a `.transcript.txt` or next to a transcript text already in the lecture folder; `.part`, unknown names and non-regular files were never counted), so the course notice does not return after a tidy-up.
+- Duplicate audio copies are `<stem> 음성 (n).<ext>`.
+- Contract amendment: `lecture_stem` in a move is null for materials.
+- Not done (P4, noted): the metadata intent is not journaled before the metadata is written (a crash in between leaves app metadata that a later undo cannot take back; the next preview recognises it as the lecture); `runs()` is a plain read of the journals and does not run crash recovery, so a completed move whose `done` line was lost is counted only after the next apply/undo.
+- Follow-ups: make `lms_service._course_layout` public; move `has_active` from `ActivityRegistry` onto `JobRegistry`.
+
 ## Progress and evidence
 
 - 2026-10-30: implemented from origin/develop d697c33. `UV_LOCKED=1 uv run pytest -q`: 855 -> 876 passed. `UV_LOCKED=1 uv run lint-imports`: 4 kept, 0 broken.
@@ -84,4 +96,4 @@ New tests: 16 functions, 21 cases (`tests/test_library_migration.py` 12 function
 
 ## Touched paths
 
-Owned (sprint-1.md): `src/ssu_lecture_downloader/core/library_migration.py` (new), `service/routers/library.py` (new), `service/api.py`, `service/app_context.py`, `service/routers/download.py`, `service/routers/lms_pages.py`, `service/routers/credentials.py`, `service/api_errors.py`, `tests/test_library_migration.py` (new), `tests/test_api_library.py` (new). `service/routers/__init__.py` needed no edit. Plus this record.
+Owned (sprint-1.md): `src/ssu_lecture_downloader/core/library_migration.py` (new), `service/routers/library.py` (new), `service/api.py`, `service/app_context.py`, `service/routers/download.py`, `service/routers/lms_pages.py`, `service/routers/credentials.py`, `service/api_errors.py`, `tests/test_library_migration.py` (new), `tests/test_api_library.py` (new). `service/routers/__init__.py` needed no edit. Outside the sprint-owned list, by coordinator decision at review cycle 1: `src/ssu_lecture_downloader/core/errors.py` (`TidyRunNotFound`). Plus this record.

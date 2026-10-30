@@ -7,7 +7,9 @@ joined by thread.
 
 from __future__ import annotations
 
+import base64
 import errno
+import hashlib
 import json
 import os
 import stat
@@ -19,12 +21,12 @@ import pytest
 from test_library_index import COURSE, Lec, rig_for, stages, touch  # noqa: F401  (rig_for is a fixture)
 
 from ssu_lecture_downloader.core import library_migration
+from ssu_lecture_downloader.core.errors import TidyRunNotFound
 from ssu_lecture_downloader.core.download import find_downloaded_files
 from ssu_lecture_downloader.core.library_meta import read_item_meta
 from ssu_lecture_downloader.core.library_migration import (
     CatalogCourse,
     MigrationRunner,
-    TidyRunNotFound,
     count_legacy_files,
     legacy_summary,
     migrations_dir,
@@ -191,9 +193,9 @@ def test_the_preview_lists_the_expected_moves_and_skips_and_changes_nothing(tree
 def test_legacy_summary_counts_attributable_files_per_course_without_the_lms(tree):
     summary = legacy_summary(tree)
 
-    assert {course['folder']: course['legacy_file_count'] for course in summary['courses']} == {LA: 11, EQ: 4, UI: 5, '옛 학기 과목': 2}
-    assert summary['legacy_file_count'] == 22 and summary['course_count'] == 4
-    assert count_legacy_files(tree / LA) == 11
+    assert {course['folder']: course['legacy_file_count'] for course in summary['courses']} == {LA: 10, EQ: 4, UI: 5, '옛 학기 과목': 2}  # the old .txt next to a .transcript.txt always stays: not counted
+    assert summary['legacy_file_count'] == 21 and summary['course_count'] == 4
+    assert count_legacy_files(tree / LA) == 10
 
 
 # --------------------------------------------------------------------------- AC8: apply
@@ -221,6 +223,7 @@ def test_apply_moves_exactly_the_preview_journals_first_and_a_second_preview_has
     week = json.loads((tree / EQ / '05주차' / '.ssu' / 'materials.json').read_text())['entries']
     assert set(week) == {'cid-m0', 'cid-e', 'cid-f'} and week['cid-e']['created_by'] == 'migration'
 
+    assert count_legacy_files(tree / LA) == count_legacy_files(tree / EQ) == count_legacy_files(tree / UI) == 0  # what stays is not offered again
     again = planned(runner, tree)
 
     assert again.moves == [] and {skip.path: skip.reason for skip in again.skips} == EXPECTED_SKIPS
@@ -314,6 +317,28 @@ def test_volumes_without_hard_links_use_check_then_rename_and_still_never_overwr
     assert occupied.read_bytes() == b'first' and other.read_bytes() == b'second'
 
 
+def test_a_move_never_removes_the_only_name_of_a_file_and_takes_its_new_name_back_when_the_old_one_cannot_go(tmp_path):
+    folder = tmp_path / 'case'
+    folder.mkdir()
+    (folder / 'Foo.mp4').write_bytes(b'only copy')
+    if (folder / 'foo.mp4').exists():  # a case-insensitive volume: the "destination" is the file itself
+        assert library_migration.exclusive_move(folder / 'Foo.mp4', folder / 'foo.mp4') == 'exists'
+        assert (folder / 'Foo.mp4').read_bytes() == b'only copy'
+    locked = tmp_path / 'locked'
+    locked.mkdir()
+    (locked / 'a.mp4').write_bytes(b'x')
+    (tmp_path / 'elsewhere').mkdir()
+    locked.chmod(0o500)  # the file can be linked from here but its name cannot be removed
+    try:
+        if os.access(locked, os.W_OK):
+            pytest.skip('directory permissions are not enforced for this user')
+        with pytest.raises(PermissionError):
+            library_migration.exclusive_move(locked / 'a.mp4', tmp_path / 'elsewhere' / 'a.mp4')
+    finally:
+        locked.chmod(0o700)
+    assert (locked / 'a.mp4').read_bytes() == b'x' and os.listdir(tmp_path / 'elsewhere') == []
+
+
 def test_progress_is_throttled_to_ten_files_or_half_a_second(tmp_path):
     root = tmp_path / 'library'
     write_files(root, [f'강의/제목{number} [cid-{number}].mp4' for number in range(25)])
@@ -360,7 +385,9 @@ def test_undo_puts_everything_back_removes_only_what_the_run_made_and_a_second_u
     previous_materials = (tree / EQ / '05주차' / '.ssu' / 'materials.json').read_bytes()
     run = runner.apply(planned(runner, tree))
 
-    undone = runner.undo(tree, run.run_id)
+    checks = iter(range(10_000))
+
+    undone = runner.undo(tree, run.run_id, should_cancel=lambda: next(checks) >= run.moved)  # asked to stop only after the last file
 
     assert undone.restored == run.moved and undone.skips == []
     assert library_state(tree) == original  # same names, inodes, mtimes; the folders the run created are gone, the others stay
@@ -375,6 +402,7 @@ def test_undo_leaves_changed_files_and_occupied_places_and_keeps_new_downloads_i
     run = runner.apply(planned(runner, tree))
     lecture = tree / LA / '05주차' / '선대_5_2'
     (lecture / '선대_5_2.srt').write_bytes(b'edited after the move')
+    (tree / UI / '01주차' / 'UI디자인_1주차_202602.pdf').write_bytes(b'edited after the move')
     write_files(tree, [f'{LA}/선대_5_2 [cid-a].mp4'])  # the old name is taken again
     (lecture / '새로 받은 파일.mp4').write_bytes(b'new download')
     materials = tree / EQ / '05주차' / '.ssu' / 'materials.json'
@@ -386,9 +414,11 @@ def test_undo_leaves_changed_files_and_occupied_places_and_keeps_new_downloads_i
 
     assert {skip.path: skip.reason for skip in undone.skips} == {
         f'{LA}/05주차/선대_5_2/선대_5_2.srt': 'source_changed',
+        f'{UI}/01주차/UI디자인_1주차_202602.pdf': 'source_changed',
         f'{LA}/05주차/선대_5_2/선대_5_2.mp4': 'destination_exists',
     }
-    assert undone.restored == run.moved - 2
+    assert undone.restored == run.moved - 3
+    assert 'canvas-4732412' in json.loads((tree / UI / '01주차' / '.ssu' / 'materials.json').read_text())['entries']  # a material is still there: its week keeps the record
     assert (lecture / '새로 받은 파일.mp4').read_bytes() == b'new download' and read_item_meta(lecture).content_id == 'cid-a'  # the folder is still a lecture
     assert 'cid-later' in json.loads(materials.read_text())['entries']  # metadata changed since the run is left as it is
     assert (lecture / '선대_5_2 자막.txt').exists() is False and (tree / LA / '선대_5_2 [cid-a].txt').is_file()
@@ -401,6 +431,11 @@ def test_a_tampered_journal_cannot_reach_outside_the_library(tree, tmp_path):
     directory = migrations_dir(tree)
     directory.mkdir(parents=True)
     run_id = '20261030T000000Z-abcdef'
+    pdf, docx = tree / EQ / '자료 [cid-f].pdf', tree / LA / 'notes.docx'
+    materials = tree / EQ / '05주차' / '.ssu' / 'materials.json'
+    pdf_before, docx_before, materials_before = pdf.read_bytes(), docx.read_bytes(), materials.read_bytes()
+    docx_info = os.lstat(docx)
+    user_done = {'op': 'done', 'size': docx_info.st_size, 'mtime_ns': docx_info.st_mtime_ns, 'inode': docx_info.st_ino}
     info = os.lstat(outside)  # the journal even knows the outside file's exact size, mtime and inode
     base = {'op': 'done', 'size': info.st_size, 'mtime_ns': info.st_mtime_ns, 'inode': info.st_ino}
     rows = [
@@ -410,13 +445,19 @@ def test_a_tampered_journal_cannot_reach_outside_the_library(tree, tmp_path):
         {**base, 'seq': 4, 'source': 'link/new.txt', 'destination': 'link/outside.txt'},
         {'seq': 5, 'op': 'meta_written', 'destination': 'link/outside.txt', 'sha256': 'x'},
         {'seq': 6, 'op': 'mkdir', 'destination': '../'},
+        # in-root user files named by their real size, mtime, inode and hash
+        {**user_done, 'seq': 7, 'source': f'{LA}/zz.docx', 'destination': f'{LA}/notes.docx'},
+        {'seq': 8, 'op': 'meta_written', 'destination': f'{EQ}/자료 [cid-f].pdf', 'sha256': hashlib.sha256(pdf.read_bytes()).hexdigest()},
+        {'seq': 9, 'op': 'meta_written', 'destination': f'{LA}/notes.docx', 'sha256': hashlib.sha256(docx.read_bytes()).hexdigest(), 'previous_b64': base64.b64encode(b'replaced').decode()},
+        {'seq': 10, 'op': 'meta_written', 'destination': f'{EQ}/05주차/.ssu/materials.json', 'sha256': hashlib.sha256(materials.read_bytes()).hexdigest(), 'previous_b64': 'A' * 400_000},
     ]
     (directory / f'{run_id}.jsonl').write_text('\n'.join(json.dumps(row) for row in rows) + '\nnot json\n')
 
     result = MigrationRunner().undo(tree, run_id)
 
-    assert result.restored == 0 and len(result.skips) == 3
+    assert result.restored == 0 and len(result.skips) == 4
     assert outside.read_text() == 'mine' and not (tmp_path / 'new.txt').exists()
+    assert (pdf.read_bytes(), docx.read_bytes(), materials.read_bytes()) == (pdf_before, docx_before, materials_before) and not (tree / LA / 'zz.docx').exists()
     for bad in ('../x', 'x', '20261030T000000Z-abcdeg'):
         with pytest.raises(TidyRunNotFound):
             MigrationRunner().undo(tree, bad)
