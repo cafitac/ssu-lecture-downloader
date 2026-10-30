@@ -1,6 +1,6 @@
 [package]
 name = "ssu-lecture-downloader"
-version = "0.2.1"
+version = "0.2.2"
 description = "SSU Lecture Downloader"
 authors = ["SSU Lecture Downloader"]
 edition = "2021"
