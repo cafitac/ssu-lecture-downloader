@@ -245,6 +245,9 @@ def test_apply_moves_exactly_the_preview_journals_first_and_a_second_preview_has
 
 def test_nfd_course_apply_recovery_and_undo(tmp_path):
     course = unicodedata.normalize('NFD', '선형대수')
+    (tmp_path / course).mkdir()
+    if not (tmp_path / unicodedata.normalize('NFC', course)).exists():
+        pytest.skip('this volume keeps NFD and NFC names apart (e.g. Linux); the NFD folder case is a macOS one')
     names = [f'{course}/강의 [cid-a].mp4', f'{course}/강의 [cid-a].transcript.md']
     write_files(tmp_path, names)
     before = {name: (tmp_path / name).read_bytes() for name in names}
