@@ -18,7 +18,7 @@ import os
 import re
 import threading
 import unicodedata
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
@@ -371,6 +371,8 @@ class MaterialPaths:
     title: str | None = None
     legacy: Path | None = None
     course_dir: Path | None = None
+    # (week folder, file name, content id) -> does the course plan give that name to ANOTHER material? Set by CourseLayout.
+    claimed_by_other: Callable[[str, str, str], bool] | None = None
 
     @property
     def target(self) -> Path:
@@ -383,6 +385,13 @@ class MaterialPaths:
     @property
     def meta_name(self) -> str:
         return self.file_name
+
+    def name_taken(self, file_name: str) -> bool:
+        """Is `file_name` in this week folder reserved for another material (recorded in materials.json or planned by the course)?"""
+        wanted = _fold(file_name)
+        if any(other != self.content_id and _fold(entry.file_name) == wanted for other, entry in read_materials_meta(self.week_dir).items()):
+            return True
+        return bool(self.claimed_by_other and self.claimed_by_other(self.week_dir.name, file_name, self.content_id))
 
     def _mapped_here(self) -> bool:
         """Is the planned file name recorded in the week's materials.json for THIS content id?"""
@@ -409,6 +418,9 @@ class MaterialPaths:
                 raise LibraryConflict(f'{self.file_name} belongs to another material')
             if self.target.exists() and not self._mapped_here():
                 raise LibraryConflict(f'{self.file_name} is not a material of this app')
+            recorded = entries.get(self.content_id)
+            if recorded is not None and _fold(recorded.file_name) != wanted and (self.week_dir / recorded.file_name).exists():
+                return  # an extra copy (rename): the recorded file stays this material's authoritative one
             upsert_material_meta(self.week_dir, self.content_id, MaterialMeta(file_name=self.file_name, kind=self.kind, title=self.title))
 
 
@@ -631,8 +643,10 @@ class CourseLayout:
         self._claimed: set[tuple[str, str]] = set()
         for entry in self.index.lectures.values():
             self._claimed.add(self._dir_key(entry.lecture_dir))
-        for entry in self.index.materials.values():
+        self._material_owner: dict[tuple[str, str], str] = {}
+        for content_id, entry in self.index.materials.items():
             self._claimed.add((_fold(entry.week_dir.name), _fold(entry.file_name)))
+            self._material_owner[(_fold(entry.week_dir.name), _fold(entry.file_name))] = content_id
         self._lectures: dict[str, LecturePaths] = {}
         self._materials: dict[str, MaterialPaths] = {}
         self._by_identity: dict[str, LecturePaths | MaterialPaths] = {}
@@ -722,7 +736,7 @@ class CourseLayout:
         legacy = index.legacy_material(identity, extension)
         entry = index.materials.get(identity)
         if entry is not None:
-            paths = MaterialPaths(entry.week_dir, entry.file_name, identity, entry.kind, entry.title or target.title, legacy, self.course_dir)
+            paths = MaterialPaths(entry.week_dir, entry.file_name, identity, entry.kind, entry.title or target.title, legacy, self.course_dir, self.material_name_claimed)
         else:
             week = week_folder(target.week_position, target.module_name, self.rules)
             if target.kind == 'canvas_file' and target.week_position is None and not target.module_name:
@@ -737,9 +751,15 @@ class CourseLayout:
                     break
                 number += 1
             self._claimed.add(claim)
-            paths = MaterialPaths(self.course_dir / week, name, identity, 'canvas_file' if target.kind == 'canvas_file' else 'material', target.title or None, legacy, self.course_dir)
+            self._material_owner[claim] = identity
+            paths = MaterialPaths(self.course_dir / week, name, identity, 'canvas_file' if target.kind == 'canvas_file' else 'material', target.title or None, legacy, self.course_dir, self.material_name_claimed)
         self._by_identity[identity] = paths
         return paths
+
+    def material_name_claimed(self, week_folder: str, file_name: str, identity: str) -> bool:
+        with self._lock:
+            owner = self._material_owner.get((_fold(week_folder), _fold(file_name)))
+            return owner is not None and owner != identity
 
     # ---- queries
     def lecture(self, key: str) -> LecturePaths | None:

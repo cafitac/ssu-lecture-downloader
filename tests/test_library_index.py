@@ -198,6 +198,7 @@ def test_legacy_material_prefers_the_planned_extension_then_any_file_of_the_id(t
     index = LibraryIndex.scan(course)
 
     assert index.legacy_material('m1', 'txt') == course / 'n [m1].txt'
+    assert index.legacy_material('m1', 'pdf') == course / 'n [m1].pdf'
     assert index.legacy_material('m1', 'docx') == course / 'n [m1].pdf'  # the material role beats a text role
     assert index.legacy_material('m2', 'pdf') == course / 'a [m2].mp3'
     assert index.legacy_material('canvas-5') == course / 'v [canvas-5].mp4'
@@ -610,19 +611,6 @@ def test_extract_audio_writes_the_explicit_output_path_and_the_standalone_naming
     assert explicit.ok is True and explicit.output_path == explicit_target and explicit_target.read_bytes() == b'audio'
 
 
-def test_legacy_material_prefers_the_planned_extension_then_any_file_of_the_id(tmp_path):
-    course = tmp_path / 'c'
-    touch(course, 'n [m1].txt', 'n [m1].pdf', 'a [m2].mp3', 'v [canvas-5].mp4')
-    index = LibraryIndex.scan(course)
-
-    assert index.legacy_material('m1', 'txt') == course / 'n [m1].txt'
-    assert index.legacy_material('m1', 'pdf') == course / 'n [m1].pdf'
-    assert index.legacy_material('m1', 'docx') == course / 'n [m1].pdf'  # the material role beats a text role
-    assert index.legacy_material('m2', 'pdf') == course / 'a [m2].mp3'
-    assert index.legacy_material('canvas-5') == course / 'v [canvas-5].mp4'
-    assert index.legacy_material('nothing', 'pdf') is None
-
-
 def test_the_written_file_wins_over_a_dry_run_plan_that_points_elsewhere(rig_for, monkeypatch):
     import dataclasses
 
@@ -649,3 +637,46 @@ def test_the_written_file_wins_over_a_dry_run_plan_that_points_elsewhere(rig_for
     assert (written / '선대_5_2.transcript.txt').is_file(), 'outputs follow the file that was written'
     assert not (written / '선대_5_2.mp4').exists()
     assert sorted(path.name for path in decoy.lecture_dir.iterdir()) == [decoy.targets['video'].name]
+
+
+def test_renaming_a_material_never_takes_a_name_the_course_plan_or_materials_json_gave_to_another_material(rig_for):
+    rig = rig_for(
+        Lec(111, '자료', 'cid-a', lesson=1, kind='pdf', file_name='a.pdf'),
+        Lec(112, '자료', 'cid-b', lesson=2, kind='pdf', file_name='b.pdf'),
+    )
+    week = rig.course_dir / '05주차'
+
+    def download(item_id: int, strategy: str):
+        return rig.service.batch_download_lectures('u', 'p', course_id=42, course_name=COURSE, output_dir=rig.root, dry_run=False, module_item_ids=[item_id], conflict_strategy=strategy)
+
+    first = download(111, 'rename')  # A alone: the first copy keeps the plain name
+    second = download(111, 'rename')  # A again: B's planned "(2)" is reserved although B has no bytes yet
+    third = download(112, 'rename')  # B arrives: it still gets its own planned name
+
+    assert [Path(r.items[0].output_path).name for r in (first, second, third)] == ['자료.pdf', '자료 (3).pdf', '자료 (2).pdf']
+    assert sorted(path.name for path in week.iterdir() if path.is_file()) == ['자료 (2).pdf', '자료 (3).pdf', '자료.pdf']
+    assert not list(week.glob('*.part'))
+    entries = json.loads((week / '.ssu' / 'materials.json').read_text(encoding='utf-8'))['entries']
+    assert (entries['cid-a']['file_name'], entries['cid-b']['file_name']) == ('자료.pdf', '자료 (2).pdf')  # an extra copy does not repoint A
+
+
+def test_library_conflicts_and_path_budget_failures_have_stable_codes_everywhere(rig_for, monkeypatch):
+    from ssu_lecture_downloader.core.errors import LibraryConflict, PathTooLong
+    from ssu_lecture_downloader.core.library_layout import MaterialPaths
+    from ssu_lecture_downloader.service.api_errors import background_job_error_code, service_exception_error
+
+    errors = {LibraryConflict: (409, 'library_conflict'), PathTooLong: (400, 'path_too_long')}
+    for exc_type, (status, code) in errors.items():
+        mapped = service_exception_error(exc_type('x'), None)
+        assert (mapped.status_code, mapped.detail['error_code']) == (status, code) and mapped.detail['message']
+        assert background_job_error_code(exc_type('x'), None) == code
+
+    rig = rig_for(Lec(112, '자료', 'cid-b', kind='pdf', file_name='b.pdf'))
+
+    def conflict(self):
+        raise LibraryConflict('taken')
+
+    monkeypatch.setattr(MaterialPaths, 'prepare', conflict)
+    result = rig.service.batch_download_lectures('u', 'p', course_id=42, course_name=COURSE, output_dir=rig.root, dry_run=False, module_item_ids=[112])
+
+    assert [(item.ok, item.error_code) for item in result.items] == [(False, 'library_conflict')]

@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from ssu_lecture_downloader.core import postprocess_media, stt
+from ssu_lecture_downloader.core.errors import stable_error_code
 from ssu_lecture_downloader.core.jobs import Job, JobOutcome
 from ssu_lecture_downloader.core.library_layout import LecturePaths, explicit_lecture_paths
 from ssu_lecture_downloader.service.api_models import ArtifactDownloadRequest
@@ -79,7 +80,7 @@ class LecturePipeline:
             code = CANCELLED
         except Exception as exc:  # noqa: BLE001 - one lecture's bug must never reach the executor or a sibling
             logger.exception("lecture pipeline failed unexpectedly (module_item_id=%s, stage=%s)", self.module_item_id, self.stage)
-            code = type(exc).__name__
+            code = stable_error_code(exc)
         if code is None:
             result = LectureResult(self.module_item_id, "done")
             self.owner.emit({"stage": "artifact_item_done", **self.context})

@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 import time
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -108,9 +108,13 @@ def plan_library_download(
         file_exists = existing is not None
     elif conflict_strategy == 'rename':
         number = 2
-        while chosen.exists():
+        is_material = isinstance(library, MaterialPaths)
+        while chosen.exists() or (is_material and chosen != target and library.name_taken(chosen.name)):
+            # a material's copy never takes a name another material holds or has been planned (reserved, not yet written)
             chosen = directory / f'{collision_name(stem, number)}.{ext}'
             number += 1
+        if is_material and chosen != target:
+            library = replace(library, file_name=chosen.name)  # the name actually written is the one prepare() records
         file_exists = chosen.exists()
     return DownloadPlan(
         output_dir=output_dir,

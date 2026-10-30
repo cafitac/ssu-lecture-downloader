@@ -28,7 +28,7 @@ from ssu_lecture_downloader.core.download import (
     plan_library_download,
     safe_filename,
 )
-from ssu_lecture_downloader.core.errors import classify_network_error, is_session_lost, is_signed_url_failure, response_status
+from ssu_lecture_downloader.core.errors import classify_network_error, is_session_lost, is_signed_url_failure, response_status, stable_error_code
 from ssu_lecture_downloader.core.http_client import HttpClient
 from ssu_lecture_downloader.core.library_layout import (
     CourseLayout,
@@ -1453,7 +1453,7 @@ class SsuLectureService:
                 continue
             module_item_id = lecture.module_item_id
             if isinstance(outcome, (Exception, str)):
-                code = outcome if isinstance(outcome, str) else type(outcome).__name__
+                code = outcome if isinstance(outcome, str) else stable_error_code(outcome)
                 emit({"stage": "failed", "index": index, "total": total, "module_item_id": module_item_id, "title": lecture.title, "error_code": code})
                 immediate_results[index] = _batch_item_result(course_id=course_id, module_item_id=module_item_id, lecture=lecture, dry_run=dry_run, ok=False, error_code=code)
             elif isinstance(outcome, BatchDownloadItemResult):
@@ -1614,7 +1614,7 @@ class SsuLectureService:
                     downloaded = future.result()
                 except Exception as exc:
                     title = planned.get("title") or lecture.title
-                    emit({"stage": "failed", "index": index, "total": total, "module_item_id": planned["module_item_id"], "title": title, "error_code": type(exc).__name__})
+                    emit({"stage": "failed", "index": index, "total": total, "module_item_id": planned["module_item_id"], "title": title, "error_code": stable_error_code(exc)})
                     settle(index, _batch_item_result(
                         course_id=course_id,
                         module_item_id=planned["module_item_id"],
@@ -1623,7 +1623,7 @@ class SsuLectureService:
                         plan=planned.get("plan"),
                         title=title,
                         ok=False,
-                        error_code=type(exc).__name__,
+                        error_code=stable_error_code(exc),
                     ))
                 else:
                     settle(index, downloaded)
