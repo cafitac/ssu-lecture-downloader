@@ -330,6 +330,7 @@ def test_a_stalled_lecture_is_reloaded_once_then_skipped_with_a_visible_notice(t
     messages = [record.getMessage() for record in caplog.records]
     assert any("chrome_watch stall " in message and "seconds_without_progress=" in message and "action=skip" in message for message in messages)
     assert any("chrome_watch skip " in message and "reason=stalled" in message for message in messages)
+    assert any("chrome_watch item_end " in message and "module_item_id=1 outcome=skipped elapsed_seconds=" in message for message in messages)
     assert status["state"] == "finished"
     assert [item["state"] for item in status["items"]] == ["skipped", "done"]
     assert status["items"][0]["reason"] == cw.STALL_SKIP_REASON

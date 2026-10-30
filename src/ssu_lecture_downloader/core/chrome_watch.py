@@ -866,7 +866,7 @@ class _Playback:
         with self.m._lock:
             if outcome == "done":
                 item.state = "done"
-                logger.info("chrome_watch item_end run_id=%s module_item_id=%s outcome=done elapsed_seconds=%.1f", run.run_id, item.module_item_id, self.m._clock() - started)
+            logger.info("chrome_watch item_end run_id=%s module_item_id=%s outcome=%s elapsed_seconds=%.1f", run.run_id, item.module_item_id, outcome, self.m._clock() - started)
             run.position = None
             run.duration = None
 
