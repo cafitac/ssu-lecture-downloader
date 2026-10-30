@@ -1,4 +1,4 @@
-import type { AudioExtractionResult, ChromeWatchItemInput, ChromeWatchStatus, BatchDownloadItemResult, BatchDownloadResult, CanvasFileDownloadResponse, ConflictStrategy, CourseDetailResponse, CoursesResponse, CredentialStatus, DeadlinesResponse, DownloadJobStatus, DownloadOutputFormat, DownloadResult, LmsSessionBridgeResponse, MediaDependencyInstallResult, MediaDependencyStatusResponse, NativeDownloadPlanResult, OfficialViewerPlanResult, OfficialViewerSessionBridgeResult, PageFilesResponse, PostprocessJobStatus, ProgressEvent, RemoteSttConfigPatch, RemoteSttStatus, STTProviderStatusResponse, TermsResponse, TidyJobKind, TidyJobStatus, TidyRun, TranscriptionResult } from './types';
+import type { AudioExtractionResult, ChromeWatchItemInput, ChromeWatchStatus, BatchDownloadItemResult, BatchDownloadResult, CanvasFileDownloadResponse, ConflictStrategy, CourseDetailResponse, CoursesResponse, CredentialStatus, DeadlinesResponse, DownloadJobStatus, DownloadOutputFormat, DownloadResult, LegacySummary, LmsSessionBridgeResponse, MediaDependencyInstallResult, MediaDependencyStatusResponse, NativeDownloadPlanResult, OfficialViewerPlanResult, OfficialViewerSessionBridgeResult, PageFilesResponse, PostprocessJobStatus, ProgressEvent, RemoteSttConfigPatch, RemoteSttStatus, STTProviderStatusResponse, TermsResponse, TidyJobKind, TidyJobStatus, TidyRun, TranscriptionResult } from './types';
 import type { GradesClassesResponse, GradesOverviewResponse, GradesSemesterKind, GradesStatusResponse } from './types';
 import { buildRequestHeaders } from './http';
 import { reportWithPostprocess } from './postprocess';
@@ -559,4 +559,9 @@ export function cancelTidyJob(kind: TidyJobKind, jobId: string): Promise<TidyJob
 /** Past tidy-up runs of the download folder, newest first. */
 export function fetchTidyRuns(outputDir: string): Promise<{ runs: TidyRun[] }> {
   return requestJson<{ runs: TidyRun[] }>(`/api/library/tidy/runs?${new URLSearchParams({ output_dir: outputDir.trim() }).toString()}`);
+}
+
+/** Old-style files in the download folder (scan only, no login needed); the tidy-up prompt reads the count. */
+export function fetchLegacySummary(outputDir: string): Promise<LegacySummary> {
+  return requestJson<LegacySummary>(`/api/library/legacy-summary?${new URLSearchParams({ output_dir: outputDir.trim() }).toString()}`);
 }

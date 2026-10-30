@@ -81,13 +81,24 @@ interface Props {
   corner?: boolean;
   /** The last workspace left tracked work running that cannot be seen from here (login screen). */
   busyHeld?: boolean;
+  /** The panel opened or closed (a one-time dialog waits while it is open). */
+  onOpenChange?: (open: boolean) => void;
 }
 
-export function UpdateChip({ update: appUpdate, corner = false, busyHeld = false }: Props) {
+export function UpdateChip({ update: appUpdate, corner = false, busyHeld = false, onOpenChange }: Props) {
   const { state, update, later } = appUpdate;
   const [open, setOpen] = useState(false);
   const anchorRef = useRef<HTMLDivElement>(null);
   const visible = isChipVisible(state);
+
+  const onOpenChangeRef = useRef(onOpenChange);
+  useEffect(() => {
+    onOpenChangeRef.current = onOpenChange;
+  });
+  useEffect(() => {
+    onOpenChangeRef.current?.(open);
+    return () => onOpenChangeRef.current?.(false);
+  }, [open]);
 
   // A panel for a chip that is gone (after "나중에") must not come back with the next update.
   useEffect(() => {

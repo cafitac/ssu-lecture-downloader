@@ -2,6 +2,7 @@ import type { CachedDeadline } from './reminders';
 import type { BackendConnection, BackendSupervisionStatus, DownloadJobStatus, DownloadResult, NativeDownloadPlanResult, OfficialViewerBridgeCookie, OfficialViewerSessionBridgeResult, ExternalWatchView, RemindersStatus, SavedDiagnostics, WatchQueueItemInput, WatchQueueState } from './types';
 import { open, save } from '@tauri-apps/plugin-dialog';
 import { invoke } from '@tauri-apps/api/core';
+import { getVersion } from '@tauri-apps/api/app';
 import { downloadDir } from '@tauri-apps/api/path';
 import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
 
@@ -22,6 +23,16 @@ async function focusExistingOfficialViewer(): Promise<boolean> {
 
 export function isTauriRuntime(): boolean {
   return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
+}
+
+/** The running app version (`null` when the shell cannot tell); `'web'` outside the desktop app. */
+export async function appVersion(): Promise<string | null> {
+  if (!isTauriRuntime()) return 'web';
+  try {
+    return (await getVersion()) || null;
+  } catch {
+    return null;
+  }
 }
 
 export async function defaultDownloadDirectory(): Promise<string> {

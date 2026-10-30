@@ -8,6 +8,7 @@ import { LecturePane } from './components/LecturePane';
 import { BackendScreen, LoginScreen, SplashScreen } from './components/Screens';
 import { SettingsDialog } from './components/SettingsDialog';
 import { TidyDialog } from './components/TidyDialog';
+import { TidyPromptDialog } from './components/TidyPromptDialog';
 import { Toasts } from './components/Toasts';
 import { TopBar } from './components/TopBar';
 import { WatchAllDialog } from './components/WatchAllDialog';
@@ -31,6 +32,7 @@ import { useMediaDependencies } from './hooks/useMediaDependencies';
 import { useNow } from './hooks/useNow';
 import { useOfficialViewer } from './hooks/useOfficialViewer';
 import { useProblemPrompt } from './hooks/useProblemPrompt';
+import { useTidyPrompt } from './hooks/useTidyPrompt';
 import type { ProblemPrompt } from './hooks/useProblemPrompt';
 import { usePageAttachments } from './hooks/usePageAttachments';
 import { useToasts } from './hooks/useToasts';
@@ -57,7 +59,7 @@ function toPlannedItem(item: CourseContentItem): PlannedItem {
   return { id: itemKey(item) as string, rawId: item.module_item_id as string | number, title: item.title, sizeBytes: item.size_bytes };
 }
 
-function Workspace({ session, update, onWorkBusyChange, onProblem }: { session: LmsSession; update: AppUpdate; onWorkBusyChange: (busy: boolean) => void; onProblem: ProblemPrompt['report'] }) {
+function Workspace({ session, update, problemOpen, onWorkBusyChange, onProblem }: { session: LmsSession; update: AppUpdate; problemOpen: boolean; onWorkBusyChange: (busy: boolean) => void; onProblem: ProblemPrompt['report'] }) {
   const { toasts, push, dismiss } = useToasts();
   const { courses, expire } = session;
   const now = useNow();
@@ -70,6 +72,8 @@ function Workspace({ session, update, onWorkBusyChange, onProblem }: { session: 
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [watchAllOpen, setWatchAllOpen] = useState(false);
+  // The update panel is a popover in the top bar; the one-time tidy prompt waits while it is open.
+  const [updatePanelOpen, setUpdatePanelOpen] = useState(false);
   // An empty preview suppresses the notice only for that folder, until files change.
   const [nothingToTidy, setNothingToTidy] = useState<string | null>(null);
   // Courses whose "예전 방식 파일" notice was answered with 나중에; asked again after a restart.
@@ -93,7 +97,7 @@ function Workspace({ session, update, onWorkBusyChange, onProblem }: { session: 
   }, [courses]);
   const course = useMemo(() => courses.find((candidate) => String(candidate.id) === selectedCourseId) ?? null, [courses, selectedCourseId]);
 
-  const { dir, pick } = useDownloadDir();
+  const { dir, ready: dirReady, pick } = useDownloadDir();
   const content = useCourseContent(course, dir, onAuthError);
   const deadlines = useDeadlines(session.termId, courses, onAuthError);
   // Grades: no request is made before the user opens the tab; a failure there never reaches onAuthError.
@@ -123,6 +127,13 @@ function Workspace({ session, update, onWorkBusyChange, onProblem }: { session: 
   useEffect(() => {
     onWorkBusyChange(workBusy);
   }, [workBusy, onWorkBusyChange]);
+  // "파일 정리": asked once per folder and app version; never over another dialog, a download, a tidy-up or an update install.
+  const tidyPrompt = useTidyPrompt({
+    dir,
+    folderReady: dirReady,
+    otherDialogOpen: problemOpen || updatePanelOpen || settingsOpen || watchAllOpen || tidy.phase !== null,
+    busy: workBusy || isInstalling(update.state.phase),
+  });
 
   // A lecture that played to its end counts as watched at once; the LMS is asked a little later.
   const refreshTimers = useRef(new Set<ReturnType<typeof setTimeout>>());
@@ -351,6 +362,7 @@ function Workspace({ session, update, onWorkBusyChange, onProblem }: { session: 
         watchAllLoading={deadlines.state === 'loading' || deadlines.state === 'idle'}
         queueActive={viewer.queue.active}
         update={update}
+        onUpdateOpenChange={setUpdatePanelOpen}
         onWatchAll={() => setWatchAllOpen(true)}
         onToggleDeadlines={() => setView((current) => (current === 'deadlines' ? 'course' : 'deadlines'))}
         onToggleGrades={() => setView((current) => (current === 'grades' ? 'course' : 'grades'))}
@@ -471,6 +483,13 @@ function Workspace({ session, update, onWorkBusyChange, onProblem }: { session: 
       {watchAllOpen && allQueue.length > 0 && !viewer.queue.active && (
         <WatchAllDialog items={allQueue} mode={viewer.mode} onStart={startWatchAll} onClose={() => setWatchAllOpen(false)} />
       )}
+      {tidyPrompt.visible && (
+        <TidyPromptDialog
+          count={tidyPrompt.count}
+          onPreview={() => { tidyPrompt.close(); tidy.open(); }}
+          onLater={tidyPrompt.close}
+        />
+      )}
       <TidyDialog tidy={tidy} canOpenFolder={isTauriRuntime()} onOpenFolder={() => void openFolder()} />
       {settingsOpen && (
         <SettingsDialog
@@ -502,7 +521,7 @@ function Workspace({ session, update, onWorkBusyChange, onProblem }: { session: 
   );
 }
 
-function SessionGate({ update, workBusy, onWorkBusyChange, onProblem }: { update: AppUpdate; workBusy: boolean; onWorkBusyChange: (busy: boolean) => void; onProblem: ProblemPrompt['report'] }) {
+function SessionGate({ update, workBusy, problemOpen, onWorkBusyChange, onProblem }: { update: AppUpdate; workBusy: boolean; problemOpen: boolean; onWorkBusyChange: (busy: boolean) => void; onProblem: ProblemPrompt['report'] }) {
   const session = useLmsSession();
   if (session.phase === 'checking') return <SplashScreen text="로그인 상태를 확인하는 중이에요…" />;
   if (session.phase === 'signed-out') {
@@ -513,7 +532,7 @@ function SessionGate({ update, workBusy, onWorkBusyChange, onProblem }: { update
       </>
     );
   }
-  return <Workspace session={session} update={update} onWorkBusyChange={onWorkBusyChange} onProblem={onProblem} />;
+  return <Workspace session={session} update={update} problemOpen={problemOpen} onWorkBusyChange={onWorkBusyChange} onProblem={onProblem} />;
 }
 
 /** Everything below talks to the API, so it renders only once the backend is ready. */
@@ -556,7 +575,7 @@ export function App() {
   }
   return (
     <>
-      <SessionGate update={update} workBusy={workBusy} onWorkBusyChange={setWorkBusy} onProblem={reportProblem} />
+      <SessionGate update={update} workBusy={workBusy} problemOpen={problem.state.kind !== null} onWorkBusyChange={setWorkBusy} onProblem={reportProblem} />
       {problemDialog}
     </>
   );

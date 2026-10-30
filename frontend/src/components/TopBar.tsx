@@ -30,6 +30,8 @@ interface Props {
   queueActive: boolean;
   /** The app update notice (state of the App-level controller). */
   update: AppUpdate;
+  /** The update panel opened or closed. */
+  onUpdateOpenChange?: (open: boolean) => void;
   onWatchAll: () => void;
   onToggleDeadlines: () => void;
   onToggleGrades: () => void;
@@ -38,7 +40,7 @@ interface Props {
   onOpenSettings: () => void;
 }
 
-export function TopBar({ terms, termId, listState, busy, dueSoonCount, deadlinesOpen, gradesOpen, watchAllCount, watchAllLoading, queueActive, update, onWatchAll, onToggleDeadlines, onToggleGrades, onTermChange, onRefresh, onOpenSettings }: Props) {
+export function TopBar({ terms, termId, listState, busy, dueSoonCount, deadlinesOpen, gradesOpen, watchAllCount, watchAllLoading, queueActive, update, onUpdateOpenChange, onWatchAll, onToggleDeadlines, onToggleGrades, onTermChange, onRefresh, onOpenSettings }: Props) {
   const currentTermId = terms.find((term) => term.is_current)?.term_id ?? null;
   const loading = listState === 'loading';
   return (
@@ -57,7 +59,7 @@ export function TopBar({ terms, termId, listState, busy, dueSoonCount, deadlines
         </select>
       )}
       <span className="topbar-spacer" />
-      <UpdateChip update={update} />
+      <UpdateChip update={update} onOpenChange={onUpdateOpenChange} />
       <button
         type="button"
         className="btn btn-sm"
