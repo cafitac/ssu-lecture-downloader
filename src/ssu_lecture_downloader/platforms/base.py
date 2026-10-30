@@ -10,6 +10,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
+from ssu_lecture_downloader.core.library_layout import PathRules
+
 APP_IDENTIFIER = "com.local.ssu-lecture-downloader"
 APP_DOWNLOAD_FOLDER_NAME = "SSU Lecture Downloader"
 
@@ -62,5 +64,13 @@ class SecretFileWriter(Protocol):
 
 
 @runtime_checkable
-class Platform(AppPaths, ChromeLocator, ProcessTree, SttCapability, SecretFileWriter, Protocol):
+class PathRulesProvider(Protocol):
+    """What this OS allows in file and folder names (reserved names, length limits). Designed and tested
+    for every platform; the service only activates the Windows rules with the Windows platform work."""
+
+    def path_rules(self) -> PathRules: ...
+
+
+@runtime_checkable
+class Platform(AppPaths, ChromeLocator, ProcessTree, SttCapability, SecretFileWriter, PathRulesProvider, Protocol):
     """Everything one operating system adapter provides."""

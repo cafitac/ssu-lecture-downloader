@@ -63,6 +63,9 @@ class CanvasFileDownloadRequest(BaseModel):
     course_name: str = "course"
     output_dir: str | None = None
     conflict_strategy: str = "skip"
+    # Where the page the file was opened from sits in the course (optional; the file lands in that week's folder).
+    module_name: str | None = None
+    week_position: int | str | None = None
 
 
 class VideoEnsurePlayableRequest(BaseModel):

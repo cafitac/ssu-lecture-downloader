@@ -15,6 +15,24 @@ NETWORK_TIMEOUT = "network_timeout"
 LMS_SESSION_HOSTS = frozenset({"canvas.ssu.ac.kr", "lms.ssu.ac.kr", "smartid.ssu.ac.kr"})
 
 
+class PathTooLong(OSError):
+    """The planned path cannot fit the platform's path budget even with the shortest allowed stem."""
+
+    error_code = "path_too_long"
+
+
+class LibraryConflict(OSError):
+    """The folder or file planned for a library item was taken by something else between planning and writing."""
+
+    error_code = "library_conflict"
+
+
+def stable_error_code(exc: BaseException) -> str:
+    """The code a failed item reports: the exception's own stable `error_code` when it has one, else its class name."""
+    code = getattr(exc, "error_code", None)
+    return code if isinstance(code, str) and code else type(exc).__name__
+
+
 @dataclass(frozen=True)
 class LoginFlowError(Exception):
     code: str

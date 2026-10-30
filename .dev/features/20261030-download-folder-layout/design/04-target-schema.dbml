@@ -1,0 +1,181 @@
+// Target on-disk and in-memory shapes for the download folder layout (PROPOSED).
+// There is no database. Tables below are JSON files written by the app inside the user's
+// download folder, in-memory records of the Python sidecar, or internal API payloads.
+
+Project download_folder_layout {
+  database_type: 'filesystem JSON + process memory'
+  Note: '''
+  Layout: <root>/<safe course>/<NN주차|module name|기타>/<stem>/{<stem>.mp4, <stem>.srt, <stem> 자막.txt, <stem> 음성.mp3, .ssu/}
+  Materials: <root>/<safe course>/<week>/<title>.<ext> + <week>/.ssu/materials.json
+  Journal: <root>/.ssu/migrations/<run_id>.jsonl
+  '''
+}
+
+Enum item_kind {
+  lecture [note: 'video module item (mp4 + derived outputs)']
+  material [note: 'non-video module item (pdf, .file, ...)']
+  canvas_file [note: 'Canvas wiki-page attachment (legacy id prefix canvas-)']
+}
+
+Enum created_by {
+  download
+  migration
+}
+
+Enum file_role {
+  video
+  audio
+  srt
+  text [note: '<stem> 자막.txt; also legacy <stem> [id].txt and [id].transcript.txt']
+  md [note: '.ssu/transcript.md']
+  json [note: '.ssu/transcript.json']
+  material
+  duplicate [note: 'rename copy "(n)" of a role file']
+}
+
+Enum journal_op {
+  header
+  mkdir [note: 'directory created by this run (undo removes it only if empty)']
+  intent [note: 'written + fsynced before the move']
+  done [note: 'written after the move succeeded']
+  skip [note: 'apply-time revalidation failed; reason']
+  meta_written [note: 'item.json / materials.json created or updated by this run (undo restores previous bytes or removes)']
+  undo_done
+  undo_skip
+}
+
+Enum skip_reason {
+  destination_exists
+  source_changed [note: 'size or mtime_ns differs from the preview']
+  source_missing
+  unknown_file [note: 'no [id] marker or unknown suffix']
+  partial_download [note: '.part']
+  course_not_matched [note: 'course folder not in the current LMS course list']
+  duplicate_transcript [note: 'legacy .txt when .transcript.txt of the same id exists']
+  in_use [note: 'Windows sharing violation (future)']
+  path_too_long [note: 'Windows 240-char budget cannot be met (future)']
+  not_a_regular_file [note: 'symlink, folder, special file']
+}
+
+Table item_json {
+  // <lecture dir>/.ssu/item.json — dedup authority for one lecture
+  schema int [not null, note: '1']
+  content_id varchar [not null, note: 'LMS item_content_data.content_id; the id formerly in [..]']
+  module_item_id varchar [note: 'null when created by migration for a lecture no longer listed']
+  course_id varchar [not null]
+  kind item_kind [not null, note: 'lecture']
+  lms_title varchar [note: 'title shown in the app list at write time']
+  resolved_title varchar [note: 'media-server title, informative']
+  stem varchar [not null, note: 'plain name, no / or ..']
+  week_folder varchar [not null]
+  created_by created_by [not null]
+  app_version varchar [not null]
+  layout_version int [not null, note: '1']
+  created_at varchar [not null, note: 'ISO-8601 UTC']
+  updated_at varchar [not null]
+  Note: 'Max 64 KiB; invalid → ignored (folder treated as foreign). Written via tmp + os.replace. Existence of outputs is read from the filesystem, not from this file.'
+}
+
+Table materials_json {
+  // <week dir>/.ssu/materials.json
+  schema int [not null, note: '1']
+  content_id varchar [pk, note: 'material content id or canvas-<file_id>']
+  file_name varchar [not null, note: 'plain name in the week folder']
+  kind item_kind [not null, note: 'material | canvas_file']
+  title varchar
+  created_by created_by [not null]
+  updated_at varchar [not null]
+  Note: 'One JSON object {schema, entries: {content_id: {...}}}; same bounds as item_json (256 KiB).'
+}
+
+Table transcript_files {
+  // <lecture dir>/.ssu/transcript.md and transcript.json — CURRENT contents, new location
+  lecture_dir varchar [pk]
+  md_path varchar [note: '.ssu/transcript.md']
+  json_path varchar [note: '.ssu/transcript.json (segments, provider, model, language)']
+}
+
+Table journal_line {
+  // <root>/.ssu/migrations/<run_id>.jsonl — one JSON object per line, append + fsync
+  run_id varchar [not null, note: 'UTC yyyymmddThhmmssZ-<6 hex>']
+  seq int [not null, note: 'monotonic per run']
+  op journal_op [not null]
+  source varchar [note: 'path relative to root']
+  destination varchar [note: 'path relative to root']
+  size bigint
+  mtime_ns bigint
+  inode bigint
+  content_id varchar
+  role file_role
+  reason skip_reason
+  previous_meta_b64 varchar [note: 'meta_written only: previous bytes (null when created)']
+  at varchar [not null]
+  indexes {
+    (run_id, seq) [pk]
+  }
+  Note: 'Header line carries app_version, layout_version, root (absolute), plan summary counts.'
+}
+
+Table tidy_plan_memory {
+  // in-memory, AppContext; never written to disk
+  plan_id varchar [pk, note: 'uuid4; single use']
+  root varchar [not null]
+  created_at float [not null, note: 'expires after 1800 s → tidy_plan_expired']
+  moves json [not null, note: 'list of planned_move']
+  skips json [not null]
+}
+
+Table planned_move {
+  plan_id varchar [ref: > tidy_plan_memory.plan_id]
+  source varchar [not null]
+  destination varchar [not null]
+  size bigint [not null]
+  mtime_ns bigint [not null]
+  inode bigint [not null]
+  content_id varchar [not null]
+  role file_role [not null]
+  course varchar [not null, note: 'display']
+  week_folder varchar [not null, note: 'display']
+  lecture_stem varchar [note: 'display; null for materials']
+}
+
+Table legacy_summary_payload {
+  // GET /api/library/legacy-summary?output_dir=  (local scan only, no login)
+  ok bool
+  root varchar
+  legacy_file_count int
+  course_count int
+  courses json [note: '[{folder, legacy_file_count}]']
+}
+
+Table tidy_plan_result_payload {
+  // result of POST /api/library/tidy/plan/jobs (job snapshot result)
+  plan_id varchar
+  expires_at varchar
+  move_count int
+  skip_count int
+  moves json [note: '[{course, week_folder, lecture_stem, from, to, role}] — names relative to the root']
+  skips json [note: '[{path, reason}]']
+  open_files_note bool [note: 'always true on macOS: moved files that are open keep working until reopened']
+}
+
+Table tidy_run_result_payload {
+  // result of apply / undo jobs
+  run_id varchar
+  moved int
+  skipped int
+  skips json [note: '[{path, reason}]']
+  undo_available bool
+}
+
+Table course_detail_additions {
+  // GET /api/courses/{id} — additive
+  legacy_file_count int [note: 'attributable old-layout files of this course (0 when none)']
+  downloaded_path varchar [note: 'CURRENT key; now from LibraryIndex (new or legacy)']
+}
+
+Table canvas_file_request_additions {
+  // POST /api/download/canvas-file — additive optional fields
+  module_name varchar [note: 'from the page item; optional']
+  week_position varchar [note: 'from the page item; optional']
+}
