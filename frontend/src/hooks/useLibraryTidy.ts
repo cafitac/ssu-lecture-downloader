@@ -40,6 +40,8 @@ export function useLibraryTidy({ outputDir, onChanged, onNothingToTidy, onAuthEr
   const [stopRequested, setStopRequested] = useState(false);
   const [runs, setRuns] = useState<{ state: 'loading' | 'ready' | 'unsupported'; list: TidyRun[] }>({ state: 'loading', list: [] });
   const callbacksRef = useRef({ onChanged, onNothingToTidy, onAuthError });
+  const outputDirRef = useRef(outputDir);
+  outputDirRef.current = outputDir;
   const genRef = useRef(0);
   const progressRef = useRef(NONE);
   // A 멈추기 pressed before the backend named the job waits here and is sent once it did.
@@ -50,8 +52,11 @@ export function useLibraryTidy({ outputDir, onChanged, onNothingToTidy, onAuthEr
 
   const refreshRuns = useCallback(async () => {
     try {
-      setRuns({ state: 'ready', list: (await fetchTidyRuns(outputDir)).runs });
+      const result = await fetchTidyRuns(outputDir);
+      if (outputDirRef.current !== outputDir) return;
+      setRuns({ state: 'ready', list: result.runs });
     } catch (error) {
+      if (outputDirRef.current !== outputDir) return;
       // A backend without the tidy-up answers an unknown route: the entries stay hidden.
       setRuns({ state: error instanceof ApiError && isUnsupportedBackend(error.code) ? 'unsupported' : 'ready', list: [] });
     }
@@ -178,6 +183,10 @@ export function useLibraryTidy({ outputDir, onChanged, onNothingToTidy, onAuthEr
         giveUp();
         callbacksRef.current.onAuthError(friendlyError(error));
       } else if (error instanceof ApiError && error.code === 'tidy_job_not_found') {
+        if (job && job.kind !== 'plan') {
+          callbacksRef.current.onChanged();
+          void refreshRunsRef.current();
+        }
         setJob(null);
         setPhase({ kind: 'error', message: friendlyError(error) });
       } else {

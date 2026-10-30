@@ -160,6 +160,10 @@ if ((readFileSync('src/components/GradesPane.tsx', 'utf8').match(/btn-primary/g)
   throw new Error('The grades pane may contain exactly one accent-filled button (동의하고 성적 보기)');
 }
 
+if ((readFileSync('src/components/TidyDialog.tsx', 'utf8').match(/btn-primary/g) ?? []).length !== 1) {
+  throw new Error('The tidy dialog must contain exactly one accent-filled button (정리하기)');
+}
+
 // Session / data flow.
 if (!main.includes("type SessionPhase = 'checking' | 'signed-out' | 'signed-in'") || !main.includes('로그인 상태를 확인하는 중이에요')) {
   throw new Error('The workspace must stay hidden until stored credentials were verified by a real LMS request');
@@ -2973,6 +2977,7 @@ const assistSource = readFileSync('src-tauri/src/assets/watch_assist.js', 'utf8'
   try {
     const fake = await hookServer.ssrLoadModule('\0fake-react');
     const { useLibraryTidy } = await hookServer.ssrLoadModule('/src/hooks/useLibraryTidy.ts');
+    const { legacyNoticeState } = await hookServer.ssrLoadModule('/src/lib/tidy.ts');
     const flush = async () => { for (let i = 0; i < 60; i += 1) await Promise.resolve(); };
     const pollTicks = [];
     globalThis.setTimeout = (callback, ms, ...rest) => (ms === 1500 ? pollTicks.push(callback) : realTimeout(callback, ms, ...rest));
@@ -2989,12 +2994,19 @@ const assistSource = readFileSync('src-tauri/src/assets/watch_assist.js', 'utf8'
         calls.push([key, init.body ? JSON.parse(init.body) : undefined]);
         const handler = routes[key];
         if (!handler) return json(200, { runs: [] });
-        return handler(init.body ? JSON.parse(init.body) : undefined);
+        return handler(init.body ? JSON.parse(init.body) : undefined, String(url));
       };
       fake.__begin();
       pollTicks.length = 0;
-      const ctx = { calls, flush, get changed() { return changed; }, get nothing() { return nothing; } };
-      const read = () => { fake.__rerender(); const value = useLibraryTidy({ outputDir: '/dl', onChanged: () => { changed += 1; }, onNothingToTidy: () => { nothing += 1; }, onAuthError: noop }); fake.__effects(); return value; };
+      const workspace = readFileSync('src/App.tsx', 'utf8');
+      const noticeContext = vm.createContext({ dir: '/dl', nothingToTidy: null, latest: { current: { course: null } } });
+      noticeContext.setNothingToTidy = (value) => { noticeContext.nothingToTidy = value; };
+      const noticeCallbacks = vm.runInContext(`({
+        ${workspace.match(/onNothingToTidy: \(\) => [^\n]+/)[0]}
+        ${workspace.match(/onChanged: \(\) => \{[\s\S]*?\n    \},/)[0]}
+      })`, noticeContext);
+      const ctx = { calls, flush, get notice() { return legacyNoticeState(12, false, noticeContext.nothingToTidy === noticeContext.dir, false); }, get changed() { return changed; }, get nothing() { return nothing; } };
+      const read = (outputDir = '/dl') => { noticeContext.dir = outputDir; fake.__rerender(); const value = useLibraryTidy({ outputDir, onChanged: () => { changed += 1; noticeCallbacks.onChanged(); }, onNothingToTidy: () => { nothing += 1; noticeCallbacks.onNothingToTidy(); }, onAuthError: noop }); fake.__effects(); return value; };
       ctx.read = read;
       ctx.tick = async () => { pollTicks.shift()(); await flush(); return read(); };
       ctx.count = (key) => calls.filter(([entry]) => entry === key).length;
@@ -3025,6 +3037,9 @@ const assistSource = readFileSync('src-tauri/src/assets/watch_assist.js', 'utf8'
       await flush();
       assert.equal(c.read().phase.kind, 'empty');
       assert.equal(c.nothing, 1);
+      assert.equal(c.notice, null);
+      c.read('/other');
+      assert.deepEqual(c.notice, { count: 12, blocked: false }, 'another folder is not suppressed');
     });
 
     // Stop during a move: the job reports what it moved.
@@ -3108,6 +3123,8 @@ const assistSource = readFileSync('src-tauri/src/assets/watch_assist.js', 'utf8'
       hook = c.read();
       hook = await c.tick();
       assert.deepEqual([hook.phase.kind, hook.moving], ['error', false]);
+      assert.equal(c.changed, 1, 'a lost move refreshes saved files');
+      assert.equal(c.count('GET /api/library/tidy/runs'), 2, 'a lost move refreshes the run list');
     });
 
     // Closing during the check cancels the preview job, even when the close came before the backend named it.
@@ -3132,17 +3149,23 @@ const assistSource = readFileSync('src-tauri/src/assets/watch_assist.js', 'utf8'
     const undoable = { run_id: 'run-1', at: null, moved: 4, undo_available: true };
     await scenario({
       'GET /api/library/tidy/runs': () => json(200, { runs: [undoable] }),
+      'POST /api/library/tidy/plan/jobs': () => json(200, job('succeeded', { result: plan([]) })),
       'POST /api/library/tidy/undo/jobs': () => json(200, job('succeeded', { job_id: 'j-undo', result: { run_id: 'run-1', restored: 4, skipped: 0, skips: [] } })),
     }, async (c, hook) => {
       await flush();
       hook = c.read();
       assert.equal(hook.undoRun.run_id, 'run-1');
+      hook.open();
+      await flush();
+      hook = c.read();
+      assert.equal(c.notice, null, 'an empty preview hides the notice');
       hook.undo();
       await flush();
       hook = c.read();
       assert.deepEqual(c.calls.find(([key]) => key === 'POST /api/library/tidy/undo/jobs')[1], { run_id: 'run-1', output_dir: '/dl' });
       assert.equal(hook.phase.kind, 'undone');
       assert.equal(c.changed, 1);
+      assert.deepEqual(c.notice, { count: 12, blocked: false }, 'undo after an empty preview brings the notice back');
     });
     await scenario({
       'GET /api/library/tidy/runs': () => json(200, { runs: [undoable] }),
@@ -3157,6 +3180,31 @@ const assistSource = readFileSync('src-tauri/src/assets/watch_assist.js', 'utf8'
       assert.equal(hook.phase.message, '되돌릴 정리 기록을 찾지 못했어요.');
       assert.equal(c.count('GET /api/library/tidy/runs'), before + 1, 'the run list is read again');
     });
+
+    // A late response for the previous folder cannot replace the current folder's runs.
+    for (const staleFails of [false, true]) {
+      let releaseOld;
+      const oldResponse = new Promise((resolve) => { releaseOld = resolve; });
+      const currentRun = { ...undoable, run_id: 'new-folder-run' };
+      await scenario({
+        'GET /api/library/tidy/runs': async (_body, url) => {
+          if (new URL(url, 'http://localhost').searchParams.get('output_dir') === '/dl') {
+            await oldResponse;
+            return staleFails ? json(404, { ok: false, error_code: 'not_found' }) : json(200, { runs: [undoable] });
+          }
+          return json(200, { runs: [currentRun] });
+        },
+      }, async (c) => {
+        c.read('/other');
+        await flush();
+        assert.equal(c.read('/other').undoRun.run_id, currentRun.run_id);
+        releaseOld();
+        await flush();
+        const hook = c.read('/other');
+        assert.equal(hook.runs.state, 'ready');
+        assert.equal(hook.undoRun.run_id, currentRun.run_id, 'stale success and failure both leave the current list intact');
+      });
+    }
 
     // A backend that answers its unknown routes with `not_found` has no tidy-up: the entries stay hidden.
     await scenario({ 'GET /api/library/tidy/runs': () => json(404, { ok: false, error_code: 'not_found' }) }, async (c, hook) => {

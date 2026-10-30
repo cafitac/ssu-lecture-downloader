@@ -67,9 +67,9 @@ function Workspace({ session, update, onWorkBusyChange }: { session: LmsSession;
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [watchAllOpen, setWatchAllOpen] = useState(false);
+  // An empty preview suppresses the notice only for that folder, until files change.
+  const [nothingToTidy, setNothingToTidy] = useState<string | null>(null);
   // Courses whose "예전 방식 파일" notice was answered with 나중에; asked again after a restart.
-  // A preview that found nothing to move: the notice stays away for the rest of the session.
-  const [nothingToTidy, setNothingToTidy] = useState(false);
   const [tidyLater, setTidyLater] = useState<ReadonlySet<string>>(new Set());
   // How a started queue plays; unset until the user chooses (then Chrome when it is installed).
   const [watchModePreference, setWatchModePreference] = useState<WatchMode | null>(readWatchModePreference);
@@ -108,8 +108,9 @@ function Workspace({ session, update, onWorkBusyChange }: { session: LmsSession;
   const tidy = useLibraryTidy({
     outputDir: dir,
     onAuthError,
-    onNothingToTidy: () => setNothingToTidy(true),
+    onNothingToTidy: () => setNothingToTidy(dir),
     onChanged: () => {
+      setNothingToTidy(null);
       const current = latest.current;
       if (current.course) void current.content.refreshQuietly(current.course);
     },
@@ -330,7 +331,7 @@ function Workspace({ session, update, onWorkBusyChange }: { session: LmsSession;
     setSelectedCourseId(String(next.id));
     setView('course');
   };
-  const legacyNotice = legacyNoticeState(content.legacyFileCount, course !== null && tidyLater.has(String(course.id)), nothingToTidy, tidyBlocked);
+  const legacyNotice = legacyNoticeState(content.legacyFileCount, course !== null && tidyLater.has(String(course.id)), nothingToTidy === dir, tidyBlocked);
   const showActionBar = (view === 'course' && tab !== 'task') || downloads.active || downloads.startError !== null;
 
   return (

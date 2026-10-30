@@ -28,6 +28,14 @@
 
 - 2026-10-30 (review cycle 1 repair, checked against layout-py-migration c2c7c35): types follow the backend (`lecture_stem` nullable, material moves sit under the week without a lecture heading; `open_files_note` boolean; `run_id` and runs `at` nullable). Undo sends `output_dir` and re-reads the run list when it fails to start. An unknown route (`not_found` / HTTP 404) hides the Settings entries. New copy: `move_failed`, `tidy_run_not_found`, `invalid_run_id`, `tidy_job_not_found`, undo wording for `source_changed` / `source_missing`, "연결 확인 중…". A failed poll never abandons a move (only an auth error or `tidy_job_not_found` does); `close()` and every new start bump a generation counter so a late start answer is dropped and its job cancelled; a 멈추기 pressed before the job id is known is queued; the moving total is kept until the first `tidy_moving` event (apply: the plan's `move_count`); a preview with nothing to move hides the notice for the session. The commit button 정리하기 is `btn-primary`; the contract test's one-accent rule now skips `TidyDialog.tsx` (the only edit to an existing line of the contract test). The notice, Settings entries, every dialog state and the hook scenarios (stop, queued stop, poll error, lost job, close while checking, undo then reload, undo start failure, unsupported backend) are covered; the hook tests use a stand-in React with memoised callbacks and effect dependencies.
 
+## Review cycle 2 repairs
+
+- Empty-preview notice suppression stores its folder and applies only to the current `dir`; apply/undo change callbacks clear it. Contract coverage checks folder switching and notice restoration after an empty preview followed by undo.
+- A lost apply/undo job refreshes saved files and the run list; the lost-job scenario asserts one change callback and two total run-list GETs.
+- The accent rule requires exactly one `btn-primary` in `TidyDialog.tsx`.
+- Run-list success and failure responses for a previous output folder are ignored through a current-folder ref; overlapping-request scenarios cover both paths.
+- Verification: `npm --prefix frontend run typecheck` and `npm --prefix frontend run test:contract` passed. No visible layout changes; no new screenshots.
+
 ## Contract assumptions the backend must match
 
 - Plan, apply and undo jobs use the usual job shape `{job_id, status, cancel_requested, progress, result, error_code}`; polled at `GET /api/library/tidy/{plan|apply|undo}/jobs/{job_id}`, cancelled at `POST …/{job_id}/cancel`.
