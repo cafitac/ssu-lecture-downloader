@@ -743,6 +743,15 @@ export interface TidyUndoResult {
   skips: TidySkip[];
 }
 
+/** `GET /api/library/legacy-summary`: old-style files per course folder of the download folder. */
+export interface LegacySummary {
+  ok: boolean;
+  root: string;
+  legacy_file_count: number;
+  course_count: number;
+  courses: Array<{ folder: string; legacy_file_count: number }>;
+}
+
 export interface TidyRun {
   run_id: string;
   at: string | number | null;

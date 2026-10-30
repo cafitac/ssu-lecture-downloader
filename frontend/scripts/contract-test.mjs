@@ -22,6 +22,9 @@ const requiredFiles = [
   'src/lib/progress.ts',
   'src/lib/jobItems.ts',
   'src/lib/errors.ts',
+  'src/lib/tidyPrompt.ts',
+  'src/hooks/useTidyPrompt.ts',
+  'src/components/TidyPromptDialog.tsx',
   'src/lib/content.ts',
   'src/lib/http.ts',
   'src/lib/postprocess.ts',
@@ -154,11 +157,15 @@ if ((readFileSync('src/components/ActionBar.tsx', 'utf8').match(/btn-primary/g) 
 // While a download runs the ActionBar's 다운로드 button can show next to the consent button; that coexistence is accepted.
 // TidyDialog.tsx is a modal: its commit button (정리하기, shown over the workspace) is the one accent button of that dialog.
 // ProblemDialog.tsx is a modal too: its 진단 파일 저장 is the one accent button of that dialog.
-for (const file of readTree('src/components', ['.tsx']).filter((name) => !name.endsWith('ActionBar.tsx') && !name.endsWith('Screens.tsx') && !name.endsWith('GradesPane.tsx') && !name.endsWith('TidyDialog.tsx') && !name.endsWith('ProblemDialog.tsx'))) {
+// TidyPromptDialog.tsx is a modal as well: its 미리보기 is the one accent button of that dialog.
+for (const file of readTree('src/components', ['.tsx']).filter((name) => !name.endsWith('ActionBar.tsx') && !name.endsWith('Screens.tsx') && !name.endsWith('GradesPane.tsx') && !name.endsWith('TidyDialog.tsx') && !name.endsWith('ProblemDialog.tsx') && !name.endsWith('TidyPromptDialog.tsx'))) {
   if (readFileSync(file, 'utf8').includes('btn-primary')) throw new Error(`${file}: no other accent-filled button may compete with the download button`);
 }
 if ((readFileSync('src/components/ProblemDialog.tsx', 'utf8').match(/btn-primary/g) ?? []).length !== 1) {
   throw new Error('The problem dialog may contain exactly one accent-filled button (진단 파일 저장)');
+}
+if ((readFileSync('src/components/TidyPromptDialog.tsx', 'utf8').match(/btn-primary/g) ?? []).length !== 1) {
+  throw new Error('The tidy prompt dialog may contain exactly one accent-filled button (미리보기)');
 }
 if ((readFileSync('src/components/GradesPane.tsx', 'utf8').match(/btn-primary/g) ?? []).length !== 1) {
   throw new Error('The grades pane may contain exactly one accent-filled button (동의하고 성적 보기)');
@@ -2614,7 +2621,7 @@ const assistSource = readFileSync('src-tauri/src/assets/watch_assist.js', 'utf8'
     assert.equal((chipSource.match(/\.focus\(/g) ?? []).length, 1, 'only Esc inside the panel returns focus to the chip');
     assert.ok(/event\.key !== 'Escape'/.test(chipSource) && /addEventListener\('mousedown'/.test(chipSource), 'Esc and an outside click close the panel');
     assert.ok(/if \(!open\) return undefined;/.test(chipSource), 'the listeners exist only while the panel is open');
-    assert.ok(/<UpdateChip update=\{update\} \/>/.test(readFileSync('src/components/TopBar.tsx', 'utf8')), 'TopBar mounts the chip');
+    assert.ok(/<UpdateChip update=\{update\} onOpenChange=\{onUpdateOpenChange\} \/>/.test(readFileSync('src/components/TopBar.tsx', 'utf8')), 'TopBar mounts the chip (and reports its panel for the one-dialog-at-a-time rule)');
     // One controller for the whole app, created in App above every early return: the check needs
     // neither the backend nor a session, and "나중에" survives sign-out and sign-in.
     const appSource = readFileSync('src/App.tsx', 'utf8');
@@ -3131,6 +3138,9 @@ const assistSource = readFileSync('src-tauri/src/assets/watch_assist.js', 'utf8'
   assert.equal(knownErrorText('tidy_run_not_found'), '되돌릴 정리 기록을 찾지 못했어요.');
   assert.ok(knownErrorText('invalid_run_id') && knownErrorText('library_conflict') && knownErrorText('path_too_long'), 'plain copy for the remaining codes');
   assert.equal(knownErrorText('tidy_job_not_found'), knownErrorText('download_job_not_found'));
+  // TP-COPY: the two stops of the Chrome watch recovery (WATCH-RECOVER).
+  assert.equal(knownErrorText('chrome_quit_unexpectedly'), 'Chrome이 갑자기 종료되어 자동 재생을 멈췄어요.');
+  assert.equal(knownErrorText('chrome_recover_exhausted'), 'Chrome 연결이 반복해서 끊겨 자동 재생을 멈췄어요.');
   assert.equal(isTrackedWorkBusy({ downloadActive: false, componentsInstalling: false, attachmentSaving: false, libraryTidying: true }), true, 'an app update waits for a running tidy-up');
 
   // Job outcomes -> dialog states.
@@ -3167,12 +3177,68 @@ const assistSource = readFileSync('src-tauri/src/assets/watch_assist.js', 'utf8'
   assert.deepEqual(tidy.legacyNoticeState(12, false, false, true), { count: 12, blocked: true });
   for (const hidden of [tidy.legacyNoticeState(0, false, false, false), tidy.legacyNoticeState(null, false, false, false), tidy.legacyNoticeState(12, true, false, false), tidy.legacyNoticeState(12, false, true, false)]) assert.equal(hidden, null);
 
+  // TIDY-PROMPT: the decision to ask (pure), what is remembered, and the copy.
+  {
+    const tp = await import('../src/lib/tidyPrompt.ts');
+    const base = { count: 12, asked: false, otherDialogOpen: false, busy: false };
+    assert.equal(tp.shouldShowTidyPrompt(base), true, 'old files, not asked, nothing else going on');
+    for (const [name, change] of [
+      ['no files', { count: 0 }], ['unknown count (failed or unsupported summary)', { count: null }], ['already asked', { asked: true }],
+      ['another dialog open', { otherDialogOpen: true }], ['a download or tidy-up running', { busy: true }],
+    ]) assert.equal(tp.shouldShowTidyPrompt({ ...base, ...change }), false, name);
+    assert.equal(tp.legacyCountOf({ ok: true, legacy_file_count: 7 }), 7);
+    assert.equal(tp.legacyCountOf({ ok: true, legacy_file_count: 0 }), 0);
+    for (const bad of [null, undefined, {}, { legacy_file_count: '7' }, { legacy_file_count: -1 }, { legacy_file_count: Number.NaN }]) assert.equal(tp.legacyCountOf(bad), null, JSON.stringify(bad));
+
+    // "Once" is per folder and per app version.
+    const first = tp.markTidyPromptAsked(null, '0.2.1', '/dl');
+    assert.deepEqual(first, { version: '0.2.1', folders: ['/dl'] });
+    assert.equal(tp.wasTidyPromptAsked(first, '0.2.1', '/dl'), true);
+    assert.equal(tp.wasTidyPromptAsked(first, '0.2.1', '/other'), false, 'another folder asks again');
+    assert.equal(tp.wasTidyPromptAsked(first, '0.2.2', '/dl'), false, 'a later version asks again');
+    assert.equal(tp.wasTidyPromptAsked(null, '0.2.1', '/dl'), false);
+    const both = tp.markTidyPromptAsked(first, '0.2.1', '/other');
+    assert.deepEqual(both, { version: '0.2.1', folders: ['/dl', '/other'] });
+    assert.deepEqual(tp.markTidyPromptAsked(both, '0.2.1', '/dl'), both, 'marking twice changes nothing');
+    assert.deepEqual(tp.markTidyPromptAsked(both, '0.2.2', '/dl'), { version: '0.2.2', folders: ['/dl'] }, 'a new version starts the list over');
+
+    // Storage: a round trip, and nothing breaks when it is blocked or holds garbage.
+    const memory = new Map();
+    const storage = { getItem: (key) => memory.get(key) ?? null, setItem: (key, value) => memory.set(key, value) };
+    assert.equal(tp.readTidyPromptAsked(storage), null);
+    tp.writeTidyPromptAsked(both, storage);
+    assert.deepEqual(tp.readTidyPromptAsked(storage), both);
+    for (const garbage of ['not json', '{"version":1,"folders":[]}', '{"version":"1","folders":[1]}', '[]', 'null']) {
+      memory.set(tp.TIDY_PROMPT_STORAGE_KEY, garbage);
+      assert.equal(tp.readTidyPromptAsked(storage), null, garbage);
+    }
+    const blocked = { getItem: () => { throw new Error('blocked'); }, setItem: () => { throw new Error('blocked'); } };
+    assert.equal(tp.readTidyPromptAsked(blocked), null);
+    assert.doesNotThrow(() => tp.writeTidyPromptAsked(both, blocked));
+    assert.equal(tp.tidyPromptSentence(12), '예전 방식으로 저장된 파일이 12개 있어요. 새 폴더 구조(과목/주차/강의)로 정리할까요?');
+    assert.equal(tp.TIDY_PROMPT_TITLE, '파일 정리');
+  }
+
   const { createServer } = await import('vite');
   const React = (await import('react')).default;
   const { renderToStaticMarkup } = await import('react-dom/server');
   const server = await createServer({ root: process.cwd(), server: { middlewareMode: true, hmr: false, watch: null }, appType: 'custom', logLevel: 'error', optimizeDeps: { noDiscovery: true } });
   const realFetch = globalThis.fetch;
   try {
+    // TIDY-PROMPT dialog: the sentence, [나중에] and the one accent button [미리보기]; it moves nothing itself.
+    {
+      const { TidyPromptDialog } = await server.ssrLoadModule('/src/components/TidyPromptDialog.tsx');
+      const html = renderToStaticMarkup(React.createElement(TidyPromptDialog, { count: 12, onPreview: noop, onLater: noop }));
+      assert.ok(html.includes('role="dialog"') && html.includes('aria-modal="true"') && html.includes('<h2') && html.includes('파일 정리'), 'a modal dialog titled 파일 정리');
+      assert.ok(html.includes('<p class="tidy-prompt-lead">예전 방식으로 저장된 파일이 12개 있어요. 새 폴더 구조(과목/주차/강의)로 정리할까요?</p>'), 'the sentence with the count');
+      assert.ok(/class="btn btn-sm btn-primary"[^>]*>미리보기<\/button>/.test(html) && /class="btn btn-sm"[^>]*>나중에<\/button>/.test(html), '[미리보기] is the accent button, [나중에] the plain one');
+      assert.equal((html.match(/btn-primary/g) ?? []).length, 1);
+      assert.ok(!html.includes('정리하기'), 'only the preview is offered here; 정리하기 stays in the tidy-up dialog');
+      const app = readFileSync('src/App.tsx', 'utf8');
+      assert.ok(app.includes('otherDialogOpen: problemOpen || updatePanelOpen || settingsOpen || watchAllOpen || tidy.phase !== null'), 'the prompt waits for the problem prompt, the update panel and every other dialog');
+      assert.ok(app.includes('busy: workBusy || isInstalling(update.state.phase)'), 'and for downloads, tidy-ups and an update install');
+      assert.ok(/onPreview=\{\(\) => \{ tidyPrompt\.close\(\); tidy\.open\(\); \}\}/.test(app), '[미리보기] opens the existing tidy-up preview');
+    }
     // Every state of the dialog, the notice and the Settings entries, rendered with real React.
     const { TidyDialog, LegacyNotice, TidyEntries } = await server.ssrLoadModule('/src/components/TidyDialog.tsx');
     const show = (phase, extra = {}) => renderToStaticMarkup(React.createElement(TidyDialog, { tidy: { phase, note: null, stopping: false, reconnecting: false, close: noop, apply: noop, undo: noop, stop: noop, ...extra }, canOpenFolder: true, onOpenFolder: noop }));
@@ -3221,6 +3287,7 @@ const assistSource = readFileSync('src-tauri/src/assets/watch_assist.js', 'utf8'
     await api.startTidyUndoJob('r1', '/dl');
     await api.cancelTidyJob('apply', 'j1');
     await api.fetchTidyRuns('/dl');
+    await api.fetchLegacySummary(' /dl ');
     assert.equal(sent[0][2].module_name, '5주차');
     assert.equal(sent[0][2].week_position, 5);
     assert.ok(!('module_name' in sent[1][2]) && !('week_position' in sent[1][2]), 'without a week the optional fields are left out');
@@ -3230,6 +3297,7 @@ const assistSource = readFileSync('src-tauri/src/assets/watch_assist.js', 'utf8'
       ['POST', '/api/library/tidy/undo/jobs', { run_id: 'r1', output_dir: '/dl' }],
       ['POST', '/api/library/tidy/apply/jobs/j1/cancel', undefined],
       ['GET', '/api/library/tidy/runs?output_dir=%2Fdl', undefined],
+      ['GET', '/api/library/legacy-summary?output_dir=%2Fdl', undefined],
     ]);
   } finally {
     globalThis.fetch = realFetch;
@@ -3507,6 +3575,101 @@ const assistSource = readFileSync('src-tauri/src/assets/watch_assist.js', 'utf8'
       await flush();
       assert.equal(c.read().runs.state, 'unsupported');
     });
+
+    // TIDY-PROMPT hook: reads the legacy summary after login, asks once per folder and version, waits for anything else.
+    {
+      const { useTidyPrompt } = await hookServer.ssrLoadModule('/src/hooks/useTidyPrompt.ts');
+      const { TIDY_PROMPT_STORAGE_KEY } = await hookServer.ssrLoadModule('/src/lib/tidyPrompt.ts');
+      const memory = new Map();
+      globalThis.localStorage = { getItem: (key) => memory.get(key) ?? null, setItem: (key, value) => memory.set(key, value) };
+      const summaryCalls = [];
+      const promptScenario = async (respond, run) => {
+        summaryCalls.length = 0;
+        globalThis.fetch = async (url) => {
+          summaryCalls.push(String(url));
+          return respond(String(url));
+        };
+        fake.__begin();
+        const defaults = { dir: '/dl', folderReady: true, otherDialogOpen: false, busy: false };
+        let input = defaults;
+        const read = (change = {}) => { input = { ...input, ...change }; fake.__rerender(); const value = useTidyPrompt(input); fake.__effects(); return value; };
+        const settle = async (change) => { let value = read(change); for (let i = 0; i < 4; i += 1) { await flush(); value = read(); } return value; };
+        await run({ read, settle });
+        fake.__unmount();
+      };
+      const summary = (count) => json(200, { ok: true, root: '/dl', legacy_file_count: count, course_count: 1, courses: [] });
+      const stored = () => JSON.parse(memory.get(TIDY_PROMPT_STORAGE_KEY) ?? 'null');
+
+      await promptScenario(() => summary(12), async ({ read, settle }) => {
+        assert.equal(read().visible, false, 'nothing before the summary is in');
+        const shown = await settle();
+        assert.deepEqual([shown.visible, shown.count], [true, 12], 'old files: the dialog shows');
+        assert.deepEqual(summaryCalls, ['/api/library/legacy-summary?output_dir=%2Fdl'], 'one summary request for the folder');
+        assert.deepEqual(stored(), { version: 'web', folders: ['/dl'] }, 'asked for this version and folder');
+        shown.close();
+        assert.equal((await settle()).visible, false, '[나중에]: gone');
+        assert.equal((await settle()).visible, false, 'and not asked again');
+        assert.equal(summaryCalls.length, 1);
+        // The folder changes: asked again for the new folder.
+        assert.equal((await settle({ dir: '/other' })).visible, true, 'another folder asks again');
+        assert.deepEqual(stored(), { version: 'web', folders: ['/dl', '/other'] });
+      });
+      // A new launch of this version: not asked again for a known folder; a later version asks again.
+      await promptScenario(() => summary(12), async ({ settle }) => {
+        assert.equal((await settle()).visible, false, 'same version, same folder: not again');
+        memory.set(TIDY_PROMPT_STORAGE_KEY, JSON.stringify({ version: '0.0.1', folders: ['/dl'] }));
+      });
+      await promptScenario(() => summary(12), async ({ settle }) => {
+        assert.equal((await settle()).visible, true, 'asked in an older version: asked again after the update');
+        assert.deepEqual(stored(), { version: 'web', folders: ['/dl'] });
+      });
+
+      // No dialog for 0 files, an unsupported or failing summary, or a folder that is not final yet.
+      memory.clear();
+      await promptScenario(() => summary(0), async ({ settle }) => {
+        assert.equal((await settle()).visible, false);
+        assert.equal(stored(), null, 'nothing was asked, so nothing is remembered');
+      });
+      for (const [name, response] of [
+        ['unsupported backend', () => json(404, { ok: false, error_code: 'not_found' })],
+        ['server error', () => json(500, { ok: false, error_code: 'internal_error' })],
+        ['api error body', () => json(200, { ok: false, error_code: 'api_error' })],
+        ['malformed body', () => json(200, { ok: true })],
+        ['network failure', () => { throw new TypeError('Failed to fetch'); }],
+      ]) {
+        await promptScenario(response, async ({ settle }) => {
+          assert.equal((await settle()).visible, false, name);
+          assert.equal(stored(), null, `${name}: not remembered`);
+        });
+      }
+      await promptScenario(() => summary(12), async ({ settle }) => {
+        assert.equal((await settle({ folderReady: false })).visible, false, 'the placeholder folder is never read');
+        assert.equal(summaryCalls.length, 0);
+        assert.equal((await settle({ dir: '/real', folderReady: true })).visible, true);
+        assert.deepEqual(summaryCalls, ['/api/library/legacy-summary?output_dir=%2Freal']);
+      });
+
+      // Waiting: another dialog, a download or a tidy-up holds it back without using it up; it comes as soon as they are done.
+      for (const hold of [{ otherDialogOpen: true }, { busy: true }]) {
+        memory.clear();
+        await promptScenario(() => summary(12), async ({ settle }) => {
+          const waiting = await settle(hold);
+          assert.equal(waiting.visible, false, JSON.stringify(hold));
+          assert.equal(stored(), null, 'not used up while waiting');
+          const released = await settle({ otherDialogOpen: false, busy: false });
+          assert.equal(released.visible, true, `after ${JSON.stringify(hold)} ends`);
+          assert.deepEqual(stored(), { version: 'web', folders: ['/dl'] });
+        });
+      }
+      // A dialog that opens while the prompt is up (the problem prompt) takes over: no stacking; the prompt returns afterwards.
+      memory.clear();
+      await promptScenario(() => summary(12), async ({ settle }) => {
+        assert.equal((await settle()).visible, true);
+        assert.equal((await settle({ otherDialogOpen: true })).visible, false, 'hidden under the other dialog');
+        assert.equal((await settle({ otherDialogOpen: false })).visible, true, 'and back when it closed');
+      });
+      delete globalThis.localStorage;
+    }
   } finally {
     globalThis.setTimeout = realTimeout;
     globalThis.fetch = realFetch;
