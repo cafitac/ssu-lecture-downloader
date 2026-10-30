@@ -15,7 +15,7 @@
 
 macOS만 지원합니다. Intel Mac용으로 빌드되고, Apple 실리콘 Mac에서는 Rosetta로 실행됩니다. Windows는 준비 중입니다.
 
-GitHub Releases에는 아직 올라온 파일이 없습니다. 지금은 만든 사람이 앱 파일(DMG나 zip)을 직접 전해 줍니다. 나중에는 Releases에 올릴 예정입니다. 직접 빌드하려면 아래 개발 항목을 보세요.
+설치 파일은 [GitHub Releases](https://github.com/cafitac/ssu-lecture-downloader/releases/latest)에서 받습니다. DMG를 열어 앱을 응용 프로그램(/Applications) 폴더로 옮기세요. 직접 빌드하려면 아래 개발 항목을 보세요.
 
 앱에 서명이 없어서 처음 열 때 "확인되지 않은 개발자" 경고가 뜹니다. 아래 둘 중 하나로 열면 됩니다.
 
@@ -26,7 +26,7 @@ GitHub Releases에는 아직 올라온 파일이 없습니다. 지금은 만든 
 xattr -dr com.apple.quarantine "/Applications/SSU Lecture Downloader.app"
 ```
 
-Releases에 올라온 설치 파일을 응용 프로그램(/Applications) 폴더에 넣어 한 번 설치하면, 그 뒤 새 버전은 앱 안의 업데이트 알림으로 받을 수 있어요. 지금은 아직 올라온 파일이 없어서, 그때까지는 앱을 전해 준 사람에게 새 버전을 받아 바꿔 주세요.
+한 번 설치한 뒤에는 새 버전이 나오면 앱 위쪽에 "새 버전" 표시가 뜨고, 원할 때 앱 안에서 업데이트할 수 있어요. 앱이 응용 프로그램 폴더 밖에 있으면 업데이트가 되지 않을 수 있어요.
 
 배포된 앱은 Intel 빌드라서 Rosetta로 돌려도 자막 엔진을 쓸 수 없습니다. 설정의 "원격 자막 서버"를 지정해야 자막이 만들어집니다. 자세한 내용은 [docs/stt.md](docs/stt.md)에 있습니다.
 
