@@ -33,6 +33,7 @@ from ssu_lecture_downloader.core.library_meta import (
     parse_legacy_name,
     read_item_meta,
     read_materials_meta,
+    reserve_material_copy,
     upsert_material_meta,
     write_item_meta,
 )
@@ -387,10 +388,12 @@ class MaterialPaths:
         return self.file_name
 
     def name_taken(self, file_name: str) -> bool:
-        """Is `file_name` in this week folder reserved for another material (recorded in materials.json or planned by the course)?"""
+        """Is `file_name` in this week folder reserved: another material's name or copy, one of my own copies, or a name the course plan gave to another material?"""
         wanted = _fold(file_name)
-        if any(other != self.content_id and _fold(entry.file_name) == wanted for other, entry in read_materials_meta(self.week_dir).items()):
-            return True
+        for other, entry in read_materials_meta(self.week_dir).items():
+            held = entry.copies if other == self.content_id else entry.names()  # my own recorded file is mine; my copies are not free either
+            if wanted in {_fold(name) for name in held}:
+                return True
         return bool(self.claimed_by_other and self.claimed_by_other(self.week_dir.name, file_name, self.content_id))
 
     def _mapped_here(self) -> bool:
@@ -414,13 +417,14 @@ class MaterialPaths:
             self.week_dir.mkdir(parents=True, exist_ok=True)
             entries = read_materials_meta(self.week_dir)
             wanted = _fold(self.file_name)
-            if any(other != self.content_id and _fold(entry.file_name) == wanted for other, entry in entries.items()):
+            if any(other != self.content_id and wanted in {_fold(name) for name in entry.names()} for other, entry in entries.items()):
                 raise LibraryConflict(f'{self.file_name} belongs to another material')
             if self.target.exists() and not self._mapped_here():
                 raise LibraryConflict(f'{self.file_name} is not a material of this app')
             recorded = entries.get(self.content_id)
             if recorded is not None and _fold(recorded.file_name) != wanted and (self.week_dir / recorded.file_name).exists():
-                return  # an extra copy (rename): the recorded file stays this material's authoritative one
+                reserve_material_copy(self.week_dir, self.content_id, self.file_name)  # an extra copy (rename): reserved, the recorded file stays authoritative
+                return
             upsert_material_meta(self.week_dir, self.content_id, MaterialMeta(file_name=self.file_name, kind=self.kind, title=self.title))
 
 
@@ -439,6 +443,7 @@ class MaterialEntry:
     file_name: str
     kind: str
     title: str | None
+    copies: tuple[str, ...] = ()
 
     @property
     def path(self) -> Path:
@@ -486,7 +491,7 @@ class LibraryIndex:
 
     def _scan_week(self, week_dir: Path) -> None:
         for content_id, entry in sorted(read_materials_meta(week_dir).items()):
-            self.materials.setdefault(content_id, MaterialEntry(week_dir, entry.file_name, entry.kind, entry.title))
+            self.materials.setdefault(content_id, MaterialEntry(week_dir, entry.file_name, entry.kind, entry.title, entry.copies))
         try:
             children = sorted(os.scandir(week_dir), key=lambda entry: entry.name)
         except OSError:
@@ -647,6 +652,9 @@ class CourseLayout:
         for content_id, entry in self.index.materials.items():
             self._claimed.add((_fold(entry.week_dir.name), _fold(entry.file_name)))
             self._material_owner[(_fold(entry.week_dir.name), _fold(entry.file_name))] = content_id
+            for copy in entry.copies:
+                self._claimed.add((_fold(entry.week_dir.name), _fold(copy)))
+                self._material_owner[(_fold(entry.week_dir.name), _fold(copy))] = content_id
         self._lectures: dict[str, LecturePaths] = {}
         self._materials: dict[str, MaterialPaths] = {}
         self._by_identity: dict[str, LecturePaths | MaterialPaths] = {}

@@ -680,3 +680,47 @@ def test_library_conflicts_and_path_budget_failures_have_stable_codes_everywhere
     result = rig.service.batch_download_lectures('u', 'p', course_id=42, course_name=COURSE, output_dir=rig.root, dry_run=False, module_item_ids=[112])
 
     assert [(item.ok, item.error_code) for item in result.items] == [(False, 'library_conflict')]
+
+
+def test_a_rename_copy_in_flight_is_reserved_so_a_canvas_attachment_of_the_same_title_cannot_take_its_name(rig_for):
+    from ssu_lecture_downloader.core.download import plan_library_download
+    from ssu_lecture_downloader.core.library_layout import CourseLayout, LibraryTarget
+
+    rig = rig_for(Lec(111, '자료', 'cid-a', kind='pdf', file_name='a.pdf'))
+    rig.service.batch_download_lectures('u', 'p', course_id=42, course_name=COURSE, output_dir=rig.root, dry_run=False, module_item_ids=[111], conflict_strategy='rename')
+    week = rig.course_dir / '05주차'
+
+    # a second download of the same material (rename) is under way: prepared, bytes still in the .part
+    layout = CourseLayout.plan(rig.course_dir, [LibraryTarget(key='111', title='자료', kind='material', content_id='cid-a', week_position=5, extension='pdf')], course_id='42')
+    copy = plan_library_download(output_dir=rig.root, library=layout.material('111'), extension='pdf', conflict_strategy='rename')
+    copy.library.prepare()
+    (week / f'{copy.file_path.name}.part').write_bytes(b'partial')
+
+    canvas = LibraryTarget(key='canvas-5', title='자료', kind='canvas_file', content_id='canvas-5', week_position=5, extension='pdf')
+    other = CourseLayout.plan(rig.course_dir, [canvas], course_id='')
+    other_plan = plan_library_download(output_dir=rig.root, library=other.ensure(canvas), extension='pdf', conflict_strategy='rename')
+    other_plan.library.prepare()
+
+    assert (copy.file_path.name, other_plan.file_path.name) == ('자료 (2).pdf', '자료 (3).pdf')
+    entries = json.loads((week / '.ssu' / 'materials.json').read_text(encoding='utf-8'))['entries']
+    assert entries['cid-a']['file_name'] == '자료.pdf' and entries['cid-a']['copies'] == ['자료 (2).pdf']
+    assert entries['canvas-5']['file_name'] == '자료 (3).pdf'
+
+
+def test_a_taken_lecture_folder_while_writing_the_transcript_fails_the_lecture_with_the_stable_code(rig_for, monkeypatch):
+    from ssu_lecture_downloader.core.errors import LibraryConflict
+    from ssu_lecture_downloader.core.library_layout import LecturePaths
+
+    rig = rig_for(Lec(111, '선대_5_2', 'cid-a'))
+    touch(rig.course_dir, '선대_5_2 [cid-a].mp3')  # audio exists: only the transcript writer prepares the folder
+
+    def taken(self):
+        raise LibraryConflict('taken')
+
+    monkeypatch.setattr(LecturePaths, 'prepare', taken)
+
+    snapshot = rig.run(['txt'], [111])
+
+    failed = events(snapshot, 'artifact_item_failed', 111)
+    assert [(event['error_code'], event['failed_stage']) for event in failed] == [('library_conflict', 'transcript')]
+    assert snapshot['error_code'] == 'library_conflict'

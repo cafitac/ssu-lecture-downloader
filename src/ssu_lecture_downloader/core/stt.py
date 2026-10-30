@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any, Literal, Protocol
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from pydantic.json_schema import SkipJsonSchema
 
+from ssu_lecture_downloader.core.errors import LibraryConflict, PathTooLong
 from ssu_lecture_downloader.core.library_layout import LecturePaths
 from ssu_lecture_downloader.core.progress import emit_progress
 from ssu_lecture_downloader.core.stt_cues import TranscriptSegment, format_srt
@@ -344,4 +345,6 @@ def transcribe_audio(
     try:
         return write_transcript_files(audio_path=audio_path, segments=segments, output_dir=request.output_dir, provider=request.provider, model=request.model, language=request.language, overwrite=request.overwrite, paths=request.paths)
     except OSError as exc:
-        return TranscriptionResult(ok=False, audio_path=audio_path, segments=segments, error_code='transcript_write_failed', message=str(exc)[:500])
+        # A taken lecture folder / path budget has its own stable code; any other write problem stays `transcript_write_failed`.
+        code = exc.error_code if isinstance(exc, (LibraryConflict, PathTooLong)) else 'transcript_write_failed'
+        return TranscriptionResult(ok=False, audio_path=audio_path, segments=segments, error_code=code, message=str(exc)[:500])

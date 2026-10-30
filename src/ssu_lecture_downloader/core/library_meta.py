@@ -37,6 +37,7 @@ MATERIALS_FILE_NAME = 'materials.json'
 MAX_ITEM_JSON_BYTES = 64 * 1024
 MAX_MATERIALS_JSON_BYTES = 256 * 1024
 MAX_NAME_BYTES = 255
+MAX_COPIES = 50
 
 CREATED_BY_VALUES = frozenset({'download', 'migration'})
 MATERIAL_KINDS = frozenset({'material', 'canvas_file'})
@@ -251,9 +252,17 @@ class MaterialMeta:
     title: str | None = None
     created_by: str = 'download'
     updated_at: str = ''
+    # Names of extra copies of this material (`rename`), reserved so no other material is planned onto them.
+    copies: tuple[str, ...] = ()
 
     def to_json(self) -> dict[str, Any]:
-        return {'file_name': self.file_name, 'kind': self.kind, 'title': self.title, 'created_by': self.created_by, 'updated_at': self.updated_at}
+        payload: dict[str, Any] = {'file_name': self.file_name, 'kind': self.kind, 'title': self.title, 'created_by': self.created_by, 'updated_at': self.updated_at}
+        if self.copies:
+            payload['copies'] = list(self.copies)
+        return payload
+
+    def names(self) -> tuple[str, ...]:
+        return (self.file_name, *self.copies)
 
 
 def read_materials_meta(week_dir: Path) -> dict[str, MaterialMeta]:
@@ -276,6 +285,7 @@ def read_materials_meta(week_dir: Path) -> dict[str, MaterialMeta]:
             title=_optional_text(raw.get('title')),
             created_by=created_by if created_by in CREATED_BY_VALUES else 'download',
             updated_at=_optional_text(raw.get('updated_at')) or '',
+            copies=tuple(name for name in (raw.get('copies') if isinstance(raw.get('copies'), list) else [])[:MAX_COPIES] if is_plain_name(name)),
         )
     return entries
 
@@ -290,10 +300,25 @@ def upsert_material_meta(week_dir: Path, content_id: str, entry: MaterialMeta) -
         current = entries.get(content_id)
         if current is not None and current.file_name == entry.file_name and current.kind == entry.kind:
             return
-        entries[content_id] = MaterialMeta(entry.file_name, entry.kind, entry.title, entry.created_by, entry.updated_at or utc_now())
-        meta_dir = ensure_meta_dir(week_dir)
-        payload = {'schema': SCHEMA_VERSION, 'entries': {key: value.to_json() for key, value in sorted(entries.items())}}
-        write_json_atomically(meta_dir / MATERIALS_FILE_NAME, payload)
+        entries[content_id] = MaterialMeta(entry.file_name, entry.kind, entry.title, entry.created_by, entry.updated_at or utc_now(), current.copies if current else entry.copies)
+        _write_materials(week_dir, entries)
+
+
+def reserve_material_copy(week_dir: Path, content_id: str, copy_name: str) -> None:
+    """Record `copy_name` as an extra copy of an existing entry, so it counts as taken before its bytes exist."""
+    with _materials_write_lock:
+        entries = read_materials_meta(week_dir)
+        current = entries.get(content_id)
+        if current is None or copy_name in current.copies or len(current.copies) >= MAX_COPIES:
+            return
+        entries[content_id] = MaterialMeta(current.file_name, current.kind, current.title, current.created_by, utc_now(), (*current.copies, copy_name))
+        _write_materials(week_dir, entries)
+
+
+def _write_materials(week_dir: Path, entries: dict[str, MaterialMeta]) -> None:
+    meta_dir = ensure_meta_dir(week_dir)
+    payload = {'schema': SCHEMA_VERSION, 'entries': {key: value.to_json() for key, value in sorted(entries.items())}}
+    write_json_atomically(meta_dir / MATERIALS_FILE_NAME, payload)
 
 
 # --------------------------------------------------------------------------- legacy file names
