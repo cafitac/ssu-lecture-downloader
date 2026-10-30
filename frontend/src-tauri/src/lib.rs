@@ -1,6 +1,7 @@
 #[cfg(test)]
 mod acl_tests;
 mod backend;
+mod diagnostics;
 #[cfg(all(test, target_os = "macos"))]
 mod invariant_tests;
 mod native_download;
@@ -223,7 +224,8 @@ pub fn run() {
             native_download::native_download_job_status,
             native_download::native_cancel_download_job,
             update::update_install_guard,
-            update::prepare_for_update
+            update::prepare_for_update,
+            diagnostics::save_diagnostics
         ])
         .build(app_context());
     match built {

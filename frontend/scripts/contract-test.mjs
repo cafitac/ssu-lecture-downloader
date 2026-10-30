@@ -2490,6 +2490,50 @@ const assistSource = readFileSync('src-tauri/src/assets/watch_assist.js', 'utf8'
       assert.ok(normal.includes('다시 시도</button>'), 'the backend screen offers its retry');
       const blocked = renderToStaticMarkup(React.createElement(BackendScreen, { status: failedStatus, onRetry() {}, retryBlockedText: '업데이트하는 중이에요' }));
       assert.ok(blocked.includes('업데이트하는 중이에요') && !blocked.includes('다시 시도</button>'), 'while an update installs the retry is replaced by a status line');
+      // 진단 파일 저장: the failure screen offers it as a quiet secondary action, the Settings row as its own section.
+      assert.ok(normal.includes('class="btn btn-sm btn-ghost">진단 파일 저장</button>') && normal.indexOf('다시 시도</button>') < normal.indexOf('진단 파일 저장'), 'the failure screen carries 진단 파일 저장 after the retry');
+      assert.ok(blocked.includes('진단 파일 저장'), 'the diagnostics action stays while an update installs');
+      const { DiagnosticsButtonView } = await server.ssrLoadModule('/src/components/Screens.tsx');
+      const { DiagnosticsSectionView } = await server.ssrLoadModule('/src/components/Diagnostics.tsx');
+      const savedOutcome = { ok: true, path: '/Users/x/Desktop/ssu-진단-20261030-1105.zip' };
+      const failedOutcome = { ok: false, text: '저장 공간이 부족해요. 디스크 공간을 확보한 뒤 다시 시도해 주세요.' };
+      const sectionIdle = renderToStaticMarkup(React.createElement(DiagnosticsSectionView, { busy: false, outcome: null, onSave() {}, onReveal() {} }));
+      assert.ok(sectionIdle.startsWith('<section class="setting"><h3>문제 보내기</h3>') && sectionIdle.includes('>진단 파일 저장</button>'), 'Settings row: 문제 보내기 with the save button');
+      assert.ok(!/disabled|role="status"|role="alert"|폴더에서 보기/.test(sectionIdle), 'idle: enabled button, no result, no reveal');
+      const sectionBusy = renderToStaticMarkup(React.createElement(DiagnosticsSectionView, { busy: true, outcome: null, onSave() {}, onReveal() {} }));
+      assert.ok(/<button type="button" class="btn btn-sm" disabled="">.*저장하는 중…<\/button>/.test(sectionBusy), 'the button is disabled while saving');
+      const sectionSaved = renderToStaticMarkup(React.createElement(DiagnosticsSectionView, { busy: false, outcome: savedOutcome, onSave() {}, onReveal() {} }));
+      assert.ok(sectionSaved.includes('<p class="small" role="status">진단 파일을 저장했어요. 이 파일을 전달해 주세요.</p>') && sectionSaved.includes('폴더에서 보기'), 'success text and a Finder reveal');
+      const sectionFailed = renderToStaticMarkup(React.createElement(DiagnosticsSectionView, { busy: false, outcome: failedOutcome, onSave() {}, onReveal() {} }));
+      assert.ok(sectionFailed.includes('role="alert">저장 공간이 부족해요. 디스크 공간을 확보한 뒤 다시 시도해 주세요.</p>') && !sectionFailed.includes('폴더에서 보기'), 'failure is a plain Korean alert');
+      // The real SettingsDialog: the row exists in the desktop app (Tauri bridge present) and not in a plain browser.
+      {
+        const { SettingsDialog } = await server.ssrLoadModule('/src/components/SettingsDialog.tsx');
+        const media = { missingComponents: [], ffmpegDependency: { available: true }, whisperStatus: { available: true }, subtitlesViaRemote: false, subtitlesUnsupportedReason: null, canInstall: false, autoInstallAvailable: true, autoInstallUnavailableReason: null, isInstalling: false, install() {}, load() {}, remote: { status: null, busy: null, outcome: null, save: async () => true, check: async () => {} } };
+        const grades = { consent: 'off', refreshStatus: async () => {}, revoke: async () => null };
+        const settings = () => renderToStaticMarkup(React.createElement(SettingsDialog, { downloadDir: '/Users/x/Downloads', busy: false, workBusy: false, media, debugEvents: [], grades, watchMode: 'chrome', chromeAvailable: true, queueActive: false, tidy: { runs: { state: 'unsupported', list: [] } }, tidyBlocked: false, onTidy() {}, onUndoTidy() {}, onWatchModeChange() {}, onPickFolder() {}, onOpenFolder() {}, onSignOut: async () => null, onClose() {} }));
+        const savedWindow = Object.getOwnPropertyDescriptor(globalThis, 'window');
+        const savedInternals = Object.getOwnPropertyDescriptor(globalThis, '__TAURI_INTERNALS__');
+        try {
+          delete globalThis.window;
+          delete globalThis.__TAURI_INTERNALS__;
+          const browser = settings();
+          assert.ok(browser.includes('저장 폴더') && !browser.includes('문제 보내기') && !browser.includes('진단 파일 저장'), 'no diagnostics row in a plain browser');
+          globalThis.window = globalThis;
+          globalThis.__TAURI_INTERNALS__ = {};
+          const desktopHtml = settings();
+          assert.ok(desktopHtml.includes('<h3>문제 보내기</h3>') && desktopHtml.includes('>진단 파일 저장</button>'), 'the desktop app shows the 문제 보내기 row');
+          assert.ok(desktopHtml.indexOf('기한 알림') < desktopHtml.indexOf('문제 보내기'), 'after the reminders row');
+        } finally {
+          if (savedWindow) Object.defineProperty(globalThis, 'window', savedWindow);
+          else delete globalThis.window;
+          if (savedInternals) Object.defineProperty(globalThis, '__TAURI_INTERNALS__', savedInternals);
+          else delete globalThis.__TAURI_INTERNALS__;
+        }
+      }
+      const screenSaved = renderToStaticMarkup(React.createElement(DiagnosticsButtonView, { busy: false, outcome: savedOutcome, onSave() {}, onReveal() {} }));
+      assert.ok(screenSaved.includes('진단 파일을 저장했어요. 이 파일을 전달해 주세요.') && screenSaved.includes('폴더에서 보기'));
+      assert.ok(/disabled=""/.test(renderToStaticMarkup(React.createElement(DiagnosticsButtonView, { busy: true, outcome: null, onSave() {}, onReveal() {} }))), 'the failure-screen button is disabled while saving');
       const base = { phase: 'available', version: '1.2.3', notes: '- 빨라졌어요', hidden: false, progress: null, notice: null, error: null, canRetry: false };
       const render = (state, open) => renderToStaticMarkup(React.createElement(UpdateChipView, { state, open, onToggle() {}, onUpdate() {}, onLater() {} }));
       const noInterruption = (html) => {
@@ -2599,6 +2643,60 @@ const assistSource = readFileSync('src-tauri/src/assets/watch_assist.js', 'utf8'
   };
   const desktop = await import('../src/lib/desktop.ts');
   const { recoverBackend, waitForBackendSettled } = await import('../src/lib/updater.ts');
+
+  // 진단 파일 저장: save dialog with the dated default name, then the command with the chosen path.
+  {
+    assert.equal(desktop.diagnosticsFileName(new Date(2026, 9, 30, 9, 5)), 'ssu-진단-20261030-0905.zip');
+    assert.equal(desktop.diagnosticsFileName(new Date(2026, 0, 2, 23, 59)), 'ssu-진단-20260102-2359.zip');
+    let dialogOptions;
+    let commandArgs;
+    const picked = tauriBridge({
+      'plugin:dialog|save': (args) => { dialogOptions = args.options; return '/Users/x/Desktop/diag.zip'; },
+      save_diagnostics: (args) => { commandArgs = args; return { path: args.destination, files: ['backend.log', 'info.json'] }; },
+    });
+    try {
+      const saved = await desktop.saveDiagnosticsFile(new Date(2026, 9, 30, 11, 5));
+      assert.deepEqual(saved, { path: '/Users/x/Desktop/diag.zip', files: ['backend.log', 'info.json'] });
+      assert.equal(dialogOptions.defaultPath, 'ssu-진단-20261030-1105.zip');
+      assert.deepEqual(commandArgs, { destination: '/Users/x/Desktop/diag.zip' });
+      assert.deepEqual(picked.calls, ['plugin:dialog|save', 'save_diagnostics']);
+    } finally { picked.restore(); }
+
+    // Cancelling the dialog writes nothing and is not an error.
+    const cancelled = tauriBridge({ 'plugin:dialog|save': () => null });
+    try {
+      assert.equal(await desktop.saveDiagnosticsFile(), null);
+      assert.deepEqual(cancelled.calls, ['plugin:dialog|save'], 'no command call after a cancel');
+    } finally { cancelled.restore(); }
+
+    // A failing command rejects with the Rust sentence, which the hook shows as it is.
+    const failing = tauriBridge({
+      'plugin:dialog|save': () => '/Users/x/Desktop/diag.zip',
+      save_diagnostics: () => { throw '이 폴더에는 파일을 저장할 권한이 없어요. 다른 폴더를 골라 주세요.'; },
+    });
+    try {
+      const { friendlyError: describeFailure } = await import('../src/lib/errors.ts');
+      await assert.rejects(desktop.saveDiagnosticsFile(), (failure) => describeFailure(failure) === '이 폴더에는 파일을 저장할 권한이 없어요. 다른 폴더를 골라 주세요.');
+    } finally { failing.restore(); }
+
+    // Outside the desktop app nothing is asked or written.
+    assert.equal(await desktop.saveDiagnosticsFile(), null);
+
+    // The save, as the states the UI goes through (the hook's pure core): busy at once, then idle with the result.
+    {
+      const { runDiagnosticsSave, DIAGNOSTICS_SAVED_TEXT, DIAGNOSTICS_FAILED_TEXT } = await import('../src/lib/diagnosticsSave.ts');
+      const run = async (saveFile) => {
+        const states = [];
+        await runDiagnosticsSave(saveFile, (state) => states.push(state));
+        return states;
+      };
+      assert.deepEqual(await run(async () => ({ path: '/x/diag.zip', files: [] })), [{ busy: true, outcome: null }, { busy: false, outcome: { ok: true, path: '/x/diag.zip' } }], 'busy, then the saved path');
+      assert.deepEqual(await run(async () => null), [{ busy: true, outcome: null }, { busy: false, outcome: null }], 'a cancelled dialog ends idle without a result');
+      assert.deepEqual(await run(async () => { throw '이 폴더에는 파일을 저장할 권한이 없어요. 다른 폴더를 골라 주세요.'; }), [{ busy: true, outcome: null }, { busy: false, outcome: { ok: false, text: '이 폴더에는 파일을 저장할 권한이 없어요. 다른 폴더를 골라 주세요.' } }], 'a Rust sentence is shown as it is');
+      assert.deepEqual((await run(async () => { throw new Error('boom'); })).at(-1), { busy: false, outcome: { ok: false, text: DIAGNOSTICS_FAILED_TEXT } }, 'an unknown error gets the plain fallback');
+      assert.equal(DIAGNOSTICS_SAVED_TEXT, '진단 파일을 저장했어요. 이 파일을 전달해 주세요.');
+    }
+  }
 
   // After backend_restart the cached connection (old port, old token) must not survive. A request made
   // while the sidecar is still starting caches the old port with no token, so the reset comes only

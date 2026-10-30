@@ -1,6 +1,6 @@
 import type { CachedDeadline } from './reminders';
-import type { BackendConnection, BackendSupervisionStatus, DownloadJobStatus, DownloadResult, NativeDownloadPlanResult, OfficialViewerBridgeCookie, OfficialViewerSessionBridgeResult, ExternalWatchView, RemindersStatus, WatchQueueItemInput, WatchQueueState } from './types';
-import { open } from '@tauri-apps/plugin-dialog';
+import type { BackendConnection, BackendSupervisionStatus, DownloadJobStatus, DownloadResult, NativeDownloadPlanResult, OfficialViewerBridgeCookie, OfficialViewerSessionBridgeResult, ExternalWatchView, RemindersStatus, SavedDiagnostics, WatchQueueItemInput, WatchQueueState } from './types';
+import { open, save } from '@tauri-apps/plugin-dialog';
 import { invoke } from '@tauri-apps/api/core';
 import { downloadDir } from '@tauri-apps/api/path';
 import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
@@ -48,6 +48,28 @@ export async function pickDownloadDirectory(): Promise<string | null> {
     title: '강의 다운로드 폴더 선택',
   });
   return typeof selected === 'string' ? selected : null;
+}
+
+/** `ssu-진단-yyyyMMdd-HHmm.zip` in local time: the save dialog's default name. */
+export function diagnosticsFileName(now: Date = new Date()): string {
+  const two = (value: number) => String(value).padStart(2, '0');
+  const day = `${now.getFullYear()}${two(now.getMonth() + 1)}${two(now.getDate())}`;
+  return `ssu-진단-${day}-${two(now.getHours())}${two(now.getMinutes())}.zip`;
+}
+
+/**
+ * Asks where to put the diagnostics zip, then has the shell write it there (logs plus version and
+ * OS info; nothing is uploaded). Resolves to `null` when the user cancels the dialog.
+ */
+export async function saveDiagnosticsFile(now: Date = new Date()): Promise<SavedDiagnostics | null> {
+  if (!isTauriRuntime()) return null;
+  const destination = await save({
+    title: '진단 파일 저장',
+    defaultPath: diagnosticsFileName(now),
+    filters: [{ name: 'ZIP', extensions: ['zip'] }],
+  });
+  if (typeof destination !== 'string' || destination === '') return null;
+  return invoke<SavedDiagnostics>('save_diagnostics', { destination });
 }
 
 export async function backendSupervisionStatus(): Promise<BackendSupervisionStatus> {

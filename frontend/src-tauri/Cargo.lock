@@ -3272,6 +3272,7 @@ dependencies = [
 name = "ssu-lecture-downloader"
 version = "0.2.0"
 dependencies = [
+ "flate2",
  "libc",
  "reqwest 0.12.28",
  "serde",
@@ -3281,6 +3282,7 @@ dependencies = [
  "tauri-plugin-dialog",
  "tauri-plugin-process",
  "tauri-plugin-updater",
+ "zip",
 ]
 
 [[package]]
@@ -5261,6 +5263,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1156b39d142a34b999c2310a50455e0cb3760bf7efad0122f796d813bee26ccb"
 dependencies = [
  "crc32fast",
+ "flate2",
  "getrandom 0.4.2",
  "indexmap 2.14.0",
  "memchr",
