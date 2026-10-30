@@ -17,8 +17,8 @@ export const PROBLEM_SAVE_FAILED_TEXT = '진단 파일을 저장하지 못했어
 
 const SENTENCES: Record<ProblemKind, string> = {
   'chrome-watch': '자동 재생이 오류로 멈췄어요.',
-  'chrome-skip': '재생이 멈춰서 강의를 건너뛰었어요.',
-  'app-watch': '재생이 멈춰서 강의를 건너뛰었어요.',
+  'chrome-skip': '문제가 생겨 강의를 건너뛰었어요.',
+  'app-watch': '문제가 생겨 강의를 건너뛰었어요.',
   backend: '내부 서버가 멈췄어요.',
   'previous-crash': '지난번에 앱이 비정상적으로 종료됐어요.',
 };
@@ -29,6 +29,8 @@ export function problemSentence(kind: ProblemKind): string {
 }
 
 /** Run error codes of a stop the user caused by closing the Chrome window; that is no problem. */
+// Known limit: the backend also reports an unexpected Chrome process exit as `chrome_window_closed`
+// (chrome_watch.py `check_alive`), so that case is not prompted; WATCH-RECOVER will split it.
 const USER_CLOSED_CODES: ReadonlySet<string> = new Set(['chrome_window_closed']);
 
 /**

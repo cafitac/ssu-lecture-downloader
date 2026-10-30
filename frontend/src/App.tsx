@@ -541,7 +541,8 @@ export function App() {
   useEffect(() => {
     if (status.state === 'failed') reportProblem('backend');
   }, [status.state, problem.state.kind, reportProblem]);
-  const problemDialog = problem.state.kind !== null && <ProblemDialog kind={problem.state.kind} onClose={problem.close} />;
+  // Keyed by kind: a dialog shown from the queue after another one closes starts idle, not with that one's save state.
+  const problemDialog = problem.state.kind !== null && <ProblemDialog key={problem.state.kind} kind={problem.state.kind} onClose={problem.close} />;
   if (status.state !== 'ready') {
     // While an update installs, the screen's own retry would restart the backend under the installer.
     const installing = isInstalling(update.state.phase);

@@ -2547,7 +2547,7 @@ const assistSource = readFileSync('src-tauri/src/assets/watch_assist.js', 'utf8'
         assert.ok(idle.includes('자동 재생이 오류로 멈췄어요.') && idle.includes('어디로도 자동 전송되지 않아요.'), 'the sentence and the no-upload promise');
         assert.ok(/class="btn btn-sm btn-primary"[^>]*>진단 파일 저장<\/button>/.test(idle) && /class="btn btn-sm"[^>]*>닫기<\/button>/.test(idle), '[진단 파일 저장] and [닫기]');
         assert.ok(!/disabled|role="status"|role="alert"/.test(idle), 'idle: nothing disabled, no result');
-        for (const [kind, sentence] of [['chrome-watch', '자동 재생이 오류로 멈췄어요.'], ['chrome-skip', '재생이 멈춰서 강의를 건너뛰었어요.'], ['app-watch', '재생이 멈춰서 강의를 건너뛰었어요.'], ['backend', '내부 서버가 멈췄어요.'], ['previous-crash', '지난번에 앱이 비정상적으로 종료됐어요.']]) {
+        for (const [kind, sentence] of [['chrome-watch', '자동 재생이 오류로 멈췄어요.'], ['chrome-skip', '문제가 생겨 강의를 건너뛰었어요.'], ['app-watch', '문제가 생겨 강의를 건너뛰었어요.'], ['backend', '내부 서버가 멈췄어요.'], ['previous-crash', '지난번에 앱이 비정상적으로 종료됐어요.']]) {
           assert.ok(view({ kind }).includes(`<p class="problem-lead">${sentence}</p>`), `${kind}: ${sentence}`);
         }
         const busy = view({ busy: true });
@@ -2638,6 +2638,22 @@ const assistSource = readFileSync('src-tauri/src/assets/watch_assist.js', 'utf8'
     assert.equal((appSource.match(/\{problemDialog\}/g) ?? []).length, 2, 'the dialog is on the backend branch and the session branch');
     assert.ok(/status\.state === 'failed'\) reportProblem\('backend'\)/.test(appSource), 'the failure screen asks on its own');
     assert.ok(/previousRunCrashed\(\)\.then\(\(crashed\) => \{\s*if \(crashed\) reportProblem\('previous-crash', \{ wait: true \}\)/.test(appSource), 'a crashed previous run asks once at launch');
+    assert.ok(/<ProblemDialog key=\{problem\.state\.kind\} kind=/.test(appSource), 'the dialog is keyed by kind, so a queued one remounts with fresh save state');
+    {
+      // What a dialog shown from the queue renders: idle, with the save button and no result.
+      const { createServer } = await import('vite');
+      const React = (await import('react')).default;
+      const { renderToStaticMarkup } = await import('react-dom/server');
+      const srv = await createServer({ root: process.cwd(), server: { middlewareMode: true, hmr: false, watch: null }, appType: 'custom', logLevel: 'error', optimizeDeps: { noDiscovery: true } });
+      try {
+        const { ProblemDialog } = await srv.ssrLoadModule('/src/components/ProblemDialog.tsx');
+        const html = renderToStaticMarkup(React.createElement(ProblemDialog, { kind: 'previous-crash', onClose() {} }));
+        assert.ok(html.includes('지난번에 앱이 비정상적으로 종료됐어요.') && />진단 파일 저장<\/button>/.test(html), 'idle: the save button is there');
+        assert.ok(!/disabled|role="status"|role="alert"|저장했어요/.test(html), 'idle: no busy state and no outcome');
+      } finally {
+        await srv.close();
+      }
+    }
     assert.ok(/onProblem=\{reportProblem\}/.test(appSource), 'the workspace reports watch problems up');
     const viewerSource = readFileSync('src/hooks/useOfficialViewer.ts', 'utf8');
     assert.ok(/chromeNoticeIsProblem\(notice, authLost, status\.error_code\)\) optionsRef\.current\.onProblem\(chromeProblemKind\(notice\)\)/.test(viewerSource) && /appWatchNoticeIsProblem\(payload\)\) optionsRef\.current\.onProblem\('app-watch'\)/.test(viewerSource), 'both watch notice streams feed the prompt');
@@ -2820,7 +2836,13 @@ const assistSource = readFileSync('src-tauri/src/assets/watch_assist.js', 'utf8'
       assert.deepEqual(asks([{ kind: 'stalled' }, { kind: 'finished' }]), [], 'recovered stall: no prompt');
       assert.deepEqual(asks([{ kind: 'stalled' }, { kind: 'skipped' }, { kind: 'finished' }]), ['chrome-skip']);
       assert.deepEqual(asks([{ kind: 'failed' }]), ['chrome-watch']);
-      assert.equal(prompt.problemSentence('chrome-skip'), '재생이 멈춰서 강의를 건너뛰었어요.');
+      // A skip that is not a stall (a plan error, a missing launch URL): playback never started, so the sentence names no cause.
+      const planErrorSkip = { id: 4, kind: 'skipped', level: 'error', text: '‘3주차’ 시청 주소를 찾지 못해 건너뛰었어요.', item_title: '3주차', reason: 'plan_failed' };
+      assert.deepEqual(asks([planErrorSkip]), ['chrome-skip'], 'a plan-error skip asks');
+      assert.equal(prompt.problemSentence('chrome-skip'), '문제가 생겨 강의를 건너뛰었어요.');
+      assert.equal(prompt.problemSentence('app-watch'), '문제가 생겨 강의를 건너뛰었어요.');
+      assert.ok(!prompt.problemSentence('chrome-skip').includes('멈'), 'the skip sentence claims no stall');
+      assert.equal(prompt.problemSentence('chrome-skip'), '문제가 생겨 강의를 건너뛰었어요.');
       assert.equal(prompt.problemSentence('chrome-watch'), '자동 재생이 오류로 멈췄어요.');
     }
     assert.equal(prompt.appWatchNoticeIsProblem({ kind: 'error', auth_expired: false }), true);

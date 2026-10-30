@@ -26,7 +26,8 @@
   - Triggers:
     - a Chrome watch notice of kind `failed` (not a login loss, not `chrome_window_closed`, which
       the user causes) or `skipped` (the stall that ends in a skip; a first `stalled` notice
-      usually recovers and does not ask);
+      usually recovers and does not ask). A Chrome skip and a Chrome failure are separate
+      prompt kinds, each asked once per session;
     - the in-app watch runtime reporting a failed or skipped item;
     - the backend failure screen;
     - an abnormal exit of the previous app run, asked at the next launch through a session
@@ -45,3 +46,9 @@
 - AC3: after a clean quit, the next launch shows no prompt. After a crash or force-quit, the
   next launch shows the prompt once.
 - AC4: the copy is plain Korean. No upload happens.
+
+## Known limitations
+
+- An unexpected exit of the Chrome process is reported by the backend as `chrome_window_closed`
+  (chrome_watch.py `check_alive`), the same code as the user closing the window, so it is not
+  prompted. The WATCH-RECOVER follow-up will split the two.
