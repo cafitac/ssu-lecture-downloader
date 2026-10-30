@@ -260,9 +260,7 @@ def test_nfd_course_migration_respects_volume_normalization(tmp_path):
             'ok': True, 'root': str(tmp_path), 'legacy_file_count': 0, 'course_count': 0, 'courses': [],
         }
         result = runner.apply(plan)
-        assert result.moved == 0
-        undone = runner.undo(tmp_path, result.run_id)
-        assert undone.restored == 0 and undone.skips == []
+        assert result.moved == 0 and result.run_id is None  # nothing moved, so no journal and nothing to undo
         assert {name: (tmp_path / name).read_bytes() for name in names} == before
         assert sorted(path.name for path in (tmp_path / course).iterdir()) == sorted(Path(name).name for name in names)
         return
