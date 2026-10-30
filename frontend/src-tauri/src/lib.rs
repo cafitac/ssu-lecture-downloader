@@ -4,9 +4,11 @@ mod backend;
 mod diagnostics;
 #[cfg(all(test, target_os = "macos"))]
 mod invariant_tests;
+mod log_rotation;
 mod native_download;
 mod platform;
 mod reminders;
+mod session_marker;
 mod update;
 mod viewer;
 mod watch_external;
@@ -107,6 +109,13 @@ fn open_path_in_finder(path: String) -> Result<(), String> {
     platform::open_path(&folder)
 }
 
+/// Whether the previous run of the app ended abnormally (no clean exit). Reads and clears the
+/// flag: `true` only on the first call after a crashed run.
+#[tauri::command]
+fn previous_run_crashed(marker: tauri::State<'_, session_marker::SessionMarker>) -> bool {
+    marker.take_previous_crashed()
+}
+
 #[tauri::command]
 fn open_url_in_browser(url: String) -> Result<(), String> {
     if !(url.starts_with("https://") || url.starts_with("http://")) {
@@ -186,6 +195,7 @@ pub fn run() {
                         .map(|home| platform::app_data_dir_for_home(&home))
                 })
                 .unwrap_or_else(|| std::env::temp_dir().join("ssu-lecture-downloader"));
+            let marker_dir = data_dir.clone();
             let packaged = platform::reminder_schedule_supported();
             let service =
                 ReminderService::start(data_dir, packaged, Arc::new(platform::PlatformNotifier));
@@ -196,6 +206,8 @@ pub fn run() {
                 }
             }
             app.manage(service);
+            // Last: from here on the run counts as started; only a clean exit removes the marker.
+            app.manage(session_marker::SessionMarker::begin(marker_dir));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -225,7 +237,9 @@ pub fn run() {
             native_download::native_cancel_download_job,
             update::update_install_guard,
             update::prepare_for_update,
-            diagnostics::save_diagnostics
+            diagnostics::save_diagnostics,
+            diagnostics::diagnostics_auto_destination,
+            previous_run_crashed
         ])
         .build(app_context());
     match built {
@@ -238,6 +252,11 @@ pub fn run() {
             ) {
                 watch_runtime::shutdown(app_handle);
                 shutdown_backend(app_handle);
+                // A normal quit and the updater's relaunch both pass here: the next launch must
+                // not ask about a crash. (A kill or crash never does.)
+                if let Some(marker) = app_handle.try_state::<session_marker::SessionMarker>() {
+                    marker.end();
+                }
             }
         }),
         Err(error) => {

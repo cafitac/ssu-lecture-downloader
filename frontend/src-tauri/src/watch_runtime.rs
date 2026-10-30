@@ -882,7 +882,6 @@ fn open_item(app: &AppHandle, epoch: u64, index: usize) {
 /// Step log for the playback window (`<app log dir>/watch.log`), for diagnosing runtime issues.
 /// It records ids, stages and signal kinds only, never cookies or full URLs with tokens.
 fn wlog(app: &AppHandle, message: impl AsRef<str>) {
-    use std::io::Write;
     let line = format!(
         "{:?} {}\n",
         std::time::SystemTime::now()
@@ -893,14 +892,11 @@ fn wlog(app: &AppHandle, message: impl AsRef<str>) {
     );
     eprint!("watch: {line}");
     if let Ok(dir) = app.path().app_log_dir() {
-        let _ = std::fs::create_dir_all(&dir);
-        if let Ok(mut file) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(dir.join("watch.log"))
-        {
-            let _ = file.write_all(line.as_bytes());
-        }
+        let _ = crate::log_rotation::append_line(
+            &dir.join("watch.log"),
+            crate::log_rotation::WATCH_LOG_CAP,
+            &line,
+        );
     }
 }
 

@@ -25,6 +25,8 @@ import type { ChromeWatchStatus, CourseContentItem, CourseSummary, WatchDebugEve
 import type { AllCoursesQueueItem } from '../lib/watch';
 import { IDLE_WATCH_QUEUE, chromeStatusToQueue, newChromeNotices, resolveWatchMode, toChromeAllInputs, toChromeInputs, toExternalView, toQueueInputs } from '../lib/watch';
 import { startPolling } from '../lib/polling';
+import { appWatchNoticeIsProblem, chromeNoticeIsProblem, chromeProblemKind } from '../lib/problemPrompt';
+import type { ProblemKind } from '../lib/problemPrompt';
 import { useTauriEvent } from './useTauriEvent';
 
 const CHROME_POLL_MS = 2500;
@@ -38,6 +40,8 @@ interface Options {
   onQueueSettled: (scope: CourseSummary | 'all') => void;
   /** The saved playback mode choice (`null`: none yet, so Chrome when it is installed). */
   modePreference: WatchMode | null;
+  /** Playback went wrong (a failed run, a stall, a skipped lecture): the app asks about a diagnostics file. */
+  onProblem: (kind: ProblemKind) => void;
 }
 
 /**
@@ -46,16 +50,16 @@ interface Options {
  * the menu bar item — lives in the desktop shell, which advances only when the player reports
  * the real video `ended` event; this hook starts/stops it and mirrors its state for the UI.
  */
-export function useOfficialViewer({ notify, onAuthError, onItemWatched, onQueueSettled, modePreference }: Options) {
+export function useOfficialViewer({ notify, onAuthError, onItemWatched, onQueueSettled, modePreference, onProblem }: Options) {
   const [openingKey, setOpeningKey] = useState<string | null>(null);
   const [queue, setQueue] = useState<WatchQueueState>(IDLE_WATCH_QUEUE);
   const [debugEvents, setDebugEvents] = useState<WatchDebugEvent[]>([]);
   const openingRef = useRef(false);
   const scopeRef = useRef<CourseSummary | 'all' | null>(null);
   const wasActiveRef = useRef(false);
-  const optionsRef = useRef({ notify, onAuthError, onItemWatched, onQueueSettled });
+  const optionsRef = useRef({ notify, onAuthError, onItemWatched, onQueueSettled, onProblem });
   useEffect(() => {
-    optionsRef.current = { notify, onAuthError, onItemWatched, onQueueSettled };
+    optionsRef.current = { notify, onAuthError, onItemWatched, onQueueSettled, onProblem };
   });
   // Chrome mode: the backend drives the queue; this hook polls its status.
   const [chromeAvailable, setChromeAvailable] = useState<boolean | null>(null);
@@ -103,6 +107,7 @@ export function useOfficialViewer({ notify, onAuthError, onItemWatched, onQueueS
       run.lastNoticeId = notice.id;
       if (notice.kind === 'failed' && authLost) continue;
       optionsRef.current.notify(notice.text, notice.level);
+      if (chromeNoticeIsProblem(notice, authLost, status.error_code)) optionsRef.current.onProblem(chromeProblemKind(notice));
     }
     if (authLost) optionsRef.current.onAuthError(friendlyError(new ApiError(status.error_code ?? '', '')));
     const next = chromeStatusToQueue(status);
@@ -306,6 +311,7 @@ export function useOfficialViewer({ notify, onAuthError, onItemWatched, onQueueS
   useTauriEvent<WatchQueueNotice>('watch-queue-notice', (payload) => {
     if (payload.auth_expired) optionsRef.current.onAuthError(payload.text);
     else optionsRef.current.notify(payload.text, payload.kind);
+    if (appWatchNoticeIsProblem(payload)) optionsRef.current.onProblem('app-watch');
   });
 
   useTauriEvent<WatchDebugEvent>('official-watch-debug', (payload) => {

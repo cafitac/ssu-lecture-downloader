@@ -16,17 +16,19 @@ export const IDLE_DIAGNOSTICS_STATE: DiagnosticsSaveState = { busy: false, outco
 /**
  * One save, as the sequence of states the UI goes through: busy at once, then idle with the result.
  * `saveFile` resolves to `null` when the user cancels the dialog (no result, no error).
- * Pure, so Node can load it in the contract tests.
+ * `failedText` is the sentence for an error that has none of its own. Pure, so Node can load it in
+ * the contract tests.
  */
 export async function runDiagnosticsSave(
   saveFile: () => Promise<SavedDiagnostics | null>,
   emit: (state: DiagnosticsSaveState) => void,
+  failedText: string = DIAGNOSTICS_FAILED_TEXT,
 ): Promise<void> {
   emit({ busy: true, outcome: null });
   try {
     const saved = await saveFile();
     emit({ busy: false, outcome: saved ? { ok: true, path: saved.path } : null });
   } catch (failure) {
-    emit({ busy: false, outcome: { ok: false, text: friendlyError(failure, DIAGNOSTICS_FAILED_TEXT) } });
+    emit({ busy: false, outcome: { ok: false, text: friendlyError(failure, failedText) } });
   }
 }
