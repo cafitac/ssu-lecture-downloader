@@ -14,6 +14,8 @@ function itemsOf(detail: CourseDetailResponse): CourseContentItem[] {
 export function useCourseContent(course: CourseSummary | null, outputDir: string, onAuthError: (message: string) => void) {
   const [items, setItems] = useState<CourseContentItem[]>([]);
   const [state, setState] = useState<ContentState>('idle');
+  // Files of this course still saved the old way; null while unknown or when the backend does not report it.
+  const [legacyFileCount, setLegacyFileCount] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [attempt, setAttempt] = useState(0);
   // Videos that played to the end in this session, shown as watched until the LMS says so itself.
@@ -33,6 +35,7 @@ export function useCourseContent(course: CourseSummary | null, outputDir: string
 
   useEffect(() => {
     setItems([]);
+    setLegacyFileCount(null);
     setError(null);
     if (courseId === null) {
       setState('idle');
@@ -46,6 +49,7 @@ export function useCourseContent(course: CourseSummary | null, outputDir: string
       .then((detail) => {
         if (cancelled) return;
         setItems(itemsOf(detail));
+        setLegacyFileCount(detail.legacy_file_count ?? null);
         setState('ready');
       })
       .catch((failure: unknown) => {
@@ -88,7 +92,10 @@ export function useCourseContent(course: CourseSummary | null, outputDir: string
         known.forEach((key) => next.delete(key));
         return next;
       });
-      if (courseIdRef.current === String(target.id)) setItems(fresh);
+      if (courseIdRef.current === String(target.id)) {
+        setItems(fresh);
+        setLegacyFileCount(detail.legacy_file_count ?? null);
+      }
     } catch (failure) {
       // A background refresh never interrupts; an expired login is noticed by the next request.
       if (isAuthenticationError(failure)) onAuthErrorRef.current(friendlyError(failure));
@@ -105,5 +112,5 @@ export function useCourseContent(course: CourseSummary | null, outputDir: string
     [items, watchedHere],
   );
 
-  return { items: shown, state, error, reload, markWatched, refreshQuietly };
+  return { items: shown, state, error, legacyFileCount, reload, markWatched, refreshQuietly };
 }

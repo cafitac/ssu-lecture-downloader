@@ -152,11 +152,16 @@ if ((readFileSync('src/components/ActionBar.tsx', 'utf8').match(/btn-primary/g) 
 }
 // Screens.tsx (login) and GradesPane.tsx (the one consent step, shown instead of the course view) may carry one accent button each.
 // While a download runs the ActionBar's 다운로드 button can show next to the consent button; that coexistence is accepted.
-for (const file of readTree('src/components', ['.tsx']).filter((name) => !name.endsWith('ActionBar.tsx') && !name.endsWith('Screens.tsx') && !name.endsWith('GradesPane.tsx'))) {
+// TidyDialog.tsx is a modal: its commit button (정리하기, shown over the workspace) is the one accent button of that dialog.
+for (const file of readTree('src/components', ['.tsx']).filter((name) => !name.endsWith('ActionBar.tsx') && !name.endsWith('Screens.tsx') && !name.endsWith('GradesPane.tsx') && !name.endsWith('TidyDialog.tsx'))) {
   if (readFileSync(file, 'utf8').includes('btn-primary')) throw new Error(`${file}: no other accent-filled button may compete with the download button`);
 }
 if ((readFileSync('src/components/GradesPane.tsx', 'utf8').match(/btn-primary/g) ?? []).length !== 1) {
   throw new Error('The grades pane may contain exactly one accent-filled button (동의하고 성적 보기)');
+}
+
+if ((readFileSync('src/components/TidyDialog.tsx', 'utf8').match(/btn-primary/g) ?? []).length !== 1) {
+  throw new Error('The tidy dialog must contain exactly one accent-filled button (정리하기)');
 }
 
 // Session / data flow.
@@ -2790,5 +2795,425 @@ const assistSource = readFileSync('src-tauri/src/assets/watch_assist.js', 'utf8'
     } finally {
       await server.close();
     }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// LAYOUT-UI-TIDY: the folder tidy-up (notice, Settings entries, TidyDialog) against the internal API
+// (design/09, checked against the backend of LAYOUT-PY-MIGRATION). Copy is design/09 verbatim.
+// Nothing here touches a real folder or backend.
+// ---------------------------------------------------------------------------
+{
+  const tidy = await import('../src/lib/tidy.ts');
+  const { knownErrorText } = await import('../src/lib/errors.ts');
+  const { isTrackedWorkBusy } = await import('../src/lib/trackedWork.ts');
+  const { TIDY_COPY } = tidy;
+  const noop = () => undefined;
+
+  // Copy (design/09 "화면과 문구").
+  assert.equal(TIDY_COPY.notice(3), '이 과목에 예전 방식으로 저장된 파일이 3개 있어요. 주차·강의별 폴더로 정리할 수 있어요.');
+  assert.equal(TIDY_COPY.busyHint, '다운로드가 끝나면 정리할 수 있어요');
+  assert.equal(TIDY_COPY.preview(2), '파일 2개를 주차·강의별 폴더로 옮겨요. 지우거나 덮어쓰는 파일은 없어요.');
+  assert.equal(TIDY_COPY.moving(3, 10), '정리하는 중… 3/10');
+  assert.equal(TIDY_COPY.result(3, 0), '3개를 옮겼어요.');
+  assert.equal(TIDY_COPY.result(3, 1), '3개를 옮겼어요. 1개는 그대로 뒀어요.');
+  assert.equal(TIDY_COPY.undone(2, 1), '2개를 원래 자리로 돌려놨어요. 1개는 그대로 뒀어요.');
+  const reasons = {
+    destination_exists: '같은 이름의 파일이 이미 있어요', unknown_file: '이 앱이 받은 파일인지 알 수 없어요', partial_download: '받다 만 파일이에요',
+    course_not_matched: '이번 학기 과목 목록에 없는 폴더예요', duplicate_transcript: '같은 강의의 자막 글이 이미 있어요 (예전 파일)',
+    source_changed: '미리보기 뒤에 파일이 바뀌었어요', source_missing: '미리보기 뒤에 파일이 없어졌어요', not_a_regular_file: '폴더나 바로가기는 옮기지 않아요',
+    in_use: '다른 앱이 쓰고 있어요 (Windows)', path_too_long: '경로가 너무 길어요 (Windows)', move_failed: '옮기지 못했어요',
+  };
+  for (const [code, text] of Object.entries(reasons)) assert.equal(tidy.skipReasonText(code), text);
+  assert.equal(tidy.skipReasonText('source_changed', 'undo'), '정리한 뒤에 파일이 바뀌어서 그대로 뒀어요', 'an undo does not talk about the preview');
+  assert.ok(!tidy.skipReasonText('source_missing', 'undo').includes('미리보기'));
+  assert.equal(tidy.skipReasonText('destination_exists', 'undo'), reasons.destination_exists);
+  assert.ok(tidy.skipReasonText('a_future_reason').length > 0 && !tidy.skipReasonText('a_future_reason').includes('a_future_reason'), 'an unknown reason code is never shown raw');
+  assert.equal(knownErrorText('library_busy'), '다운로드가 끝난 뒤에 정리할 수 있어요.');
+  assert.equal(knownErrorText('library_tidy_running'), '폴더를 정리하는 중이에요. 끝나면 받을 수 있어요.');
+  assert.equal(knownErrorText('tidy_plan_expired'), '미리보기가 오래돼서 다시 확인했어요.');
+  assert.equal(knownErrorText('tidy_run_not_found'), '되돌릴 정리 기록을 찾지 못했어요.');
+  assert.ok(knownErrorText('invalid_run_id') && knownErrorText('library_conflict') && knownErrorText('path_too_long'), 'plain copy for the remaining codes');
+  assert.equal(knownErrorText('tidy_job_not_found'), knownErrorText('download_job_not_found'));
+  assert.equal(isTrackedWorkBusy({ downloadActive: false, componentsInstalling: false, attachmentSaving: false, libraryTidying: true }), true, 'an app update waits for a running tidy-up');
+
+  // Job outcomes -> dialog states.
+  const plan = (moves) => ({ plan_id: 'p1', expires_at: 1, move_count: moves.length, skip_count: 0, moves, skips: [], open_files_note: true });
+  const job = (status, extra = {}) => ({ job_id: 'j1', status, cancel_requested: false, progress: [], result: null, error_code: null, ...extra });
+  const move = (course, week, stem, from, to) => ({ course, week_folder: week, lecture_stem: stem, from, to, role: stem === null ? 'material' : 'video' });
+  const moves = [
+    move('선형대수', '05주차', '선대_5_2', 'a/선대_5_2 [68e66b6c1b816].mp4', 'a/05주차/선대_5_2/선대_5_2.mp4'),
+    move('선형대수', '05주차', '선대_5_2', 'a/선대_5_2 [68e66b6c1b816].txt', 'a/05주차/선대_5_2/선대_5_2 자막.txt'),
+    move('선형대수', '05주차', null, 'a/5주차 자료 [660650405b034].file', 'a/05주차/5주차 자료.pdf'),
+    move('선형대수', '06주차', '선대_6_1', 'a/선대_6_1 [68feeb3f3b6dd].mp4', 'a/06주차/선대_6_1/선대_6_1.mp4'),
+  ];
+  assert.equal(tidy.outcomeOf('plan', job('succeeded', { result: plan(moves) })).phase.kind, 'preview');
+  assert.equal(tidy.outcomeOf('plan', job('succeeded', { result: plan([]) })).phase.kind, 'empty');
+  assert.equal(tidy.outcomeOf('apply', job('succeeded', { result: { run_id: 'r1', moved: 3, skipped: 0, skips: [], undo_available: true } })).phase.kind, 'result');
+  assert.equal(tidy.outcomeOf('apply', job('cancelled', { result: { run_id: 'r1', moved: 1, skipped: 0, skips: [], undo_available: true } })).phase.kind, 'result', 'a stopped move reports what it moved');
+  assert.equal(tidy.outcomeOf('undo', job('succeeded', { result: { run_id: 'r1', restored: 3, skipped: 0, skips: [] } })).phase.kind, 'undone');
+  assert.deepEqual(tidy.outcomeOf('apply', job('failed', { error_code: 'tidy_plan_expired' })), { replan: true });
+  assert.equal(tidy.outcomeOf('plan', job('failed', { error_code: 'library_busy' })).phase.message, '다운로드가 끝난 뒤에 정리할 수 있어요.');
+  assert.deepEqual(tidy.outcomeOf('plan', job('cancelled')), { close: true });
+  const ticks = job('running', { progress: [{ stage: 'tidy_moving', done: 1, total: 9 }, { stage: 'other' }, { stage: 'tidy_moving', done: 4, total: 9 }] });
+  assert.deepEqual(tidy.movingProgress(ticks), { done: 4, total: 9 });
+  assert.deepEqual(tidy.movingProgress(job('running'), { done: 0, total: 12 }), { done: 0, total: 12 }, 'the known total stays until the first event');
+
+  // Grouping (a material has no lecture), the "n개 더" cap, which run Settings can undo, unsupported backends.
+  assert.deepEqual(tidy.groupMoves(moves).map((course) => course.weeks.map((week) => [week.week, week.lectures.map((lecture) => [lecture.stem, lecture.moves.length])])), [[['05주차', [['선대_5_2', 2], [null, 1]]], ['06주차', [['선대_6_1', 1]]]]]);
+  assert.deepEqual(tidy.capRows([1, 2, 3], 2), { shown: [1, 2], hidden: 1 });
+  assert.equal(tidy.undoableRun([{ run_id: 'new', at: null, undo_available: false }, { run_id: 'old', at: null, undo_available: true }]), null, 'only the latest run can be undone');
+  assert.equal(tidy.undoableRun([{ run_id: 'new', at: null, undo_available: true }]).run_id, 'new');
+  assert.ok(tidy.isUnsupportedBackend('not_found') && tidy.isUnsupportedBackend('HTTP 404') && !tidy.isUnsupportedBackend('network_error'));
+
+  // The notice: shown for old files, not for 0 / unknown, after 나중에, or when a preview found nothing; blocked while downloading.
+  assert.deepEqual(tidy.legacyNoticeState(12, false, false, false), { count: 12, blocked: false });
+  assert.deepEqual(tidy.legacyNoticeState(12, false, false, true), { count: 12, blocked: true });
+  for (const hidden of [tidy.legacyNoticeState(0, false, false, false), tidy.legacyNoticeState(null, false, false, false), tidy.legacyNoticeState(12, true, false, false), tidy.legacyNoticeState(12, false, true, false)]) assert.equal(hidden, null);
+
+  const { createServer } = await import('vite');
+  const React = (await import('react')).default;
+  const { renderToStaticMarkup } = await import('react-dom/server');
+  const server = await createServer({ root: process.cwd(), server: { middlewareMode: true, hmr: false, watch: null }, appType: 'custom', logLevel: 'error', optimizeDeps: { noDiscovery: true } });
+  const realFetch = globalThis.fetch;
+  try {
+    // Every state of the dialog, the notice and the Settings entries, rendered with real React.
+    const { TidyDialog, LegacyNotice, TidyEntries } = await server.ssrLoadModule('/src/components/TidyDialog.tsx');
+    const show = (phase, extra = {}) => renderToStaticMarkup(React.createElement(TidyDialog, { tidy: { phase, note: null, stopping: false, reconnecting: false, close: noop, apply: noop, undo: noop, stop: noop, ...extra }, canOpenFolder: true, onOpenFolder: noop }));
+    const withSkip = { ...plan(moves), skip_count: 1, skips: [{ path: 'a/메모.docx', reason: 'unknown_file' }] };
+    assert.ok(show({ kind: 'checking' }).includes('옮길 파일을 확인하고 있어요…'));
+    const preview = show({ kind: 'preview', plan: withSkip }, { note: '미리보기가 오래돼서 다시 확인했어요.' });
+    for (const text of ['파일 4개를 주차·강의별 폴더로 옮겨요. 지우거나 덮어쓰는 파일은 없어요.', '선형대수', '05주차', '선대_5_2', '선대_5_2 [68e66b6c1b816].mp4', '선대_5_2 자막.txt', '5주차 자료.pdf', '<summary>그대로 두는 파일 1개</summary>', '이 앱이 받은 파일인지 알 수 없어요', '열려 있는 파일도 옮겨져요. 재생 중인 영상은 계속 재생되지만, 다시 열 때는 새 폴더에서 열어 주세요.', '미리보기가 오래돼서 다시 확인했어요.', '취소', 'btn btn-sm btn-primary" type="button">정리하기'.replace('" type="button"', '')]) {
+      assert.ok(preview.includes(text) || text.startsWith('btn'), `preview missing ${text}`);
+    }
+    assert.ok(/class="btn btn-sm btn-primary"[^>]*>정리하기/.test(preview), 'the commit button is the accent button');
+    assert.equal((preview.match(/class="tidy-lecture"/g) ?? []).length, 2, 'two lecture headings; the material sits directly under its week');
+    assert.ok(!preview.includes('<details open') && !preview.includes('>a/'), 'skips start collapsed and the list shows names, not paths');
+    assert.ok(show({ kind: 'empty' }).includes('정리할 파일이 없어요.'));
+    const movingView = show({ kind: 'moving', job: 'apply', done: 3, total: 10 }, { reconnecting: true });
+    for (const text of ['정리하는 중… 3/10', '지금 파일까지만 옮기고 멈춰요', '연결 확인 중…', '멈추기']) assert.ok(movingView.includes(text), `moving missing ${text}`);
+    assert.ok(!movingView.includes('aria-label="닫기"'), 'a running move cannot be closed');
+    assert.ok(show({ kind: 'moving', job: 'undo', done: 0, total: 0 }).includes('되돌리는 중…'));
+    const result = show({ kind: 'result', result: { run_id: 'r1', moved: 3, skipped: 1, skips: withSkip.skips, undo_available: true } });
+    for (const text of ['3개를 옮겼어요. 1개는 그대로 뒀어요.', '폴더 열기', '되돌리기', '닫기']) assert.ok(result.includes(text), `result missing ${text}`);
+    assert.ok(!show({ kind: 'result', result: { run_id: null, moved: 0, skipped: 2, skips: [], undo_available: false } }).includes('되돌리기'));
+    assert.ok(show({ kind: 'undone', result: { run_id: 'r1', restored: 3, skipped: 1, skips: [{ path: 'a/x.mp4', reason: 'source_changed' }] } }).includes('정리한 뒤에 파일이 바뀌어서 그대로 뒀어요'));
+    assert.ok(show({ kind: 'error', message: '다운로드가 끝난 뒤에 정리할 수 있어요.' }).includes('role="alert"'));
+
+    const render = (element) => renderToStaticMarkup(element);
+    const notice = tidy.legacyNoticeState(12, false, false, false);
+    assert.ok(render(React.createElement(LegacyNotice, { notice, onTidy: noop, onLater: noop })).includes(TIDY_COPY.notice(12)));
+    const blockedNotice = render(React.createElement(LegacyNotice, { notice: tidy.legacyNoticeState(12, false, false, true), onTidy: noop, onLater: noop }));
+    assert.ok(/<button[^>]*disabled=""[^>]*title="다운로드가 끝나면 정리할 수 있어요"[^>]*>정리하기/.test(blockedNotice) || /<button[^>]*title="다운로드가 끝나면 정리할 수 있어요"[^>]*disabled=""[^>]*>정리하기/.test(blockedNotice), 'blocked: disabled with the busy title');
+    const entries = (runs, undoRun, blocked) => render(React.createElement(TidyEntries, { tidy: { runs, undoRun }, blocked, onTidy: noop, onUndoTidy: noop }));
+    const undoable = { run_id: 'r1', at: null, moved: 1, undo_available: true };
+    assert.ok(entries({ state: 'ready', list: [undoable] }, undoable, false).includes('폴더 정리…') && entries({ state: 'ready', list: [undoable] }, undoable, false).includes('마지막 정리 되돌리기'));
+    assert.ok(!entries({ state: 'ready', list: [] }, null, false).includes('마지막 정리 되돌리기'), 'no undo entry without an undo-able run');
+    assert.equal(entries({ state: 'unsupported', list: [] }, null, false), '', 'no entries on a backend without the tidy-up');
+    const blockedEntries = entries({ state: 'ready', list: [undoable] }, undoable, true);
+    assert.equal((blockedEntries.match(/disabled=""/g) ?? []).length, 2);
+    assert.equal((blockedEntries.match(/title="다운로드가 끝나면 정리할 수 있어요"/g) ?? []).length, 2);
+
+    // Requests of the contract; Canvas downloads pass the page's week; undo names its folder.
+    const api = await server.ssrLoadModule('/src/lib/api.ts');
+    const sent = [];
+    globalThis.fetch = async (url, init = {}) => { sent.push([init.method ?? 'GET', String(url), init.body ? JSON.parse(init.body) : undefined]); return { ok: true, status: 200, json: async () => ({}) }; };
+    await api.downloadCanvasFile(7, 'f1', '선형대수', '/dl', 'skip', { module_name: '5주차', week_position: 5 });
+    await api.downloadCanvasFile(7, 'f1', '선형대수', '/dl');
+    await api.startTidyPlanJob('/dl');
+    await api.startTidyApplyJob('p1');
+    await api.startTidyUndoJob('r1', '/dl');
+    await api.cancelTidyJob('apply', 'j1');
+    await api.fetchTidyRuns('/dl');
+    assert.equal(sent[0][2].module_name, '5주차');
+    assert.equal(sent[0][2].week_position, 5);
+    assert.ok(!('module_name' in sent[1][2]) && !('week_position' in sent[1][2]), 'without a week the optional fields are left out');
+    assert.deepEqual(sent.slice(2), [
+      ['POST', '/api/library/tidy/plan/jobs', { output_dir: '/dl' }],
+      ['POST', '/api/library/tidy/apply/jobs', { plan_id: 'p1' }],
+      ['POST', '/api/library/tidy/undo/jobs', { run_id: 'r1', output_dir: '/dl' }],
+      ['POST', '/api/library/tidy/apply/jobs/j1/cancel', undefined],
+      ['GET', '/api/library/tidy/runs?output_dir=%2Fdl', undefined],
+    ]);
+  } finally {
+    globalThis.fetch = realFetch;
+    await server.close();
+  }
+
+  // The hook, with a small React stand-in (state, refs, effects with dependencies; no rendering) and a scripted backend.
+  const fakeReact = `
+    let slots; let index; let effects;
+    export const __begin = () => { slots = []; index = 0; effects = []; };
+    export const __effects = () => { const run = effects; effects = []; run.forEach((effect) => effect()); };
+    export const __rerender = () => { index = 0; effects = []; };
+    export const __unmount = () => slots.forEach((entry) => entry && entry.cleanup && entry.cleanup());
+    const slot = (init) => { const i = index++; if (!(i in slots)) slots[i] = init(); return i; };
+    export const useRef = (value) => slots[slot(() => ({ current: value }))];
+    export const useState = (init) => {
+      const i = slot(() => (typeof init === 'function' ? init() : init));
+      return [slots[i], (value) => { slots[i] = typeof value === 'function' ? value(slots[i]) : value; }];
+    };
+    export const useCallback = (callback, deps) => {
+      const entry = slots[slot(() => ({ deps: undefined, callback: null }))];
+      if (!entry.callback || !deps || !deps.every((dep, k) => Object.is(dep, entry.deps[k]))) { entry.callback = callback; entry.deps = deps; }
+      return entry.callback;
+    };
+    export const useEffect = (effect, deps) => {
+      const entry = slots[slot(() => ({ deps: undefined, ran: false, cleanup: null }))];
+      if (entry.ran && deps && deps.every((dep, k) => Object.is(dep, entry.deps[k]))) return;
+      effects.push(() => { if (entry.cleanup) entry.cleanup(); entry.cleanup = effect() || null; entry.deps = deps; entry.ran = true; });
+    };
+  `;
+  const hookServer = await createServer({
+    root: process.cwd(),
+    server: { middlewareMode: true, hmr: false, watch: null },
+    appType: 'custom',
+    logLevel: 'error',
+    optimizeDeps: { noDiscovery: true },
+    ssr: { noExternal: ['react'] },
+    plugins: [{ name: 'fake-react', enforce: 'pre', resolveId: (id) => (id === 'react' ? '\0fake-react' : null), load: (id) => (id === '\0fake-react' ? fakeReact : null) }],
+  });
+  const realTimeout = globalThis.setTimeout;
+  try {
+    const fake = await hookServer.ssrLoadModule('\0fake-react');
+    const { useLibraryTidy } = await hookServer.ssrLoadModule('/src/hooks/useLibraryTidy.ts');
+    const { legacyNoticeState } = await hookServer.ssrLoadModule('/src/lib/tidy.ts');
+    const flush = async () => { for (let i = 0; i < 60; i += 1) await Promise.resolve(); };
+    const pollTicks = [];
+    globalThis.setTimeout = (callback, ms, ...rest) => (ms === 1500 ? pollTicks.push(callback) : realTimeout(callback, ms, ...rest));
+    const json = (status, body) => ({ ok: status < 400, status, json: async () => body });
+    const applyResult = { run_id: 'r1', moved: 4, skipped: 0, skips: [], undo_available: true };
+
+    // routes: 'METHOD /path' -> function(body) returning a response (or a promise of one); calls are recorded.
+    const scenario = async (routes, run) => {
+      const calls = [];
+      let changed = 0;
+      let nothing = 0;
+      globalThis.fetch = async (url, init = {}) => {
+        const key = `${init.method ?? 'GET'} ${String(url).split('?')[0]}`;
+        calls.push([key, init.body ? JSON.parse(init.body) : undefined]);
+        const handler = routes[key];
+        if (!handler) return json(200, { runs: [] });
+        return handler(init.body ? JSON.parse(init.body) : undefined, String(url));
+      };
+      fake.__begin();
+      pollTicks.length = 0;
+      const workspace = readFileSync('src/App.tsx', 'utf8');
+      const noticeContext = vm.createContext({ dir: '/dl', nothingToTidy: null, latest: { current: { course: null } } });
+      noticeContext.setNothingToTidy = (value) => { noticeContext.nothingToTidy = value; };
+      const noticeCallbacks = vm.runInContext(`({
+        ${workspace.match(/onNothingToTidy: \(\) => [^\n]+/)[0]}
+        ${workspace.match(/onChanged: \(\) => \{[\s\S]*?\n    \},/)[0]}
+      })`, noticeContext);
+      const ctx = { calls, flush, get notice() { return legacyNoticeState(12, false, noticeContext.nothingToTidy === noticeContext.dir, false); }, get changed() { return changed; }, get nothing() { return nothing; } };
+      const read = (outputDir = '/dl') => { noticeContext.dir = outputDir; fake.__rerender(); const value = useLibraryTidy({ outputDir, onChanged: () => { changed += 1; noticeCallbacks.onChanged(); }, onNothingToTidy: () => { nothing += 1; noticeCallbacks.onNothingToTidy(); }, onAuthError: noop }); fake.__effects(); return value; };
+      ctx.read = read;
+      ctx.tick = async () => { pollTicks.shift()(); await flush(); return read(); };
+      ctx.count = (key) => calls.filter(([entry]) => entry === key).length;
+      await run(ctx, read());
+      fake.__unmount();
+    };
+    const planDone = () => json(200, job('succeeded', { result: plan(moves) }));
+    const running = (id, done, total) => json(200, job('running', { job_id: id, progress: [{ stage: 'tidy_moving', done, total }] }));
+
+    // An expired preview is checked again by itself, with the plain note; nothing moved, so nothing reloads.
+    await scenario({ 'POST /api/library/tidy/plan/jobs': planDone, 'POST /api/library/tidy/apply/jobs': () => json(409, { ok: false, error_code: 'tidy_plan_expired' }) }, async (c, hook) => {
+      hook.open();
+      await flush();
+      hook = c.read();
+      assert.equal(hook.phase.kind, 'preview');
+      hook.apply();
+      await flush();
+      hook = c.read();
+      assert.equal(c.count('POST /api/library/tidy/plan/jobs'), 2);
+      assert.equal(hook.phase.kind, 'preview', 'the expired preview was replaced by a fresh one');
+      assert.equal(hook.note, '미리보기가 오래돼서 다시 확인했어요.');
+      assert.equal(c.changed, 0);
+    });
+
+    // A preview with nothing to move tells the app (the notice goes away).
+    await scenario({ 'POST /api/library/tidy/plan/jobs': () => json(200, job('succeeded', { result: plan([]) })) }, async (c, hook) => {
+      hook.open();
+      await flush();
+      assert.equal(c.read().phase.kind, 'empty');
+      assert.equal(c.nothing, 1);
+      assert.equal(c.notice, null);
+      c.read('/other');
+      assert.deepEqual(c.notice, { count: 12, blocked: false }, 'another folder is not suppressed');
+    });
+
+    // Stop during a move: the job reports what it moved.
+    await scenario({
+      'POST /api/library/tidy/plan/jobs': planDone,
+      'POST /api/library/tidy/apply/jobs': () => running('j-apply', 2, 4),
+      'POST /api/library/tidy/apply/jobs/j-apply/cancel': () => json(200, job('cancelled', { job_id: 'j-apply', result: { ...applyResult, moved: 2 } })),
+    }, async (c, hook) => {
+      hook.open();
+      await flush();
+      hook = c.read();
+      hook.apply();
+      await flush();
+      hook = c.read();
+      assert.deepEqual([hook.phase.kind, hook.phase.done, hook.phase.total, hook.moving], ['moving', 2, 4, true]);
+      await hook.stop();
+      hook = c.read();
+      assert.equal(c.count('POST /api/library/tidy/apply/jobs/j-apply/cancel'), 1);
+      assert.deepEqual([hook.phase.kind, hook.phase.result.moved, hook.moving], ['result', 2, false]);
+      assert.equal(c.changed, 1);
+    });
+
+    // 멈추기 pressed before the backend named the job is sent as soon as it did.
+    let release;
+    const gate = new Promise((resolve) => { release = resolve; });
+    await scenario({
+      'POST /api/library/tidy/plan/jobs': planDone,
+      'POST /api/library/tidy/apply/jobs': async () => { await gate; return running('j-apply', 0, 4); },
+      'POST /api/library/tidy/apply/jobs/j-apply/cancel': () => json(200, job('cancelled', { job_id: 'j-apply', result: { ...applyResult, moved: 0, run_id: null, undo_available: false } })),
+    }, async (c, hook) => {
+      hook.open();
+      await flush();
+      hook = c.read();
+      hook.apply();
+      hook = c.read();
+      assert.deepEqual([hook.phase.kind, hook.phase.total], ['moving', 4], 'the known total shows before the first event');
+      await hook.stop();
+      assert.equal(c.count('POST /api/library/tidy/apply/jobs/j-apply/cancel'), 0, 'nothing to cancel yet');
+      release();
+      await flush();
+      hook = c.read();
+      assert.equal(c.count('POST /api/library/tidy/apply/jobs/j-apply/cancel'), 1, 'the queued stop was sent');
+      assert.equal(hook.phase.kind, 'result');
+    });
+
+    // A failed poll during a move keeps the move on screen; the next good poll finishes it.
+    let polls = 0;
+    await scenario({
+      'POST /api/library/tidy/plan/jobs': planDone,
+      'POST /api/library/tidy/apply/jobs': () => running('j-apply', 1, 4),
+      'GET /api/library/tidy/apply/jobs/j-apply': () => {
+        polls += 1;
+        if (polls === 1) throw new TypeError('Failed to fetch');
+        return json(200, job('succeeded', { job_id: 'j-apply', result: applyResult }));
+      },
+    }, async (c, hook) => {
+      hook.open();
+      await flush();
+      hook = c.read();
+      hook.apply();
+      await flush();
+      hook = c.read();
+      hook = await c.tick();
+      assert.deepEqual([hook.phase.kind, hook.moving, hook.reconnecting], ['moving', true, true], 'a poll error does not abandon the move');
+      hook = await c.tick();
+      assert.deepEqual([hook.phase.kind, hook.reconnecting], ['result', false]);
+      assert.equal(c.changed, 1);
+    });
+
+    // A lost job (not a hiccup) does end the move view, with plain copy.
+    await scenario({
+      'POST /api/library/tidy/plan/jobs': planDone,
+      'POST /api/library/tidy/apply/jobs': () => running('j-apply', 1, 4),
+      'GET /api/library/tidy/apply/jobs/j-apply': () => json(404, { ok: false, error_code: 'tidy_job_not_found' }),
+    }, async (c, hook) => {
+      hook.open();
+      await flush();
+      hook = c.read();
+      hook.apply();
+      await flush();
+      hook = c.read();
+      hook = await c.tick();
+      assert.deepEqual([hook.phase.kind, hook.moving], ['error', false]);
+      assert.equal(c.changed, 1, 'a lost move refreshes saved files');
+      assert.equal(c.count('GET /api/library/tidy/runs'), 2, 'a lost move refreshes the run list');
+    });
+
+    // Closing during the check cancels the preview job, even when the close came before the backend named it.
+    let releasePlan;
+    const planGate = new Promise((resolve) => { releasePlan = resolve; });
+    await scenario({
+      'POST /api/library/tidy/plan/jobs': async () => { await planGate; return json(200, job('running', { job_id: 'j-plan' })); },
+      'POST /api/library/tidy/plan/jobs/j-plan/cancel': () => json(200, job('cancelled', { job_id: 'j-plan' })),
+    }, async (c, hook) => {
+      hook.open();
+      hook = c.read();
+      assert.equal(hook.phase.kind, 'checking');
+      hook.close();
+      releasePlan();
+      await flush();
+      hook = c.read();
+      assert.equal(hook.phase, null, 'a late answer does not reopen the dialog');
+      assert.equal(c.count('POST /api/library/tidy/plan/jobs/j-plan/cancel'), 1);
+    });
+
+    // Undo (named folder), then the course reloads; a start that fails reloads the run list.
+    const undoable = { run_id: 'run-1', at: null, moved: 4, undo_available: true };
+    await scenario({
+      'GET /api/library/tidy/runs': () => json(200, { runs: [undoable] }),
+      'POST /api/library/tidy/plan/jobs': () => json(200, job('succeeded', { result: plan([]) })),
+      'POST /api/library/tidy/undo/jobs': () => json(200, job('succeeded', { job_id: 'j-undo', result: { run_id: 'run-1', restored: 4, skipped: 0, skips: [] } })),
+    }, async (c, hook) => {
+      await flush();
+      hook = c.read();
+      assert.equal(hook.undoRun.run_id, 'run-1');
+      hook.open();
+      await flush();
+      hook = c.read();
+      assert.equal(c.notice, null, 'an empty preview hides the notice');
+      hook.undo();
+      await flush();
+      hook = c.read();
+      assert.deepEqual(c.calls.find(([key]) => key === 'POST /api/library/tidy/undo/jobs')[1], { run_id: 'run-1', output_dir: '/dl' });
+      assert.equal(hook.phase.kind, 'undone');
+      assert.equal(c.changed, 1);
+      assert.deepEqual(c.notice, { count: 12, blocked: false }, 'undo after an empty preview brings the notice back');
+    });
+    await scenario({
+      'GET /api/library/tidy/runs': () => json(200, { runs: [undoable] }),
+      'POST /api/library/tidy/undo/jobs': () => json(409, { ok: false, error_code: 'tidy_run_not_found' }),
+    }, async (c, hook) => {
+      await flush();
+      hook = c.read();
+      const before = c.count('GET /api/library/tidy/runs');
+      hook.undo();
+      await flush();
+      hook = c.read();
+      assert.equal(hook.phase.message, '되돌릴 정리 기록을 찾지 못했어요.');
+      assert.equal(c.count('GET /api/library/tidy/runs'), before + 1, 'the run list is read again');
+    });
+
+    // A late response for the previous folder cannot replace the current folder's runs.
+    for (const staleFails of [false, true]) {
+      let releaseOld;
+      const oldResponse = new Promise((resolve) => { releaseOld = resolve; });
+      const currentRun = { ...undoable, run_id: 'new-folder-run' };
+      await scenario({
+        'GET /api/library/tidy/runs': async (_body, url) => {
+          if (new URL(url, 'http://localhost').searchParams.get('output_dir') === '/dl') {
+            await oldResponse;
+            return staleFails ? json(404, { ok: false, error_code: 'not_found' }) : json(200, { runs: [undoable] });
+          }
+          return json(200, { runs: [currentRun] });
+        },
+      }, async (c) => {
+        c.read('/other');
+        await flush();
+        assert.equal(c.read('/other').undoRun.run_id, currentRun.run_id);
+        releaseOld();
+        await flush();
+        const hook = c.read('/other');
+        assert.equal(hook.runs.state, 'ready');
+        assert.equal(hook.undoRun.run_id, currentRun.run_id, 'stale success and failure both leave the current list intact');
+      });
+    }
+
+    // A backend that answers its unknown routes with `not_found` has no tidy-up: the entries stay hidden.
+    await scenario({ 'GET /api/library/tidy/runs': () => json(404, { ok: false, error_code: 'not_found' }) }, async (c, hook) => {
+      await flush();
+      assert.equal(c.read().runs.state, 'unsupported');
+    });
+  } finally {
+    globalThis.setTimeout = realTimeout;
+    globalThis.fetch = realFetch;
+    await hookServer.close();
   }
 }
