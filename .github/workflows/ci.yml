@@ -15,22 +15,33 @@ concurrency:
 permissions:
   contents: read
 
+# Independent work runs in parallel; only the app bundle needs the (scarce) Intel Mac runner.
+#
+#   python    (ubuntu)         full pytest + lint-imports
+#   frontend  (ubuntu)         typecheck + contract tests
+#   rust      (macos-15 arm)   cargo test
+#   bundle    (macos-15-intel) macOS-only pytest -> sidecar -> smoke test -> app bundle -> bundle check
+#   windows   (windows)        cargo check --lib
+#
+# Every Python process that serves HTTP skips a slow reverse DNS lookup: Python's
+# HTTPServer.server_bind() calls socket.getfqdn(), which takes ~35 s on the hosted macOS runners.
+# pytest (tests/test_http_client.py) and the Rust tests (fake backend served by
+# `python3 http.server`) both hit it, so the jobs that run them put a sitecustomize shim on
+# PYTHONPATH. The PyInstaller build and the app bundle clear PYTHONPATH so the shim cannot end up
+# in the bundled sidecar.
 jobs:
-  macos:
-    # Intel runner: matches the installed app (x86_64). macos-13 is retired.
-    runs-on: macos-15-intel
-    timeout-minutes: 45
+  python:
+    # The suite is platform-neutral except tests/test_macos_invariants.py, which is gated with
+    # `skipif(sys.platform != "darwin")` (24 tests). Those run in the `bundle` job on the Intel Mac,
+    # so the combined coverage equals the old single-job run (780 tests).
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
     env:
-      # Fail instead of silently re-resolving when uv.lock is stale (covers uv sync, uv run and
-      # the `uv run` inside the sidecar build).
+      # Fail instead of silently re-resolving when uv.lock is stale (covers uv sync and uv run).
       UV_LOCKED: "1"
     steps:
       - uses: actions/checkout@v7
 
-      # Python's HTTPServer.server_bind() calls socket.getfqdn(), a reverse DNS lookup that takes
-      # ~35 s on the hosted runners. pytest (tests/test_http_client.py) and the Rust tests (fake
-      # backend served by `python3 http.server`) both hit it, so every Python process of the job
-      # skips the lookup through a sitecustomize shim. The PyInstaller build is excluded below.
       - name: Skip slow reverse DNS lookup in Python
         run: |
           mkdir -p "$RUNNER_TEMP/pyfix"
@@ -49,6 +60,12 @@ jobs:
           uv run pytest --durations=15
           uv run lint-imports
 
+  frontend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
       - uses: actions/setup-node@v7
         with:
           node-version: 22
@@ -61,6 +78,77 @@ jobs:
           npm ci
           npm run typecheck
           npm run test:contract
+
+  rust:
+    # Apple Silicon runner: the tests need neither the Intel architecture nor the real sidecar
+    # (they write their own stub executables), so they do not wait for macos-15-intel.
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Skip slow reverse DNS lookup in Python
+        run: |
+          mkdir -p "$RUNNER_TEMP/pyfix"
+          printf 'import socket\nsocket.getfqdn = lambda name="": name or "localhost"\n' > "$RUNNER_TEMP/pyfix/sitecustomize.py"
+          echo "PYTHONPATH=$RUNNER_TEMP/pyfix" >> "$GITHUB_ENV"
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: frontend/src-tauri
+
+      # tauri-build requires resources/backend-sidecar to exist; the real sidecar is not built
+      # here, an empty directory is enough to compile and run the tests.
+      - name: Create empty sidecar placeholder
+        run: mkdir -p frontend/src-tauri/resources/backend-sidecar
+
+      - name: Rust tests
+        working-directory: frontend/src-tauri
+        run: cargo test
+
+  bundle:
+    # Intel runner: matches the installed app (x86_64). macos-13 is retired. The sidecar, its smoke
+    # test and the app bundle stay sequential: the bundle embeds the sidecar.
+    runs-on: macos-15-intel
+    timeout-minutes: 45
+    env:
+      # Fail instead of silently re-resolving when uv.lock is stale (covers uv sync, uv run and
+      # the `uv run` inside the sidecar build).
+      UV_LOCKED: "1"
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Skip slow reverse DNS lookup in Python
+        run: |
+          mkdir -p "$RUNNER_TEMP/pyfix"
+          printf 'import socket\nsocket.getfqdn = lambda name="": name or "localhost"\n' > "$RUNNER_TEMP/pyfix/sitecustomize.py"
+          echo "PYTHONPATH=$RUNNER_TEMP/pyfix" >> "$GITHUB_ENV"
+
+      - uses: astral-sh/setup-uv@v7
+        with:
+          # Same interpreter family as the local sidecar build (3.12.11), not the runner default.
+          python-version: "3.12"
+          enable-cache: true
+
+      # The only tests that need macOS (skipped everywhere else); the rest run in the `python` job.
+      # Running them here, on the Intel dependency set the app ships with, keeps them on the
+      # platform they pin at the cost of a few seconds.
+      - name: macOS-only Python tests
+        run: |
+          uv sync
+          uv run pytest tests/test_macos_invariants.py
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -84,10 +172,6 @@ jobs:
           find frontend/src-tauri/resources/backend-sidecar/ssu-api/_internal/rusaint -type f -exec ls -l {} \;
           du -sk frontend/src-tauri/resources/backend-sidecar/ssu-api
           python3 scripts/smoke_backend_sidecar.py
-
-      - name: Rust tests
-        working-directory: frontend/src-tauri
-        run: cargo test
 
       # tauri.conf.json sets bundle.createUpdaterArtifacts: true, and `tauri build` then fails
       # ("A public key has been found, but no private key") unless TAURI_SIGNING_PRIVATE_KEY is
