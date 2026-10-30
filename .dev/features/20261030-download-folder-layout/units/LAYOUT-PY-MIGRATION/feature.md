@@ -106,3 +106,9 @@ New tests: 16 functions, 21 cases (`tests/test_library_migration.py` 12 function
 ## Touched paths
 
 Owned (sprint-1.md): `src/ssu_lecture_downloader/core/library_migration.py` (new), `service/routers/library.py` (new), `service/api.py`, `service/app_context.py`, `service/routers/download.py`, `service/routers/lms_pages.py`, `service/routers/credentials.py`, `service/api_errors.py`, `tests/test_library_migration.py` (new), `tests/test_api_library.py` (new). `service/routers/__init__.py` needed no edit. Outside the sprint-owned list, by coordinator decision at review cycle 1: `src/ssu_lecture_downloader/core/errors.py` (`TidyRunNotFound`). Plus this record.
+
+## CI follow-up (c4)
+
+- NFD course folders are offered only when the layout course path identifies the same directory; otherwise every listed item is skipped as `course_not_matched`, and disk-only legacy counts exclude the folder. APFS behavior is preserved.
+- The NFD regression test now branches on volume capability instead of skipping; the macOS bundle job also runs it, while Ubuntu covers normalization-sensitive volumes.
+- Verification: `UV_LOCKED=1 uv run pytest -q`: 879 passed, 2 deprecation warnings (44.40 s); fake HTTP server emitted a BrokenPipeError during teardown, exit 0. `UV_LOCKED=1 uv run lint-imports`: 4 kept, 0 broken. Both used `UV_CACHE_DIR=/private/tmp/layout-py-migration-uv-cache`.

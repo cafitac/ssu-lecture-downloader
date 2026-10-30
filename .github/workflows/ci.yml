@@ -32,9 +32,9 @@ permissions:
 # in the bundled sidecar.
 jobs:
   python:
-    # The suite is platform-neutral except tests/test_macos_invariants.py, which is gated with
-    # `skipif(sys.platform != "darwin")` (24 tests). Those run in the `bundle` job on the Intel Mac,
-    # so the combined coverage equals the old single-job run (780 tests).
+    # tests/test_macos_invariants.py is gated to macOS and runs in the Intel Mac `bundle` job.
+    # The NFD course migration test branches on volume normalization: Ubuntu covers distinct
+    # NFC/NFD directories; `bundle` also runs it to cover APFS normalization equivalence.
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
@@ -133,13 +133,12 @@ jobs:
           python-version: "3.12"
           enable-cache: true
 
-      # The only tests that need macOS (skipped everywhere else); the rest run in the `python` job.
-      # Running them here, on the Intel dependency set the app ships with, keeps them on the
-      # platform they pin at the cost of a few seconds.
-      - name: macOS-only Python tests
+      # Run macOS invariants and the normalization-equivalent branch of NFD course migration
+      # on the Intel dependency set the app ships with.
+      - name: macOS Python tests
         run: |
           uv sync
-          uv run pytest tests/test_macos_invariants.py
+          uv run pytest tests/test_macos_invariants.py tests/test_library_migration.py::test_nfd_course_migration_respects_volume_normalization
 
       - uses: actions/setup-node@v7
         with:

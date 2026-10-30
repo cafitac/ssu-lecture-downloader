@@ -316,7 +316,7 @@ def _disk_only_leftovers(found: list[_Found], index: LibraryIndex) -> set[Path]:
 def count_legacy_files(course_dir: Path) -> int:
     """How many files directly inside `course_dir` a tidy-up could still move: old `[content id]` names, without the
     leftovers that need no LMS to know they stay (`.part` files, unknown names and duplicate transcripts)."""
-    if course_dir.is_symlink():
+    if course_dir.is_symlink() or not _same_inode(course_dir, course_dir.with_name(_nfc(course_dir.name))):
         return 0
     found, _ = _list_course_folder(course_dir)
     if not found:
@@ -685,6 +685,10 @@ class MigrationRunner:
             if courses is None:
                 if found:  # a folder of another term or of the user: left alone, one line for the whole folder
                     skips.append(PlannedSkip(entry.name, COURSE_NOT_MATCHED))
+                continue
+            if not _same_inode(listed, _CoursePlan(courses, [], root).folder):
+                skips.extend(PlannedSkip(_relative(root, f.path), COURSE_NOT_MATCHED) for f in found)
+                skips.extend(PlannedSkip(_relative(root, path), COURSE_NOT_MATCHED) for path, _ in others)
                 continue
             index = LibraryIndex.scan(listed)
             known = {_nfc(str(lecture.lecture_dir.parent)) for lecture in index.lectures.values()}

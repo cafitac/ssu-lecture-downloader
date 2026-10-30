@@ -243,16 +243,32 @@ def test_apply_moves_exactly_the_preview_journals_first_and_a_second_preview_has
     assert runner.apply(planned(runner, tree)).moved == 1
 
 
-def test_nfd_course_apply_recovery_and_undo(tmp_path):
+def test_nfd_course_migration_respects_volume_normalization(tmp_path):
     course = unicodedata.normalize('NFD', '선형대수')
     (tmp_path / course).mkdir()
-    if not (tmp_path / unicodedata.normalize('NFC', course)).exists():
-        pytest.skip('this volume keeps NFD and NFC names apart (e.g. Linux); the NFD folder case is a macOS one')
     names = [f'{course}/강의 [cid-a].mp4', f'{course}/강의 [cid-a].transcript.md']
     write_files(tmp_path, names)
     before = {name: (tmp_path / name).read_bytes() for name in names}
     runner = MigrationRunner()
-    result = runner.apply(runner.plan(tmp_path, FakeCatalog({LA: [video(1, '강의', 'cid-a')]})))
+    plan = runner.plan(tmp_path, FakeCatalog({LA: [video(1, '강의', 'cid-a')]}))
+    normalized = tmp_path / unicodedata.normalize('NFC', course)
+    if not normalized.exists() or not os.path.samestat(normalized.stat(), (tmp_path / course).stat()):
+        assert plan.moves == []
+        assert {skip.path: skip.reason for skip in plan.skips} == {name: 'course_not_matched' for name in names}
+        assert count_legacy_files(tmp_path / course) == 0
+        assert legacy_summary(tmp_path) == {
+            'ok': True, 'root': str(tmp_path), 'legacy_file_count': 0, 'course_count': 0, 'courses': [],
+        }
+        result = runner.apply(plan)
+        assert result.moved == 0
+        undone = runner.undo(tmp_path, result.run_id)
+        assert undone.restored == 0 and undone.skips == []
+        assert {name: (tmp_path / name).read_bytes() for name in names} == before
+        assert sorted(path.name for path in (tmp_path / course).iterdir()) == sorted(Path(name).name for name in names)
+        return
+    assert count_legacy_files(tmp_path / course) == 2
+    assert legacy_summary(tmp_path)['legacy_file_count'] == 2
+    result = runner.apply(plan)
     assert result.moved == 2
     path = migrations_dir(tmp_path) / f'{result.run_id}.jsonl'
     lines = read_journal(path)
