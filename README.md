@@ -26,7 +26,7 @@ GitHub Releases에는 아직 올라온 파일이 없습니다. 지금은 만든 
 xattr -dr com.apple.quarantine "/Applications/SSU Lecture Downloader.app"
 ```
 
-자동 업데이트는 아직 없습니다. 새 버전도 앱을 전해 준 사람에게 받아서 바꿔 주세요. Releases가 열리면 거기서 받으면 됩니다.
+Releases에 올라온 설치 파일을 응용 프로그램(/Applications) 폴더에 넣어 한 번 설치하면, 그 뒤 새 버전은 앱 안의 업데이트 알림으로 받을 수 있어요. 지금은 아직 올라온 파일이 없어서, 그때까지는 앱을 전해 준 사람에게 새 버전을 받아 바꿔 주세요.
 
 배포된 앱은 Intel 빌드라서 Rosetta로 돌려도 자막 엔진을 쓸 수 없습니다. 설정의 "원격 자막 서버"를 지정해야 자막이 만들어집니다. 자세한 내용은 [docs/stt.md](docs/stt.md)에 있습니다.
 
