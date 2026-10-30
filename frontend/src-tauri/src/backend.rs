@@ -7,7 +7,7 @@
 //! the Python grandchildren) can be terminated together.
 
 use serde::Serialize;
-use std::fs::{self, File};
+use std::fs;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
@@ -15,6 +15,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use crate::log_rotation::{share, LogPump, RotatingLog, SharedLog, BACKEND_LOG_CAP};
 use crate::platform::{
     configure_sidecar_command, generate_api_token, reap_stale_backend, sidecar_executable_name,
     terminate_process_group,
@@ -33,6 +34,8 @@ pub(crate) const BACKEND_TOKEN_HEADER: &str = "X-SSU-Token";
 const BACKEND_STARTUP_TIMEOUT: Duration = Duration::from_secs(90);
 const BACKEND_POLL_INTERVAL: Duration = Duration::from_millis(300);
 const BACKEND_TERMINATE_GRACE: Duration = Duration::from_secs(3);
+/// How long to wait for the log writers to copy the last output of an exited child.
+const BACKEND_LOG_DRAIN: Duration = Duration::from_secs(2);
 const MAX_SPAWN_ATTEMPTS: u32 = 3;
 const BACKEND_LOG_FILE: &str = "backend.log";
 const BACKEND_PID_FILE: &str = "backend.pid";
@@ -338,8 +341,8 @@ impl BackendManager {
         };
         let launch = (self.launcher)(port);
         let log_path = self.log_dir.join(BACKEND_LOG_FILE);
-        let (stdout, stderr) = match open_backend_log(&log_path) {
-            Ok(pair) => pair,
+        let log = match open_backend_log(&log_path) {
+            Ok(log) => log,
             Err(error) => {
                 return AttemptOutcome::Failed(format!(
                     "백엔드 로그 파일을 열 수 없습니다 ({}): {error}",
@@ -354,13 +357,13 @@ impl BackendManager {
             .current_dir(&launch.cwd)
             .env(BACKEND_TOKEN_ENV, &token)
             .stdin(Stdio::null())
-            .stdout(stdout)
-            .stderr(stderr);
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
         if let Some(app_data_dir) = &self.state_dir {
             command.env(BACKEND_APP_DATA_DIR_ENV, app_data_dir);
         }
         configure_sidecar_command(&mut command);
-        let child = match command.spawn() {
+        let mut child = match command.spawn() {
             Ok(child) => child,
             Err(error) => {
                 let mut inner = self.lock();
@@ -372,6 +375,7 @@ impl BackendManager {
                 ));
             }
         };
+        let pump = start_log_pump(&log, &mut child);
         if let Some(state_dir) = &self.state_dir {
             write_pidfile(&state_dir.join(BACKEND_PID_FILE), child.id());
         }
@@ -414,6 +418,8 @@ impl BackendManager {
             }
             WaitOutcome::Exited(description) => {
                 self.terminate_child();
+                // The log is filled by the writers; let them copy the child's last words first.
+                pump.drain(BACKEND_LOG_DRAIN);
                 if log_indicates_port_in_use(&log_path) {
                     AttemptOutcome::PortConflict(format!(
                         "Python API 서버 포트 {port}를 사용할 수 없어 시작하지 못했습니다. ({description})"
@@ -569,17 +575,23 @@ fn choose_backend_port() -> std::io::Result<u16> {
         .and_then(|listener| listener.local_addr().map(|addr| addr.port()))
 }
 
-fn open_backend_log(path: &Path) -> std::io::Result<(Stdio, Stdio)> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
+/// A new `backend.log` for this launch. The previous run's log is kept as `backend.previous.log`,
+/// so a crash before a restart stays diagnosable; while it runs the log stays within its cap.
+fn open_backend_log(path: &Path) -> std::io::Result<SharedLog> {
+    RotatingLog::fresh(path, BACKEND_LOG_CAP).map(share)
+}
+
+/// Copies the child's stdout and stderr into the log on writer threads, so the log is capped
+/// (the child itself writes to pipes that are always drained).
+fn start_log_pump(log: &SharedLog, child: &mut Child) -> LogPump {
+    let mut streams: Vec<Box<dyn Read + Send>> = Vec::new();
+    if let Some(stdout) = child.stdout.take() {
+        streams.push(Box::new(stdout));
     }
-    // Keep the previous run's log so a crash before a restart stays diagnosable.
-    if path.exists() {
-        let _ = fs::rename(path, path.with_extension("previous.log"));
+    if let Some(stderr) = child.stderr.take() {
+        streams.push(Box::new(stderr));
     }
-    let file = File::create(path)?;
-    let stderr = file.try_clone()?;
-    Ok((Stdio::from(file), Stdio::from(stderr)))
+    LogPump::start(log, streams)
 }
 
 /// Whether the tail of the backend log shows an address-in-use bind failure.
@@ -1217,6 +1229,34 @@ mod tests {
         fs::write(&log, "ModuleNotFoundError: No module named 'x'\n").unwrap();
         assert!(!log_indicates_port_in_use(&log));
         assert!(!log_indicates_port_in_use(&root.join("missing.log")));
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn launch_keeps_the_previous_runs_log_and_pipes_child_output_into_the_new_one() {
+        let root = temp_root("pipe-log");
+        let log_path = root.join("backend.log");
+        fs::write(&log_path, "last run's crash\n").unwrap();
+        let log = open_backend_log(&log_path).unwrap();
+        assert_eq!(
+            fs::read_to_string(root.join("backend.previous.log")).unwrap(),
+            "last run's crash\n"
+        );
+        let mut child = Command::new("/bin/sh")
+            .args(["-c", "echo out-1; echo err-1 >&2; echo out-2"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let pump = start_log_pump(&log, &mut child);
+        child.wait().unwrap();
+        pump.drain(Duration::from_secs(5));
+        let text = fs::read_to_string(&log_path).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 3, "{text}");
+        let at = |line: &str| lines.iter().position(|entry| *entry == line).unwrap();
+        assert!(at("out-1") < at("out-2"), "stdout keeps its order");
+        assert!(lines.contains(&"err-1"));
         fs::remove_dir_all(root).ok();
     }
 

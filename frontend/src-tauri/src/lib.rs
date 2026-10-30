@@ -4,6 +4,7 @@ mod backend;
 mod diagnostics;
 #[cfg(all(test, target_os = "macos"))]
 mod invariant_tests;
+mod log_rotation;
 mod native_download;
 mod platform;
 mod reminders;
