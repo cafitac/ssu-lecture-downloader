@@ -108,8 +108,9 @@ cd frontend/src-tauri && cargo test
 
 ### CI
 
-GitHub Actions (`.github/workflows/ci.yml`) runs on every pull request to `develop` (not again after
-the merge). Five jobs run in parallel:
+GitHub Actions (`.github/workflows/ci.yml`) runs on every pull request to `develop` and every push
+to `develop`. The push run checks the squashed commit that releases are tagged from, and it is the
+only run that refreshes the caches pull requests start from. Five jobs run in parallel:
 
 - `python` (ubuntu-latest): `uv run pytest` and `uv run lint-imports`.
 - `frontend` (ubuntu-latest): `npm run typecheck` and `npm run test:contract`.
