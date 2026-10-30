@@ -1,6 +1,7 @@
 import type { ContentState } from '../hooks/useCourseContent';
 import type { PageAttachmentsController } from '../hooks/usePageAttachments';
 import { countVideos, splitCourseName } from '../lib/content';
+import { TIDY_COPY } from '../lib/tidy';
 import type { LectureTab, WeekGroup } from '../lib/content';
 import type { CourseContentItem, CourseSummary, WatchMode, WatchQueueState } from '../lib/types';
 import { LectureList } from './LectureList';
@@ -28,6 +29,8 @@ interface Props {
   /** True when the count is the checked videos rather than the automatic queue. */
   watchSelected: boolean;
   attachments: PageAttachmentsController;
+  /** Files of this course saved the old way, and the notice's two answers; `null` hides the notice. */
+  legacyNotice: { count: number; blocked: boolean; onTidy: () => void; onLater: () => void } | null;
   queue: WatchQueueState;
   watchMode: WatchMode;
   openingKey: string | null;
@@ -63,6 +66,15 @@ export function LecturePane(props: Props) {
       <header className="pane-head">
         <h1 className="pane-title" title={course.name}>{splitCourseName(course.name).title}</h1>
         {contentState === 'ready' && <p className="pane-sub">영상 {total} · 시청 {watched}{upcoming > 0 && <span className="pane-sub-upcoming"> · 예정 {upcoming}</span>}</p>}
+        {props.legacyNotice && contentState === 'ready' && (
+          <div className="legacy-notice" role="status">
+            <p>{TIDY_COPY.notice(props.legacyNotice.count)}</p>
+            <div className="legacy-notice-actions">
+              <button type="button" className="btn btn-sm" disabled={props.legacyNotice.blocked} title={props.legacyNotice.blocked ? TIDY_COPY.busyHint : undefined} onClick={props.legacyNotice.onTidy}>정리하기</button>
+              <button type="button" className="btn btn-sm btn-ghost" onClick={props.legacyNotice.onLater}>나중에</button>
+            </div>
+          </div>
+        )}
       </header>
       <LectureToolbar
         tab={tab}

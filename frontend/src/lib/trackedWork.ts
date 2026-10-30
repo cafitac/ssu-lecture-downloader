@@ -10,10 +10,12 @@ export interface TrackedWork {
   componentsInstalling: boolean;
   /** A page attachment is being saved. */
   attachmentSaving: boolean;
+  /** The folder tidy-up is moving files (or undoing a run). */
+  libraryTidying?: boolean;
 }
 
 export function isTrackedWorkBusy(work: TrackedWork): boolean {
-  return work.downloadActive || work.componentsInstalling || work.attachmentSaving;
+  return work.downloadActive || work.componentsInstalling || work.attachmentSaving || work.libraryTidying === true;
 }
 
 /**

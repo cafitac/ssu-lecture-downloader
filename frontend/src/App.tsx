@@ -7,6 +7,7 @@ import { GradesPane } from './components/GradesPane';
 import { LecturePane } from './components/LecturePane';
 import { BackendScreen, LoginScreen, SplashScreen } from './components/Screens';
 import { SettingsDialog } from './components/SettingsDialog';
+import { TidyDialog } from './components/TidyDialog';
 import { Toasts } from './components/Toasts';
 import { TopBar } from './components/TopBar';
 import { WatchAllDialog } from './components/WatchAllDialog';
@@ -21,6 +22,7 @@ import { useDeadlines } from './hooks/useDeadlines';
 import { useDownloadDir } from './hooks/useDownloadDir';
 import { useDownloads } from './hooks/useDownloads';
 import { useGrades } from './hooks/useGrades';
+import { useLibraryTidy } from './hooks/useLibraryTidy';
 import { useLmsPages } from './hooks/useLmsPages';
 import { useLmsSession } from './hooks/useLmsSession';
 import type { LmsSession } from './hooks/useLmsSession';
@@ -64,6 +66,8 @@ function Workspace({ session, update, onWorkBusyChange }: { session: LmsSession;
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [watchAllOpen, setWatchAllOpen] = useState(false);
+  // Courses whose "예전 방식 파일" notice was answered with 나중에; asked again after a restart.
+  const [tidyLater, setTidyLater] = useState<ReadonlySet<string>>(new Set());
   // How a started queue plays; unset until the user chooses (then Chrome when it is installed).
   const [watchModePreference, setWatchModePreference] = useState<WatchMode | null>(readWatchModePreference);
   // Lectures that played to their end in this session: not offered again before the LMS has counted them.
@@ -97,7 +101,17 @@ function Workspace({ session, update, onWorkBusyChange }: { session: LmsSession;
   const lmsPages = useLmsPages({ notify: push, onAuthError });
   const attachments = usePageAttachments(course, dir, { onAuthError, notify: push });
   // An app update waits for backend work the UI tracks; the controller lives in App, above this view.
-  const workBusy = isTrackedWorkBusy({ downloadActive: downloads.active, componentsInstalling: media.isInstalling, attachmentSaving: anyTransferBusy(attachments.pages) });
+  // The folder tidy-up and downloads exclude each other: neither starts while the other runs.
+  const tidy = useLibraryTidy({
+    outputDir: dir,
+    onAuthError,
+    onChanged: () => {
+      const current = latest.current;
+      if (current.course) void current.content.refreshQuietly(current.course);
+    },
+  });
+  const tidyBlocked = downloads.active || anyTransferBusy(attachments.pages);
+  const workBusy = isTrackedWorkBusy({ downloadActive: downloads.active, componentsInstalling: media.isInstalling, attachmentSaving: anyTransferBusy(attachments.pages), libraryTidying: tidy.moving });
   useEffect(() => {
     onWorkBusyChange(workBusy);
   }, [workBusy, onWorkBusyChange]);
@@ -295,13 +309,13 @@ function Workspace({ session, update, onWorkBusyChange }: { session: LmsSession;
 
   // Escape closes the progress drawer unless a dialog (which handles Escape itself) is open.
   useEffect(() => {
-    if (!drawerOpen || settingsOpen) return;
+    if (!drawerOpen || settingsOpen || tidy.phase !== null) return;
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') setDrawerOpen(false);
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [drawerOpen, settingsOpen]);
+  }, [drawerOpen, settingsOpen, tidy.phase]);
 
   // Watching works during a download; a material download still waits for the running job.
   const actionBlockedReason = downloads.active && tab !== 'video'
@@ -312,6 +326,9 @@ function Workspace({ session, update, onWorkBusyChange }: { session: LmsSession;
     setSelectedCourseId(String(next.id));
     setView('course');
   };
+  const legacyNotice = course !== null && content.legacyFileCount !== null && content.legacyFileCount > 0 && !tidyLater.has(String(course.id))
+    ? { count: content.legacyFileCount, blocked: tidyBlocked, onTidy: tidy.open, onLater: () => setTidyLater((current) => new Set(current).add(String(course.id))) }
+    : null;
   const showActionBar = (view === 'course' && tab !== 'task') || downloads.active || downloads.startError !== null;
 
   return (
@@ -381,6 +398,7 @@ function Workspace({ session, update, onWorkBusyChange }: { session: LmsSession;
               watchCount={watchCount}
               watchSelected={selectedVideos.length > 0}
               attachments={attachments}
+              legacyNotice={legacyNotice}
               queue={viewer.queue}
               watchMode={viewer.mode}
               openingKey={viewer.openingKey}
@@ -445,6 +463,7 @@ function Workspace({ session, update, onWorkBusyChange }: { session: LmsSession;
       {watchAllOpen && allQueue.length > 0 && !viewer.queue.active && (
         <WatchAllDialog items={allQueue} mode={viewer.mode} onStart={startWatchAll} onClose={() => setWatchAllOpen(false)} />
       )}
+      <TidyDialog tidy={tidy} canOpenFolder={isTauriRuntime()} onOpenFolder={() => void openFolder()} />
       {settingsOpen && (
         <SettingsDialog
           downloadDir={dir}
@@ -456,6 +475,10 @@ function Workspace({ session, update, onWorkBusyChange }: { session: LmsSession;
           watchMode={viewer.mode}
           chromeAvailable={viewer.chromeAvailable}
           queueActive={viewer.queue.active}
+          tidy={tidy}
+          tidyBlocked={tidyBlocked}
+          onTidy={() => { setSettingsOpen(false); tidy.open(); }}
+          onUndoTidy={() => { setSettingsOpen(false); tidy.undo(); }}
           onWatchModeChange={chooseWatchMode}
           onPickFolder={() => void chooseFolder()}
           onOpenFolder={() => void openFolder()}

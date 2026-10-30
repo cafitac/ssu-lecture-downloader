@@ -2792,3 +2792,175 @@ const assistSource = readFileSync('src-tauri/src/assets/watch_assist.js', 'utf8'
     }
   }
 }
+
+// ---------------------------------------------------------------------------
+// LAYOUT-UI-TIDY: the folder tidy-up (notice, Settings entries, TidyDialog) against the frozen internal API
+// (design/09). Copy is design/09 verbatim. Nothing here touches a real folder or backend.
+// ---------------------------------------------------------------------------
+{
+  const tidy = await import('../src/lib/tidy.ts');
+  const { knownErrorText } = await import('../src/lib/errors.ts');
+  const { isTrackedWorkBusy } = await import('../src/lib/trackedWork.ts');
+  const { TIDY_COPY } = tidy;
+  const noop = () => undefined;
+
+  // Copy (design/09 "화면과 문구").
+  assert.equal(TIDY_COPY.notice(3), '이 과목에 예전 방식으로 저장된 파일이 3개 있어요. 주차·강의별 폴더로 정리할 수 있어요.');
+  assert.equal(TIDY_COPY.busyHint, '다운로드가 끝나면 정리할 수 있어요');
+  assert.equal(TIDY_COPY.preview(2), '파일 2개를 주차·강의별 폴더로 옮겨요. 지우거나 덮어쓰는 파일은 없어요.');
+  assert.equal(TIDY_COPY.moving(3, 10), '정리하는 중… 3/10');
+  assert.equal(TIDY_COPY.result(3, 0), '3개를 옮겼어요.');
+  assert.equal(TIDY_COPY.result(3, 1), '3개를 옮겼어요. 1개는 그대로 뒀어요.');
+  assert.equal(TIDY_COPY.undone(2, 1), '2개를 원래 자리로 돌려놨어요. 1개는 그대로 뒀어요.');
+  const reasons = {
+    destination_exists: '같은 이름의 파일이 이미 있어요', unknown_file: '이 앱이 받은 파일인지 알 수 없어요', partial_download: '받다 만 파일이에요',
+    course_not_matched: '이번 학기 과목 목록에 없는 폴더예요', duplicate_transcript: '같은 강의의 자막 글이 이미 있어요 (예전 파일)',
+    source_changed: '미리보기 뒤에 파일이 바뀌었어요', source_missing: '미리보기 뒤에 파일이 없어졌어요', not_a_regular_file: '폴더나 바로가기는 옮기지 않아요',
+    in_use: '다른 앱이 쓰고 있어요 (Windows)', path_too_long: '경로가 너무 길어요 (Windows)',
+  };
+  for (const [code, text] of Object.entries(reasons)) assert.equal(tidy.skipReasonText(code), text);
+  assert.ok(tidy.skipReasonText('a_future_reason').length > 0 && !tidy.skipReasonText('a_future_reason').includes('a_future_reason'), 'an unknown reason code is never shown raw');
+  assert.equal(knownErrorText('library_busy'), '다운로드가 끝난 뒤에 정리할 수 있어요.');
+  assert.equal(knownErrorText('library_tidy_running'), '폴더를 정리하는 중이에요. 끝나면 받을 수 있어요.');
+  assert.equal(knownErrorText('tidy_plan_expired'), '미리보기가 오래돼서 다시 확인했어요.');
+  assert.ok(knownErrorText('library_conflict') && knownErrorText('path_too_long'), 'the two PY-PATHS codes have plain copy');
+
+  // The notice and the Settings entries (labels).
+  const tidySources = ['src/components/LecturePane.tsx', 'src/components/SettingsDialog.tsx', 'src/components/TidyDialog.tsx', 'src/lib/tidy.ts'].map((file) => readFileSync(file, 'utf8')).join('\n');
+  for (const label of ['정리하기', '나중에', '폴더 정리…', '마지막 정리 되돌리기', '멈추기']) assert.ok(tidySources.includes(label), `missing ${label}`);
+  assert.equal(isTrackedWorkBusy({ downloadActive: false, componentsInstalling: false, attachmentSaving: false, libraryTidying: true }), true, 'an app update waits for a running tidy-up');
+
+  // Job outcomes -> dialog states.
+  const plan = (moves) => ({ plan_id: 'p1', expires_at: 1, move_count: moves.length, skip_count: 0, moves, skips: [] });
+  const job = (status, extra = {}) => ({ job_id: 'j1', status, cancel_requested: false, progress: [], result: null, error_code: null, ...extra });
+  const move = (course, week, stem, from, to) => ({ course, week_folder: week, lecture_stem: stem, from, to, role: 'video' });
+  const moves = [
+    move('선형대수', '05주차', '선대_5_2', 'a/선대_5_2 [68e66b6c1b816].mp4', 'a/05주차/선대_5_2/선대_5_2.mp4'),
+    move('선형대수', '05주차', '선대_5_2', 'a/선대_5_2 [68e66b6c1b816].txt', 'a/05주차/선대_5_2/선대_5_2 자막.txt'),
+    move('선형대수', '06주차', '선대_6_1', 'a/선대_6_1 [68feeb3f3b6dd].mp4', 'a/06주차/선대_6_1/선대_6_1.mp4'),
+  ];
+  assert.equal(tidy.outcomeOf('plan', job('succeeded', { result: plan(moves) })).phase.kind, 'preview');
+  assert.equal(tidy.outcomeOf('plan', job('succeeded', { result: plan([]) })).phase.kind, 'empty');
+  assert.equal(tidy.outcomeOf('apply', job('succeeded', { result: { run_id: 'r1', moved: 3, skipped: 0, skips: [], undo_available: true } })).phase.kind, 'result');
+  assert.equal(tidy.outcomeOf('apply', job('cancelled', { result: { run_id: 'r1', moved: 1, skipped: 0, skips: [], undo_available: true } })).phase.kind, 'result', 'a stopped move reports what it moved');
+  assert.equal(tidy.outcomeOf('undo', job('succeeded', { result: { run_id: 'r1', restored: 3, skipped: 0, skips: [] } })).phase.kind, 'undone');
+  assert.deepEqual(tidy.outcomeOf('apply', job('failed', { error_code: 'tidy_plan_expired' })), { replan: true });
+  assert.equal(tidy.outcomeOf('plan', job('failed', { error_code: 'library_busy' })).phase.message, '다운로드가 끝난 뒤에 정리할 수 있어요.');
+  assert.deepEqual(tidy.outcomeOf('plan', job('cancelled')), { close: true });
+  assert.deepEqual(tidy.movingProgress(job('running', { progress: [{ stage: 'tidy_moving', done: 1, total: 9 }, { stage: 'other' }, { stage: 'tidy_moving', done: 4, total: 9 }] })), { done: 4, total: 9 });
+
+  // Grouping course > week > lecture, the "n개 더" cap, and which run Settings can undo.
+  const grouped = tidy.groupMoves(moves);
+  assert.deepEqual(grouped.map((course) => course.weeks.map((week) => [week.week, week.lectures.map((lecture) => [lecture.stem, lecture.moves.length])])), [[['05주차', [['선대_5_2', 2]]], ['06주차', [['선대_6_1', 1]]]]]);
+  assert.deepEqual(tidy.capRows([1, 2, 3], 2), { shown: [1, 2], hidden: 1 });
+  assert.equal(tidy.undoableRun([{ run_id: 'new', undo_available: false }, { run_id: 'old', undo_available: true }]), null, 'only the latest run can be undone');
+  assert.equal(tidy.undoableRun([{ run_id: 'new', undo_available: true }]).run_id, 'new');
+
+  const { createServer } = await import('vite');
+  const React = (await import('react')).default;
+  const { renderToStaticMarkup } = await import('react-dom/server');
+  const fakeReact = `
+    let slots; let index; let effects;
+    export const __begin = () => { slots = []; index = 0; effects = []; };
+    export const __effects = () => effects;
+    const slot = (init) => { const i = index++; if (!(i in slots)) slots[i] = init(); return i; };
+    export const __rerender = () => { index = 0; effects = []; };
+    export const useRef = (value) => slots[slot(() => ({ current: value }))];
+    export const useState = (init) => {
+      const i = slot(() => (typeof init === 'function' ? init() : init));
+      return [slots[i], (value) => { slots[i] = typeof value === 'function' ? value(slots[i]) : value; }];
+    };
+    export const useCallback = (callback) => callback;
+    export const useEffect = (effect) => { effects.push(effect); };
+  `;
+  const server = await createServer({ root: process.cwd(), server: { middlewareMode: true, hmr: false, watch: null }, appType: 'custom', logLevel: 'error', optimizeDeps: { noDiscovery: true } });
+  const realFetch = globalThis.fetch;
+  try {
+    // Every state of the dialog, rendered with real React.
+    const { TidyDialog } = await server.ssrLoadModule('/src/components/TidyDialog.tsx');
+    const show = (phase, extra = {}) => renderToStaticMarkup(React.createElement(TidyDialog, { tidy: { phase, note: null, stopping: false, close: noop, apply: noop, undo: noop, stop: noop, ...extra }, canOpenFolder: true, onOpenFolder: noop }));
+    const withSkip = { ...plan(moves), skip_count: 1, skips: [{ path: 'a/메모.docx', reason: 'unknown_file' }] };
+    assert.ok(show({ kind: 'checking' }).includes('옮길 파일을 확인하고 있어요…'));
+    const preview = show({ kind: 'preview', plan: withSkip }, { note: '미리보기가 오래돼서 다시 확인했어요.' });
+    for (const text of ['파일 3개를 주차·강의별 폴더로 옮겨요. 지우거나 덮어쓰는 파일은 없어요.', '선형대수', '05주차', '선대_5_2', '선대_5_2 [68e66b6c1b816].mp4', '선대_5_2 자막.txt', '<summary>그대로 두는 파일 1개</summary>', '이 앱이 받은 파일인지 알 수 없어요', '열려 있는 파일도 옮겨져요. 재생 중인 영상은 계속 재생되지만, 다시 열 때는 새 폴더에서 열어 주세요.', '미리보기가 오래돼서 다시 확인했어요.', '취소', '정리하기']) {
+      assert.ok(preview.includes(text), `preview missing ${text}`);
+    }
+    assert.ok(!preview.includes('<details open') && !preview.includes('>a/'), 'skips start collapsed and the list shows names, not paths');
+    assert.ok(show({ kind: 'empty' }).includes('정리할 파일이 없어요.'));
+    const movingView = show({ kind: 'moving', job: 'apply', done: 3, total: 10 });
+    assert.ok(movingView.includes('정리하는 중… 3/10') && movingView.includes('멈추기') && !movingView.includes('aria-label="닫기"'), 'a running move can be stopped but not closed');
+    const result = show({ kind: 'result', result: { run_id: 'r1', moved: 3, skipped: 1, skips: withSkip.skips, undo_available: true } });
+    for (const text of ['3개를 옮겼어요. 1개는 그대로 뒀어요.', '폴더 열기', '되돌리기', '닫기']) assert.ok(result.includes(text), `result missing ${text}`);
+    assert.ok(!show({ kind: 'result', result: { run_id: 'r1', moved: 3, skipped: 0, skips: [], undo_available: false } }).includes('되돌리기'));
+    assert.ok(show({ kind: 'undone', result: { run_id: 'r1', restored: 3, skipped: 0, skips: [] } }).includes('3개를 원래 자리로 돌려놨어요.'));
+    assert.ok(show({ kind: 'error', message: '다운로드가 끝난 뒤에 정리할 수 있어요.' }).includes('role="alert"'));
+
+    // Requests of the frozen contract; Canvas downloads pass the page's week.
+    const api = await server.ssrLoadModule('/src/lib/api.ts');
+    const sent = [];
+    globalThis.fetch = async (url, init = {}) => { sent.push([init.method ?? 'GET', String(url), init.body ? JSON.parse(init.body) : undefined]); return { ok: true, status: 200, json: async () => ({}) }; };
+    await api.downloadCanvasFile(7, 'f1', '선형대수', '/dl', 'skip', { module_name: '5주차', week_position: 5 });
+    await api.downloadCanvasFile(7, 'f1', '선형대수', '/dl');
+    await api.startTidyPlanJob('/dl');
+    await api.startTidyApplyJob('p1');
+    await api.startTidyUndoJob('r1');
+    await api.cancelTidyJob('apply', 'j1');
+    await api.fetchTidyRuns('/dl');
+    assert.equal(sent[0][2].module_name, '5주차');
+    assert.equal(sent[0][2].week_position, 5);
+    assert.ok(!('module_name' in sent[1][2]) && !('week_position' in sent[1][2]), 'without a week the optional fields are left out');
+    assert.deepEqual(sent.slice(2).map(([method, url, body]) => [method, url, body]), [
+      ['POST', '/api/library/tidy/plan/jobs', { output_dir: '/dl' }],
+      ['POST', '/api/library/tidy/apply/jobs', { plan_id: 'p1' }],
+      ['POST', '/api/library/tidy/undo/jobs', { run_id: 'r1' }],
+      ['POST', '/api/library/tidy/apply/jobs/j1/cancel', undefined],
+      ['GET', '/api/library/tidy/runs?output_dir=%2Fdl', undefined],
+    ]);
+
+  } finally {
+    globalThis.fetch = realFetch;
+    await server.close();
+  }
+
+  // An expired preview is checked again by itself, with the plain note.
+  const hookServer = await createServer({
+    root: process.cwd(),
+    server: { middlewareMode: true, hmr: false, watch: null },
+    appType: 'custom',
+    logLevel: 'error',
+    optimizeDeps: { noDiscovery: true },
+    ssr: { noExternal: ['react'] },
+    plugins: [{ name: 'fake-react', enforce: 'pre', resolveId: (id) => (id === 'react' ? '\0fake-react' : null), load: (id) => (id === '\0fake-react' ? fakeReact : null) }],
+  });
+  try {
+    const fake = await hookServer.ssrLoadModule('\0fake-react');
+    const { useLibraryTidy } = await hookServer.ssrLoadModule('/src/hooks/useLibraryTidy.ts');
+    const posts = [];
+    globalThis.fetch = async (url, init = {}) => {
+      const key = `${init.method ?? 'GET'} ${String(url).split('?')[0]}`;
+      posts.push(key);
+      if (key === 'GET /api/library/tidy/runs') return { ok: true, status: 200, json: async () => ({ runs: [] }) };
+      if (key === 'POST /api/library/tidy/plan/jobs') return { ok: true, status: 200, json: async () => job('succeeded', { result: plan(moves) }) };
+      return { ok: false, status: 409, json: async () => ({ ok: false, error_code: 'tidy_plan_expired' }) };
+    };
+    let changed = 0;
+    const flush = async () => { for (let i = 0; i < 40; i += 1) await Promise.resolve(); };
+    fake.__begin();
+    const render = () => { fake.__rerender(); const value = useLibraryTidy({ outputDir: '/dl', onChanged: () => { changed += 1; }, onAuthError: noop }); fake.__effects().forEach((effect) => effect()); return value; };
+    let hook = render();
+    hook.open();
+    await flush();
+    hook = render();
+    assert.equal(hook.phase.kind, 'preview');
+    hook.apply();
+    await flush();
+    hook = render();
+    assert.deepEqual(posts.filter((key) => key.startsWith('POST')), ['POST /api/library/tidy/plan/jobs', 'POST /api/library/tidy/apply/jobs', 'POST /api/library/tidy/plan/jobs']);
+    assert.equal(hook.phase.kind, 'preview', 'the expired preview was replaced by a fresh one');
+    assert.equal(hook.note, '미리보기가 오래돼서 다시 확인했어요.');
+    assert.equal(changed, 0, 'nothing moved, so nothing reloads');
+  } finally {
+    globalThis.fetch = realFetch;
+    await hookServer.close();
+  }
+}

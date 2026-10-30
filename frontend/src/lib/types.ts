@@ -135,12 +135,16 @@ export interface CourseDetailResponse {
   lectures: LectureItem[];
   content_count: number;
   content_items: CourseContentItem[];
+  /** Files of this course still saved the old way (one flat folder); absent on a backend without the folder tidy-up. */
+  legacy_file_count?: number;
 }
 
 export interface ProgressEvent {
   stage: string;
   index?: number;
   total?: number;
+  /** Folder tidy-up (`tidy_moving`): files handled so far, out of `total`. */
+  done?: number;
   module_item_id?: string | number;
   title?: string;
   output_path?: string;
@@ -688,4 +692,62 @@ export interface GradesClassesResponse {
   year: number;
   semester: GradesSemesterKind;
   classes: GradesClassDto[];
+}
+
+// Folder tidy-up (internal API, design/09 "내부 API 계약"). Paths are the backend's; the UI shows file names only.
+export interface TidyMove {
+  course: string;
+  week_folder: string;
+  lecture_stem: string;
+  from: string;
+  to: string;
+  role: string;
+}
+
+export interface TidySkip {
+  path: string;
+  reason: string;
+}
+
+export interface TidyPlan {
+  plan_id: string;
+  expires_at: string | number;
+  move_count: number;
+  skip_count: number;
+  moves: TidyMove[];
+  skips: TidySkip[];
+  open_files_note?: string | null;
+}
+
+export interface TidyApplyResult {
+  run_id: string;
+  moved: number;
+  skipped: number;
+  skips: TidySkip[];
+  undo_available: boolean;
+}
+
+export interface TidyUndoResult {
+  run_id: string;
+  restored: number;
+  skipped: number;
+  skips: TidySkip[];
+}
+
+export interface TidyRun {
+  run_id: string;
+  at: string | number;
+  moved: number;
+  undo_available: boolean;
+}
+
+export type TidyJobKind = 'plan' | 'apply' | 'undo';
+
+export interface TidyJobStatus<T = TidyPlan | TidyApplyResult | TidyUndoResult> {
+  job_id: string;
+  status: 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled';
+  cancel_requested: boolean;
+  progress: ProgressEvent[];
+  result: T | null;
+  error_code: string | null;
 }

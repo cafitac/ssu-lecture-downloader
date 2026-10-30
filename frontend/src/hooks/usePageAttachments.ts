@@ -87,7 +87,7 @@ export function usePageAttachments(course: CourseSummary | null, outputDir: stri
     const mark = (transfer: FileTransfer) => patch(key, (current) => ({ ...current, transfers: { ...current.transfers, [file.file_id]: transfer } }));
     mark('busy');
     try {
-      const result = await downloadCanvasFile(course.id, file.file_id, course.name, outputDir);
+      const result = await downloadCanvasFile(course.id, file.file_id, course.name, outputDir, 'skip', { module_name: item.module_name, week_position: item.week_position });
       if (courseKeyRef.current !== requestedFor) return;
       mark('done');
       patch(key, (current) => ({

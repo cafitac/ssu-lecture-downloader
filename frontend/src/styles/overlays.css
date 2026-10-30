@@ -47,3 +47,33 @@
 }
 .toast-success { border-color: var(--success-fg); }
 .toast-error { border-color: var(--danger-fg); }
+
+/* Folder tidy-up: the course notice and the preview dialog */
+.legacy-notice {
+  display: flex; align-items: center; justify-content: space-between; gap: var(--sp-3);
+  margin-top: var(--sp-3); padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg-subtle);
+}
+.legacy-notice p { min-width: 0; font-size: var(--fs-13); }
+.legacy-notice-actions { display: flex; gap: var(--sp-1); flex: none; }
+.dialog.dialog-wide { width: min(640px, 100%); }
+.tidy { display: grid; gap: var(--sp-3); padding: var(--sp-4) 0; }
+.tidy-lead { display: flex; align-items: center; gap: var(--sp-2); font-size: var(--fs-14); font-weight: var(--fw-semibold); outline: none; }
+.tidy-actions { justify-content: flex-end; }
+.tidy-scroll { max-height: 44vh; overflow-y: auto; border: 1px solid var(--border); border-radius: var(--radius-sm); }
+.tidy-tree, .tidy-moves { display: grid; }
+.tidy-course { padding: var(--sp-2) var(--sp-3); background: var(--bg-subtle); border-bottom: 1px solid var(--border); font-size: var(--fs-13); font-weight: var(--fw-semibold); }
+.tidy-week { margin: 0; padding: var(--sp-2) var(--sp-3) 0; color: var(--text-muted); font-size: var(--fs-12); font-weight: var(--fw-semibold); }
+.tidy-lecture { padding: var(--sp-1) var(--sp-3) 0 var(--sp-5); font-size: var(--fs-13); font-weight: var(--fw-semibold); overflow-wrap: anywhere; }
+.tidy-moves li { display: flex; align-items: baseline; gap: var(--sp-2); padding: 2px var(--sp-3) 2px var(--sp-6); font-size: var(--fs-12); }
+.tidy-name { min-width: 0; overflow-wrap: anywhere; color: var(--text-muted); }
+.tidy-to { color: var(--text); }
+.tidy-arrow { flex: none; color: var(--text-faint); }
+.tidy-reason { flex: none; }
+.tidy-more { padding: var(--sp-2) var(--sp-3); }
+.tidy-skips summary { cursor: pointer; font-size: var(--fs-13); font-weight: var(--fw-semibold); }
+.tidy-skips .tidy-moves { margin-top: var(--sp-2); }
+.tidy-skips .tidy-moves li { padding-left: var(--sp-3); justify-content: space-between; }
+@media (max-width: 520px) {
+  .legacy-notice { flex-direction: column; align-items: stretch; }
+}
