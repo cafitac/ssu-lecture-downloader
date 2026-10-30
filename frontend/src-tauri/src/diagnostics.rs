@@ -1,8 +1,8 @@
 //! "진단 파일 저장": a zip of the app's own log files plus a small `info.json`, written only where
 //! the user chose in the save dialog. Nothing is uploaded or sent anywhere.
 //!
-//! The shell and the backend already write `backend.log`, `backend.previous.log` and `watch.log`
-//! into the app log dir. Before a log goes into the zip it is redacted once more (defence in
+//! The shell and the backend already write `backend.log`, `watch.log` and the one rotated
+//! `*.previous.log` of each into the app log dir. Before a log goes into the zip it is redacted once more (defence in
 //! depth: the writers already keep tokens and cookies out) and cut to its last 5 MB.
 
 use serde::Serialize;
@@ -15,7 +15,12 @@ use tauri::Manager;
 use crate::backend::BackendManager;
 
 /// The log files that go into the zip, by their names in the app log dir.
-const LOG_FILES: [&str; 3] = ["backend.log", "backend.previous.log", "watch.log"];
+const LOG_FILES: [&str; 4] = [
+    "backend.log",
+    "backend.previous.log",
+    "watch.log",
+    "watch.previous.log",
+];
 /// Each log is cut to its last this many bytes.
 const MAX_LOG_BYTES: u64 = 5 * 1024 * 1024;
 const REDACTED: &str = "[redacted]";
@@ -370,7 +375,25 @@ const NO_PERMISSION_ERROR: &str =
     "이 폴더에는 파일을 저장할 권한이 없어요. 다른 폴더를 골라 주세요.";
 const DISK_FULL_ERROR: &str = "저장 공간이 부족해요. 디스크 공간을 확보한 뒤 다시 시도해 주세요.";
 const NAME_TAKEN_ERROR: &str = "같은 이름의 파일이 이미 있어요. 다른 이름으로 저장해 주세요.";
+/// The same three causes for the automatic save (the "문제가 생겼어요" dialog), which has no folder
+/// to pick: it points to Settings instead.
+const AUTO_NO_PERMISSION_ERROR: &str =
+    "다운로드 폴더에 저장할 권한이 없어요. 설정 → 문제 보내기에서 다른 위치를 골라 저장해 주세요.";
+const AUTO_DISK_FULL_ERROR: &str = "저장 공간이 부족해요. 공간을 확보한 뒤 다시 시도해 주세요.";
+const AUTO_GENERIC_ERROR: &str =
+    "진단 파일을 저장하지 못했어요. 설정 → 문제 보내기에서 다시 시도해 주세요.";
 const NOT_A_FILE_ERROR: &str = "같은 이름의 폴더가 이미 있어요. 다른 이름이나 폴더를 골라 주세요.";
+
+/// The automatic save's copy for an error text of the manual save: permission and disk-full keep
+/// their cause, everything else gets the generic sentence.
+fn automatic_error_text(error: &str) -> String {
+    match error {
+        NO_PERMISSION_ERROR => AUTO_NO_PERMISSION_ERROR,
+        DISK_FULL_ERROR => AUTO_DISK_FULL_ERROR,
+        _ => AUTO_GENERIC_ERROR,
+    }
+    .to_string()
+}
 
 /// Plain Korean for the user. The OS detail goes to stderr (the app's log channel), not to the UI.
 fn io_error_text(error: &std::io::Error) -> String {
@@ -567,11 +590,76 @@ fn build_info(
 // Command
 // ---------------------------------------------------------------------------
 
+/// The folder the automatic save (the "문제가 생겼어요" dialog) writes into, under Downloads.
+const AUTO_SAVE_FOLDER: &str = "SSU 진단";
+/// How many `(2)`, `(3)`, ... names are tried before giving up.
+const AUTO_SAVE_MAX_COPIES: u32 = 999;
+
+/// `folder/<file_name>`, or `folder/<name> (2).zip`, `(3)`, ... when that name is taken. Creates
+/// the folder. `file_name` must be a plain file name (no folder parts).
+pub(crate) fn unique_zip_destination(folder: &Path, file_name: &str) -> Result<PathBuf, String> {
+    let name = file_name.trim();
+    let plain = !name.is_empty()
+        && !name.starts_with('.')
+        && !name.contains(['/', '\\', '\0'])
+        && Path::new(name).file_name().is_some_and(|only| only == name);
+    if !plain {
+        return Err("저장할 파일 이름이 올바르지 않아요.".to_string());
+    }
+    let stem = name
+        .strip_suffix(".zip")
+        .or_else(|| name.strip_suffix(".ZIP"))
+        .unwrap_or(name);
+    fs::create_dir_all(folder).map_err(|error| io_error_text(&error))?;
+    let taken = |path: &Path| fs::symlink_metadata(path).is_ok();
+    let first = folder.join(format!("{stem}.zip"));
+    if !taken(&first) {
+        return Ok(first);
+    }
+    for copy in 2..=AUTO_SAVE_MAX_COPIES {
+        let candidate = folder.join(format!("{stem} ({copy}).zip"));
+        if !taken(&candidate) {
+            return Ok(candidate);
+        }
+    }
+    Err(NAME_TAKEN_ERROR.to_string())
+}
+
+/// Where the automatic save puts the zip: `~/Downloads/SSU 진단/<file_name>` (made unique, the
+/// folder created). The frontend then calls `save_diagnostics` with this path.
+#[tauri::command]
+pub(crate) fn diagnostics_auto_destination(file_name: String) -> Result<String, String> {
+    let home = crate::platform::real_user_home_dir()
+        .ok_or_else(|| automatic_error_text("no home folder"))?;
+    automatic_destination_in(&home.join("Downloads").join(AUTO_SAVE_FOLDER), &file_name)
+}
+
+/// `unique_zip_destination` for the automatic save, whose every error uses the automatic copy
+/// (this path has no folder to pick, so the manual sentences must never reach the dialog).
+fn automatic_destination_in(folder: &Path, file_name: &str) -> Result<String, String> {
+    unique_zip_destination(folder, file_name)
+        .map(|path| path.to_string_lossy().to_string())
+        .map_err(|error| automatic_error_text(&error))
+}
+
 /// `async` so that Tauri runs it off the main thread: reading, redacting and compressing the
 /// logs (and `sw_vers`) must not freeze the window.
 #[tauri::command(async)]
 pub(crate) fn save_diagnostics(
     app: tauri::AppHandle,
+    destination: String,
+    automatic: Option<bool>,
+) -> Result<SavedDiagnostics, String> {
+    let result = save_diagnostics_to(&app, destination);
+    if automatic == Some(true) {
+        result.map_err(|error| automatic_error_text(&error))
+    } else {
+        result
+    }
+}
+
+fn save_diagnostics_to(
+    app: &tauri::AppHandle,
     destination: String,
 ) -> Result<SavedDiagnostics, String> {
     if destination.trim().is_empty() {
@@ -620,6 +708,101 @@ mod tests {
                 (entry.name().expect("entry name").to_string(), text)
             })
             .collect()
+    }
+
+    #[test]
+    fn the_automatic_save_has_its_own_copy_without_a_folder_to_pick() {
+        assert_eq!(
+            automatic_error_text(NO_PERMISSION_ERROR),
+            "다운로드 폴더에 저장할 권한이 없어요. 설정 → 문제 보내기에서 다른 위치를 골라 저장해 주세요."
+        );
+        assert_eq!(
+            automatic_error_text(DISK_FULL_ERROR),
+            "저장 공간이 부족해요. 공간을 확보한 뒤 다시 시도해 주세요."
+        );
+        for other in [
+            GENERIC_SAVE_ERROR,
+            NAME_TAKEN_ERROR,
+            NOT_A_FILE_ERROR,
+            "저장할 위치가 비어 있어요.",
+        ] {
+            assert_eq!(
+                automatic_error_text(other),
+                "진단 파일을 저장하지 못했어요. 설정 → 문제 보내기에서 다시 시도해 주세요.",
+                "{other}"
+            );
+        }
+        for text in [
+            AUTO_NO_PERMISSION_ERROR,
+            AUTO_DISK_FULL_ERROR,
+            AUTO_GENERIC_ERROR,
+        ] {
+            assert!(!text.contains("폴더를 골라"), "{text}");
+        }
+        // The manual save keeps its sentences.
+        assert!(NO_PERMISSION_ERROR.contains("다른 폴더를 골라 주세요"));
+    }
+
+    #[test]
+    fn automatic_destination_errors_use_the_automatic_copy() {
+        let root = temp_dir("auto-errors");
+        // A file sits where the folder should be: create_dir_all fails.
+        let blocker = root.join("SSU 진단");
+        fs::write(&blocker, b"not a folder").unwrap();
+        let error = automatic_destination_in(&blocker, "ssu-진단-20261030-1105.zip")
+            .expect_err("the folder cannot be created");
+        assert_eq!(error, AUTO_GENERIC_ERROR);
+        assert!(!error.contains("폴더를 골라"), "{error}");
+        // An invalid name is mapped too.
+        let error = automatic_destination_in(&root, "../x.zip").expect_err("bad name");
+        assert_eq!(error, AUTO_GENERIC_ERROR);
+        // The folder inside a folder that refuses new entries: the permission copy (not run as root).
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let locked = root.join("locked");
+            fs::create_dir(&locked).unwrap();
+            fs::set_permissions(&locked, fs::Permissions::from_mode(0o500)).unwrap();
+            if fs::create_dir(locked.join("probe")).is_err() {
+                let error = automatic_destination_in(&locked.join("SSU 진단"), "a.zip")
+                    .expect_err("no permission");
+                assert_eq!(error, AUTO_NO_PERMISSION_ERROR);
+                assert!(!error.contains("폴더를 골라"), "{error}");
+            }
+            fs::set_permissions(&locked, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        // Success is still a plain path.
+        let ok = automatic_destination_in(&root.join("fresh"), "a.zip").unwrap();
+        assert_eq!(ok, root.join("fresh").join("a.zip").to_string_lossy());
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn automatic_destination_is_unique_and_creates_the_folder() {
+        let root = temp_dir("auto");
+        let folder = root.join("Downloads").join(AUTO_SAVE_FOLDER);
+        let first = unique_zip_destination(&folder, "ssu-진단-20261030-1105.zip").unwrap();
+        assert_eq!(first, folder.join("ssu-진단-20261030-1105.zip"));
+        assert!(folder.is_dir(), "the folder was created");
+        fs::write(&first, b"zip").unwrap();
+        let second = unique_zip_destination(&folder, "ssu-진단-20261030-1105.zip").unwrap();
+        assert_eq!(second, folder.join("ssu-진단-20261030-1105 (2).zip"));
+        fs::write(&second, b"zip").unwrap();
+        let third = unique_zip_destination(&folder, "ssu-진단-20261030-1105.zip").unwrap();
+        assert_eq!(third, folder.join("ssu-진단-20261030-1105 (3).zip"));
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn automatic_destination_refuses_names_with_folder_parts() {
+        let root = temp_dir("auto-bad");
+        for name in ["", "  ", "../x.zip", "a/b.zip", "a\\b.zip", ".hidden.zip"] {
+            assert!(unique_zip_destination(&root, name).is_err(), "{name:?}");
+        }
+        // A name without `.zip` gets it.
+        let path = unique_zip_destination(&root, "diag").unwrap();
+        assert_eq!(path, root.join("diag.zip"));
+        fs::remove_dir_all(root).ok();
     }
 
     #[test]
@@ -856,24 +1039,42 @@ mod tests {
         let out = temp_dir("out");
         fs::write(logs.join("backend.log"), "start\nGET /v?token=SECRET1 ok\n").expect("log");
         fs::write(logs.join("watch.log"), "watch Cookie: sid=SECRET2\n").expect("log");
-        // backend.previous.log does not exist: skipped, not an error.
+        // The rotated watch log is included; backend.previous.log does not exist: skipped, not an error.
+        fs::write(logs.join("watch.previous.log"), "older watch line\n").expect("log");
         let destination = out.join("diag.zip");
         let info = serde_json::json!({ "app_version": "9.9.9" });
 
         let saved = write_bundle(&destination, &logs, &info).expect("bundle");
-        assert_eq!(saved.files, ["backend.log", "watch.log", "info.json"]);
+        assert_eq!(
+            saved.files,
+            [
+                "backend.log",
+                "watch.log",
+                "watch.previous.log",
+                "info.json"
+            ]
+        );
         assert_eq!(saved.path, destination.to_string_lossy());
 
         let entries = zip_entries(&destination);
         let names: Vec<&str> = entries.iter().map(|(name, _)| name.as_str()).collect();
-        assert_eq!(names, ["backend.log", "watch.log", "info.json"]);
+        assert_eq!(
+            names,
+            [
+                "backend.log",
+                "watch.log",
+                "watch.previous.log",
+                "info.json"
+            ]
+        );
         assert_eq!(entries[0].1, "start\nGET /v?token=[redacted] ok\n");
         assert_eq!(entries[1].1, "watch Cookie: [redacted]\n");
-        let info: serde_json::Value = serde_json::from_str(&entries[2].1).expect("info json");
+        assert_eq!(entries[2].1, "older watch line\n");
+        let info: serde_json::Value = serde_json::from_str(&entries[3].1).expect("info json");
         assert_eq!(info["app_version"], "9.9.9");
         assert_eq!(
             info["included_files"],
-            serde_json::json!(["backend.log", "watch.log"])
+            serde_json::json!(["backend.log", "watch.log", "watch.previous.log"])
         );
         assert!(!entries.iter().any(|(_, text)| text.contains("SECRET")));
 

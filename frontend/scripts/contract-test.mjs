@@ -153,8 +153,12 @@ if ((readFileSync('src/components/ActionBar.tsx', 'utf8').match(/btn-primary/g) 
 // Screens.tsx (login) and GradesPane.tsx (the one consent step, shown instead of the course view) may carry one accent button each.
 // While a download runs the ActionBar's 다운로드 button can show next to the consent button; that coexistence is accepted.
 // TidyDialog.tsx is a modal: its commit button (정리하기, shown over the workspace) is the one accent button of that dialog.
-for (const file of readTree('src/components', ['.tsx']).filter((name) => !name.endsWith('ActionBar.tsx') && !name.endsWith('Screens.tsx') && !name.endsWith('GradesPane.tsx') && !name.endsWith('TidyDialog.tsx'))) {
+// ProblemDialog.tsx is a modal too: its 진단 파일 저장 is the one accent button of that dialog.
+for (const file of readTree('src/components', ['.tsx']).filter((name) => !name.endsWith('ActionBar.tsx') && !name.endsWith('Screens.tsx') && !name.endsWith('GradesPane.tsx') && !name.endsWith('TidyDialog.tsx') && !name.endsWith('ProblemDialog.tsx'))) {
   if (readFileSync(file, 'utf8').includes('btn-primary')) throw new Error(`${file}: no other accent-filled button may compete with the download button`);
+}
+if ((readFileSync('src/components/ProblemDialog.tsx', 'utf8').match(/btn-primary/g) ?? []).length !== 1) {
+  throw new Error('The problem dialog may contain exactly one accent-filled button (진단 파일 저장)');
 }
 if ((readFileSync('src/components/GradesPane.tsx', 'utf8').match(/btn-primary/g) ?? []).length !== 1) {
   throw new Error('The grades pane may contain exactly one accent-filled button (동의하고 성적 보기)');
@@ -2534,6 +2538,25 @@ const assistSource = readFileSync('src-tauri/src/assets/watch_assist.js', 'utf8'
       const screenSaved = renderToStaticMarkup(React.createElement(DiagnosticsButtonView, { busy: false, outcome: savedOutcome, onSave() {}, onReveal() {} }));
       assert.ok(screenSaved.includes('진단 파일을 저장했어요. 이 파일을 전달해 주세요.') && screenSaved.includes('폴더에서 보기'));
       assert.ok(/disabled=""/.test(renderToStaticMarkup(React.createElement(DiagnosticsButtonView, { busy: true, outcome: null, onSave() {}, onReveal() {} }))), 'the failure-screen button is disabled while saving');
+      // ERR-PROMPT: the "문제가 생겼어요" dialog, one sentence per kind, rendered with real React.
+      {
+        const { ProblemDialogView } = await server.ssrLoadModule('/src/components/ProblemDialog.tsx');
+        const view = (props) => renderToStaticMarkup(React.createElement(ProblemDialogView, { kind: 'chrome-watch', busy: false, outcome: null, onSave() {}, onClose() {}, ...props }));
+        const idle = view({});
+        assert.ok(idle.includes('role="dialog"') && idle.includes('aria-modal="true"') && idle.includes('<h2') && idle.includes('문제가 생겼어요'), 'a modal dialog titled 문제가 생겼어요');
+        assert.ok(idle.includes('자동 재생이 오류로 멈췄어요.') && idle.includes('어디로도 자동 전송되지 않아요.'), 'the sentence and the no-upload promise');
+        assert.ok(/class="btn btn-sm btn-primary"[^>]*>진단 파일 저장<\/button>/.test(idle) && /class="btn btn-sm"[^>]*>닫기<\/button>/.test(idle), '[진단 파일 저장] and [닫기]');
+        assert.ok(!/disabled|role="status"|role="alert"/.test(idle), 'idle: nothing disabled, no result');
+        for (const [kind, sentence] of [['chrome-watch', '자동 재생이 오류로 멈췄어요.'], ['chrome-skip', '문제가 생겨 강의를 건너뛰었어요.'], ['app-watch', '문제가 생겨 강의를 건너뛰었어요.'], ['backend', '내부 서버가 멈췄어요.'], ['previous-crash', '지난번에 앱이 비정상적으로 종료됐어요.']]) {
+          assert.ok(view({ kind }).includes(`<p class="problem-lead">${sentence}</p>`), `${kind}: ${sentence}`);
+        }
+        const busy = view({ busy: true });
+        assert.ok(/<button type="button" class="btn btn-sm btn-primary" disabled="">.*저장하는 중…<\/button>/.test(busy), 'the save button is disabled while saving');
+        const saved = view({ outcome: { ok: true, path: '/Users/x/Downloads/SSU 진단/ssu-진단-20261030-1105.zip' } });
+        assert.ok(saved.includes('<p class="small" role="status">진단 파일을 저장했어요. 이 파일을 전달해 주세요.</p>') && !saved.includes('>진단 파일 저장</button>') && saved.includes('>닫기</button>'), 'saved: the thanks line and only 닫기');
+        const failed = view({ outcome: { ok: false, text: '저장 공간이 부족해요. 디스크 공간을 확보한 뒤 다시 시도해 주세요.' } });
+        assert.ok(failed.includes('role="alert">저장 공간이 부족해요. 디스크 공간을 확보한 뒤 다시 시도해 주세요.</p>') && failed.includes('>진단 파일 저장</button>'), 'failed: the Korean error and a way to retry');
+      }
       const base = { phase: 'available', version: '1.2.3', notes: '- 빨라졌어요', hidden: false, progress: null, notice: null, error: null, canRetry: false };
       const render = (state, open) => renderToStaticMarkup(React.createElement(UpdateChipView, { state, open, onToggle() {}, onUpdate() {}, onLater() {} }));
       const noInterruption = (html) => {
@@ -2610,6 +2633,30 @@ const assistSource = readFileSync('src-tauri/src/assets/watch_assist.js', 'utf8'
     assert.ok(/setWorkBusy\(\(held\) => busyAfterBackendStatus\(held, status\.state\)\)/.test(appSource), 'a held busy flag is dropped when the backend is not ready');
     assert.ok(/<UpdateChip update=\{update\} corner busyHeld=\{workBusy\} \/>/.test(appSource), 'the login-screen chip explains a held busy flag');
     assert.ok(/const refresh = useCallback\(\(\) => setAttempt/.test(readFileSync('src/hooks/useBackendStatus.ts', 'utf8')));
+    // ERR-PROMPT: the prompt is mounted at the App root on both branches, next to the update controller.
+    assert.ok(appFn.indexOf('useProblemPrompt()') > 0 && appFn.indexOf('useProblemPrompt()') < appFn.indexOf('BackendScreen'), 'one prompt controller for the session, above the branches');
+    assert.equal((appSource.match(/\{problemDialog\}/g) ?? []).length, 2, 'the dialog is on the backend branch and the session branch');
+    assert.ok(/status\.state === 'failed'\) reportProblem\('backend'\)/.test(appSource), 'the failure screen asks on its own');
+    assert.ok(/previousRunCrashed\(\)\.then\(\(crashed\) => \{\s*if \(crashed\) reportProblem\('previous-crash', \{ wait: true \}\)/.test(appSource), 'a crashed previous run asks once at launch');
+    assert.ok(/<ProblemDialog key=\{problem\.state\.kind\} kind=/.test(appSource), 'the dialog is keyed by kind, so a queued one remounts with fresh save state');
+    {
+      // What a dialog shown from the queue renders: idle, with the save button and no result.
+      const { createServer } = await import('vite');
+      const React = (await import('react')).default;
+      const { renderToStaticMarkup } = await import('react-dom/server');
+      const srv = await createServer({ root: process.cwd(), server: { middlewareMode: true, hmr: false, watch: null }, appType: 'custom', logLevel: 'error', optimizeDeps: { noDiscovery: true } });
+      try {
+        const { ProblemDialog } = await srv.ssrLoadModule('/src/components/ProblemDialog.tsx');
+        const html = renderToStaticMarkup(React.createElement(ProblemDialog, { kind: 'previous-crash', onClose() {} }));
+        assert.ok(html.includes('지난번에 앱이 비정상적으로 종료됐어요.') && />진단 파일 저장<\/button>/.test(html), 'idle: the save button is there');
+        assert.ok(!/disabled|role="status"|role="alert"|저장했어요/.test(html), 'idle: no busy state and no outcome');
+      } finally {
+        await srv.close();
+      }
+    }
+    assert.ok(/onProblem=\{reportProblem\}/.test(appSource), 'the workspace reports watch problems up');
+    const viewerSource = readFileSync('src/hooks/useOfficialViewer.ts', 'utf8');
+    assert.ok(/chromeNoticeIsProblem\(notice, authLost, status\.error_code\)\) optionsRef\.current\.onProblem\(chromeProblemKind\(notice\)\)/.test(viewerSource) && /appWatchNoticeIsProblem\(payload\)\) optionsRef\.current\.onProblem\('app-watch'\)/.test(viewerSource), 'both watch notice streams feed the prompt');
     const updateCss = readFileSync('src/styles/update.css', 'utf8');
     assert.ok(!/inset:\s*0|backdrop/.test(updateCss), 'no full-screen layer');
     assert.deepEqual(updateCss.match(/[^}]*position:\s*fixed[^}]*/g)?.map((rule) => rule.trim().split('{')[0].trim()), ['.update-host.update-corner'], 'only the small corner chip is fixed');
@@ -2695,6 +2742,157 @@ const assistSource = readFileSync('src-tauri/src/assets/watch_assist.js', 'utf8'
       assert.deepEqual(await run(async () => { throw '이 폴더에는 파일을 저장할 권한이 없어요. 다른 폴더를 골라 주세요.'; }), [{ busy: true, outcome: null }, { busy: false, outcome: { ok: false, text: '이 폴더에는 파일을 저장할 권한이 없어요. 다른 폴더를 골라 주세요.' } }], 'a Rust sentence is shown as it is');
       assert.deepEqual((await run(async () => { throw new Error('boom'); })).at(-1), { busy: false, outcome: { ok: false, text: DIAGNOSTICS_FAILED_TEXT } }, 'an unknown error gets the plain fallback');
       assert.equal(DIAGNOSTICS_SAVED_TEXT, '진단 파일을 저장했어요. 이 파일을 전달해 주세요.');
+    }
+  }
+
+  // ERR-PROMPT: the automatic save (no save dialog) and the once-per-session logic.
+  {
+    const prompt = await import('../src/lib/problemPrompt.ts');
+    const { DIAGNOSTICS_SAVED_TEXT } = await import('../src/lib/diagnosticsSave.ts');
+
+    // Path naming: the shell gets the dated file name and returns the unique path under ~/Downloads/SSU 진단;
+    // save_diagnostics then writes exactly there, without a dialog.
+    {
+      let nameAsked;
+      let written;
+      let savedArgs;
+      const bridge = tauriBridge({
+        diagnostics_auto_destination: (args) => { nameAsked = args.fileName; return '/Users/x/Downloads/SSU 진단/ssu-진단-20261030-1105 (2).zip'; },
+        save_diagnostics: (args) => { written = args.destination; savedArgs = args; return { path: args.destination, files: ['info.json'] }; },
+      });
+      try {
+        const saved = await desktop.saveDiagnosticsAutomatically(new Date(2026, 9, 30, 11, 5));
+        assert.equal(nameAsked, 'ssu-진단-20261030-1105.zip');
+        assert.equal(written, '/Users/x/Downloads/SSU 진단/ssu-진단-20261030-1105 (2).zip');
+        assert.equal(saved.path, written);
+        assert.equal(savedArgs.automatic, true, 'the shell is told it is the automatic save, so its errors do not mention a folder to pick');
+        assert.deepEqual(bridge.calls, ['diagnostics_auto_destination', 'save_diagnostics'], 'no save dialog');
+      } finally { bridge.restore(); }
+      assert.equal(await desktop.saveDiagnosticsAutomatically(), null, 'nothing is written outside the desktop app');
+      assert.equal(await desktop.previousRunCrashed(), false, 'no crash flag outside the desktop app');
+      const crashed = tauriBridge({ previous_run_crashed: () => true });
+      try { assert.equal(await desktop.previousRunCrashed(), true); } finally { crashed.restore(); }
+      const broken = tauriBridge({ previous_run_crashed: () => { throw 'unknown command'; } });
+      try { assert.equal(await desktop.previousRunCrashed(), false, 'an older shell means no prompt'); } finally { broken.restore(); }
+      const rust = readFileSync('src-tauri/src/diagnostics.rs', 'utf8');
+      // The crash marker: written in setup, removed in the exit handler (a quit, and the updater's relaunch).
+      {
+        const lib = readFileSync('src-tauri/src/lib.rs', 'utf8');
+        const setup = lib.slice(lib.indexOf('.setup(move |app|'), lib.indexOf('.invoke_handler('));
+        assert.ok(setup.includes('session_marker::SessionMarker::begin(marker_dir)'), 'SessionMarker::begin runs in setup');
+        const exit = lib.slice(lib.indexOf('app.run(|app_handle, event|'), lib.indexOf('Err(error) => {\n            eprintln!("error while building'));
+        assert.ok(/tauri::RunEvent::ExitRequested \{ \.\. \} \| tauri::RunEvent::Exit/.test(exit) && /marker\.end\(\)/.test(exit), 'marker.end() runs in the ExitRequested | Exit handler');
+        assert.ok(exit.indexOf('RunEvent::Exit') < exit.indexOf('marker.end()'), 'inside that handler, not before it');
+      }
+      // The automatic save's three error sentences (Rust maps the cause; the manual Settings copy is untouched).
+      for (const sentence of [
+        '다운로드 폴더에 저장할 권한이 없어요. 설정 → 문제 보내기에서 다른 위치를 골라 저장해 주세요.',
+        '저장 공간이 부족해요. 공간을 확보한 뒤 다시 시도해 주세요.',
+        '진단 파일을 저장하지 못했어요. 설정 → 문제 보내기에서 다시 시도해 주세요.',
+      ]) assert.ok(rust.includes(`"${sentence}"`) || rust.includes(sentence), sentence);
+      assert.ok(rust.includes('이 폴더에는 파일을 저장할 권한이 없어요. 다른 폴더를 골라 주세요.') && rust.includes('automatic: Option<bool>'), 'the manual copy stays; the flag is optional');
+      // A Rust sentence reaches the dialog as it is (no folder picker wording to rewrite on this side).
+      {
+        const states = [];
+        await prompt.runProblemSave({ save: async () => { throw '저장 공간이 부족해요. 공간을 확보한 뒤 다시 시도해 주세요.'; }, reveal: async () => {} }, (state) => states.push(state));
+        assert.deepEqual(states.at(-1), { busy: false, outcome: { ok: false, text: '저장 공간이 부족해요. 공간을 확보한 뒤 다시 시도해 주세요.' } });
+      }
+      assert.ok(rust.includes('const AUTO_SAVE_FOLDER: &str = "SSU 진단";') && /home\.join\("Downloads"\)\.join\(AUTO_SAVE_FOLDER\)/.test(rust), 'the fixed folder is ~/Downloads/SSU 진단');
+    }
+
+    // Save, then reveal in Finder; a Finder that fails to open is no failure; a failed save shows the Korean error.
+    {
+      const run = async (deps) => { const states = []; await prompt.runProblemSave(deps, (state) => states.push(state)); return states; };
+      const revealed = [];
+      const ok = await run({ save: async () => ({ path: '/x/SSU 진단/a.zip', files: [] }), reveal: async (path) => { revealed.push(path); } });
+      assert.deepEqual(ok, [{ busy: true, outcome: null }, { busy: false, outcome: { ok: true, path: '/x/SSU 진단/a.zip' } }]);
+      assert.deepEqual(revealed, ['/x/SSU 진단/a.zip'], 'the saved file is shown in Finder');
+      assert.equal(prompt.PROBLEM_SAVED_TEXT, '진단 파일을 저장했어요. 이 파일을 전달해 주세요.');
+      assert.equal(prompt.PROBLEM_SAVED_TEXT, DIAGNOSTICS_SAVED_TEXT);
+      const finderFails = await run({ save: async () => ({ path: '/x/a.zip', files: [] }), reveal: async () => { throw new Error('open failed'); } });
+      assert.deepEqual(finderFails.at(-1), { busy: false, outcome: { ok: true, path: '/x/a.zip' } });
+      let revealCalls = 0;
+      const rust = await run({ save: async () => { throw '저장 공간이 부족해요. 디스크 공간을 확보한 뒤 다시 시도해 주세요.'; }, reveal: async () => { revealCalls += 1; } });
+      assert.deepEqual(rust.at(-1), { busy: false, outcome: { ok: false, text: '저장 공간이 부족해요. 디스크 공간을 확보한 뒤 다시 시도해 주세요.' } });
+      const unknown = await run({ save: async () => { throw new Error('boom'); }, reveal: async () => { revealCalls += 1; } });
+      assert.deepEqual(unknown.at(-1), { busy: false, outcome: { ok: false, text: prompt.PROBLEM_SAVE_FAILED_TEXT } });
+      assert.ok(!prompt.PROBLEM_SAVE_FAILED_TEXT.includes('폴더를 골라'), 'there is no folder to pick in the automatic save');
+      assert.equal(revealCalls, 0, 'nothing is revealed after a failed save');
+    }
+
+    // Which notices ask: a failed run (not a lost login) and stalls of the Chrome watch; an error notice of the in-app watch.
+    assert.equal(prompt.chromeNoticeIsProblem({ kind: 'failed' }, false), true);
+    assert.equal(prompt.chromeNoticeIsProblem({ kind: 'failed' }, true), false, 'a lost login is the login screen\'s business');
+    assert.equal(prompt.chromeNoticeIsProblem({ kind: 'failed' }, false, 'chrome_window_closed'), false, 'closing the Chrome window yourself is no problem');
+    assert.equal(prompt.chromeNoticeIsProblem({ kind: 'failed' }, false, 'chrome_closed'), true, 'a lost Chrome or DevTools connection is');
+    assert.equal(prompt.chromeNoticeIsProblem({ kind: 'failed' }, false, null), true);
+    assert.equal(prompt.chromeNoticeIsProblem({ kind: 'skipped' }, false), true, 'a problem skip (the final stall, a plan error) carries a skipped notice');
+    assert.equal(prompt.chromeNoticeIsProblem({ kind: 'skipped' }, false, 'chrome_window_closed'), true, 'the run code belongs to failed notices only');
+    assert.equal(prompt.chromeNoticeIsProblem({ kind: 'stalled' }, false), false, 'a first stall reloads the page and usually recovers');
+    for (const kind of ['finished', 'minimize_paused']) assert.equal(prompt.chromeNoticeIsProblem({ kind }, false), false, kind);
+    // A recovered stall (one stalled notice, then the lecture finishes) never asks; a stall that ends in a skip asks once, with the skip sentence.
+    {
+      const asks = (notices) => notices.filter((notice) => prompt.chromeNoticeIsProblem(notice, false, null)).map(prompt.chromeProblemKind);
+      assert.deepEqual(asks([{ kind: 'stalled' }, { kind: 'finished' }]), [], 'recovered stall: no prompt');
+      assert.deepEqual(asks([{ kind: 'stalled' }, { kind: 'skipped' }, { kind: 'finished' }]), ['chrome-skip']);
+      assert.deepEqual(asks([{ kind: 'failed' }]), ['chrome-watch']);
+      // A skip that is not a stall (a plan error, a missing launch URL): playback never started, so the sentence names no cause.
+      const planErrorSkip = { id: 4, kind: 'skipped', level: 'error', text: '‘3주차’ 시청 주소를 찾지 못해 건너뛰었어요.', item_title: '3주차', reason: 'plan_failed' };
+      assert.deepEqual(asks([planErrorSkip]), ['chrome-skip'], 'a plan-error skip asks');
+      assert.equal(prompt.problemSentence('chrome-skip'), '문제가 생겨 강의를 건너뛰었어요.');
+      assert.equal(prompt.problemSentence('app-watch'), '문제가 생겨 강의를 건너뛰었어요.');
+      assert.ok(!prompt.problemSentence('chrome-skip').includes('멈'), 'the skip sentence claims no stall');
+      assert.equal(prompt.problemSentence('chrome-skip'), '문제가 생겨 강의를 건너뛰었어요.');
+      assert.equal(prompt.problemSentence('chrome-watch'), '자동 재생이 오류로 멈췄어요.');
+    }
+    assert.equal(prompt.appWatchNoticeIsProblem({ kind: 'error', auth_expired: false }), true);
+    assert.equal(prompt.appWatchNoticeIsProblem({ kind: 'error', auth_expired: true }), false);
+    for (const kind of ['info', 'success']) assert.equal(prompt.appWatchNoticeIsProblem({ kind, auth_expired: false }), false, kind);
+
+    // Once per kind per session; never two dialogs at once; a dropped newcomer is not used up.
+    {
+      const controller = prompt.createProblemPromptController();
+      let changes = 0;
+      const unsubscribe = controller.subscribe(() => { changes += 1; });
+      assert.deepEqual(controller.getState(), { kind: null });
+      assert.equal(controller.report('chrome-watch'), true);
+      assert.deepEqual(controller.getState(), { kind: 'chrome-watch' });
+      assert.equal(controller.report('chrome-watch'), false, 'the open dialog is not asked again');
+      assert.equal(controller.report('backend'), false, 'a newcomer is dropped while one is open');
+      assert.deepEqual(controller.getState(), { kind: 'chrome-watch' });
+      assert.equal(changes, 1, 'dropped reports change nothing');
+      controller.close();
+      assert.deepEqual(controller.getState(), { kind: null });
+      assert.equal(controller.report('chrome-watch'), false, 'closed: that kind is not asked again this session');
+      assert.equal(controller.report('backend'), true, 'the dropped newcomer was not used up');
+      controller.close();
+      controller.close();
+      assert.equal(changes, 4, 'closing an already closed prompt is a no-op');
+      for (const kind of ['app-watch', 'previous-crash']) {
+        assert.equal(controller.report(kind), true, kind);
+        controller.close();
+        assert.equal(controller.report(kind), false, `${kind} once`);
+      }
+      unsubscribe();
+      // A one-shot report (the crash flag is read once) waits for an open dialog instead of being lost.
+      {
+        const waiting = prompt.createProblemPromptController();
+        assert.equal(waiting.report('backend'), true);
+        assert.equal(waiting.report('previous-crash', { wait: true }), false, 'not shown over the open dialog');
+        assert.equal(waiting.report('previous-crash', { wait: true }), false);
+        waiting.close();
+        assert.deepEqual(waiting.getState(), { kind: 'previous-crash' }, 'shown as soon as the other one closes');
+        waiting.close();
+        assert.deepEqual(waiting.getState(), { kind: null }, 'only once');
+        assert.equal(waiting.report('previous-crash', { wait: true }), false, 'and asked');
+        const plain = prompt.createProblemPromptController();
+        plain.report('backend');
+        plain.report('app-watch');
+        plain.close();
+        assert.deepEqual(plain.getState(), { kind: null }, 'a report without wait is still dropped');
+      }
+      const other = prompt.createProblemPromptController();
+      assert.equal(other.report('chrome-watch'), true, 'a new app session asks again');
     }
   }
 

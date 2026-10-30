@@ -12,6 +12,7 @@ import { Toasts } from './components/Toasts';
 import { TopBar } from './components/TopBar';
 import { WatchAllDialog } from './components/WatchAllDialog';
 import { WatchStrip } from './components/WatchStrip';
+import { ProblemDialog } from './components/ProblemDialog';
 import { UpdateChip } from './components/UpdateChip';
 import { isInstalling } from './lib/appUpdate';
 import { useAppUpdate } from './hooks/useAppUpdate';
@@ -29,12 +30,14 @@ import type { LmsSession } from './hooks/useLmsSession';
 import { useMediaDependencies } from './hooks/useMediaDependencies';
 import { useNow } from './hooks/useNow';
 import { useOfficialViewer } from './hooks/useOfficialViewer';
+import { useProblemPrompt } from './hooks/useProblemPrompt';
+import type { ProblemPrompt } from './hooks/useProblemPrompt';
 import { usePageAttachments } from './hooks/usePageAttachments';
 import { useToasts } from './hooks/useToasts';
 import { buildWatchQueue, groupByWeek, isLibraryItem, isSelectable, isTaskItem, isUnwatchedNow, itemKey, itemPageUrl, pickDefaultCourse, sortTasks, sumSizes } from './lib/content';
 import type { LectureTab } from './lib/content';
 import { dueSoonCount } from './lib/deadline';
-import { isTauriRuntime, openDownloadedFolder } from './lib/desktop';
+import { isTauriRuntime, openDownloadedFolder, previousRunCrashed } from './lib/desktop';
 import { friendlyError } from './lib/errors';
 import { legacyNoticeState } from './lib/tidy';
 import { formatBytes, shortFolderName } from './lib/format';
@@ -54,7 +57,7 @@ function toPlannedItem(item: CourseContentItem): PlannedItem {
   return { id: itemKey(item) as string, rawId: item.module_item_id as string | number, title: item.title, sizeBytes: item.size_bytes };
 }
 
-function Workspace({ session, update, onWorkBusyChange }: { session: LmsSession; update: AppUpdate; onWorkBusyChange: (busy: boolean) => void }) {
+function Workspace({ session, update, onWorkBusyChange, onProblem }: { session: LmsSession; update: AppUpdate; onWorkBusyChange: (busy: boolean) => void; onProblem: ProblemPrompt['report'] }) {
   const { toasts, push, dismiss } = useToasts();
   const { courses, expire } = session;
   const now = useNow();
@@ -183,7 +186,7 @@ function Workspace({ session, update, onWorkBusyChange }: { session: LmsSession;
     latest.current.content.markWatched(moduleItemId);
     setPlayedIds((current) => (current.has(moduleItemId) ? current : new Set(current).add(moduleItemId)));
   }, []);
-  const viewer = useOfficialViewer({ notify: push, onAuthError, onItemWatched, onQueueSettled, modePreference: watchModePreference });
+  const viewer = useOfficialViewer({ notify: push, onAuthError, onItemWatched, onQueueSettled, modePreference: watchModePreference, onProblem });
   const chooseWatchMode = useCallback((mode: WatchMode) => {
     writeWatchModePreference(mode);
     setWatchModePreference(mode);
@@ -499,7 +502,7 @@ function Workspace({ session, update, onWorkBusyChange }: { session: LmsSession;
   );
 }
 
-function SessionGate({ update, workBusy, onWorkBusyChange }: { update: AppUpdate; workBusy: boolean; onWorkBusyChange: (busy: boolean) => void }) {
+function SessionGate({ update, workBusy, onWorkBusyChange, onProblem }: { update: AppUpdate; workBusy: boolean; onWorkBusyChange: (busy: boolean) => void; onProblem: ProblemPrompt['report'] }) {
   const session = useLmsSession();
   if (session.phase === 'checking') return <SplashScreen text="로그인 상태를 확인하는 중이에요…" />;
   if (session.phase === 'signed-out') {
@@ -510,7 +513,7 @@ function SessionGate({ update, workBusy, onWorkBusyChange }: { update: AppUpdate
       </>
     );
   }
-  return <Workspace session={session} update={update} onWorkBusyChange={onWorkBusyChange} />;
+  return <Workspace session={session} update={update} onWorkBusyChange={onWorkBusyChange} onProblem={onProblem} />;
 }
 
 /** Everything below talks to the API, so it renders only once the backend is ready. */
@@ -520,10 +523,26 @@ export function App() {
   const [workBusy, setWorkBusy] = useState(false);
   const { status, retry, refresh } = useBackendStatus();
   const update = useAppUpdate(workBusy, { onRecoveryAttempted: refresh });
+  // The "문제가 생겼어요" prompt: one for the whole session, above every screen, like the update controller.
+  const problem = useProblemPrompt();
+  const { report: reportProblem } = problem;
   // No job survives a dead sidecar: a busy flag held from an earlier workspace is dropped when the backend is not ready.
   useEffect(() => {
     setWorkBusy((held) => busyAfterBackendStatus(held, status.state));
   }, [status.state]);
+  // The previous run ended without a clean exit. The shell clears its flag when it is read, so
+  // this asks once (no cancel flag: a result must not be lost to the dev double-mount).
+  useEffect(() => {
+    void previousRunCrashed().then((crashed) => {
+      if (crashed) reportProblem('previous-crash', { wait: true });
+    });
+  }, [reportProblem]);
+  // The failure screen is up: ask on our own. Seen again when an open dialog closes (a dropped report is not used up).
+  useEffect(() => {
+    if (status.state === 'failed') reportProblem('backend');
+  }, [status.state, problem.state.kind, reportProblem]);
+  // Keyed by kind: a dialog shown from the queue after another one closes starts idle, not with that one's save state.
+  const problemDialog = problem.state.kind !== null && <ProblemDialog key={problem.state.kind} kind={problem.state.kind} onClose={problem.close} />;
   if (status.state !== 'ready') {
     // While an update installs, the screen's own retry would restart the backend under the installer.
     const installing = isInstalling(update.state.phase);
@@ -531,8 +550,14 @@ export function App() {
       <>
         <BackendScreen status={status} onRetry={() => void retry()} retryBlockedText={installing ? '업데이트하는 중이에요' : undefined} />
         <UpdateChip update={update} corner />
+        {problemDialog}
       </>
     );
   }
-  return <SessionGate update={update} workBusy={workBusy} onWorkBusyChange={setWorkBusy} />;
+  return (
+    <>
+      <SessionGate update={update} workBusy={workBusy} onWorkBusyChange={setWorkBusy} onProblem={reportProblem} />
+      {problemDialog}
+    </>
+  );
 }

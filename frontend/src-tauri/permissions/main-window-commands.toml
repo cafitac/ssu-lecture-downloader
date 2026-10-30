@@ -136,6 +136,16 @@ identifier = "allow-save-diagnostics"
 description = "Allows the main window to call `save_diagnostics`."
 commands.allow = ["save_diagnostics"]
 
+[[permission]]
+identifier = "allow-diagnostics-auto-destination"
+description = "Allows the main window to call `diagnostics_auto_destination`."
+commands.allow = ["diagnostics_auto_destination"]
+
+[[permission]]
+identifier = "allow-previous-run-crashed"
+description = "Allows the main window to call `previous_run_crashed`."
+commands.allow = ["previous_run_crashed"]
+
 [[set]]
 identifier = "main-window-commands"
 description = "Every app command the main window uses."
@@ -166,4 +176,6 @@ permissions = [
   "allow-update-install-guard",
   "allow-prepare-for-update",
   "allow-save-diagnostics",
+  "allow-diagnostics-auto-destination",
+  "allow-previous-run-crashed",
 ]

@@ -30,6 +30,16 @@ fn save_diagnostics(_destination: String) -> &'static str {
 }
 
 #[tauri::command]
+fn diagnostics_auto_destination(_file_name: String) -> &'static str {
+    "/tmp/SSU 진단/x.zip"
+}
+
+#[tauri::command]
+fn previous_run_crashed() -> &'static str {
+    "no"
+}
+
+#[tauri::command]
 fn update_install_guard() -> &'static str {
     "guard"
 }
@@ -49,6 +59,8 @@ fn app() -> App<MockRuntime> {
             real_download_dir,
             open_url_in_browser,
             save_diagnostics,
+            diagnostics_auto_destination,
+            previous_run_crashed,
             update_install_guard,
             prepare_for_update
         ])
@@ -149,6 +161,11 @@ fn the_watch_pages_reach_nothing_but_the_signal_command() {
             "save_diagnostics",
             serde_json::json!({ "destination": "/tmp/x.zip" }),
         ),
+        (
+            "diagnostics_auto_destination",
+            serde_json::json!({ "fileName": "x.zip" }),
+        ),
+        ("previous_run_crashed", serde_json::json!({})),
         ("plugin:dialog|open", serde_json::json!({ "options": {} })),
         (
             "plugin:event|listen",
@@ -222,6 +239,24 @@ fn the_main_window_keeps_its_commands_but_has_no_watch_signal() {
             serde_json::json!({ "destination": "/tmp/x.zip" })
         ),
         Ok("saved".to_string())
+    );
+    assert_eq!(
+        call(
+            &main,
+            "local",
+            "diagnostics_auto_destination",
+            serde_json::json!({ "fileName": "x.zip" })
+        ),
+        Ok("/tmp/SSU 진단/x.zip".to_string())
+    );
+    assert_eq!(
+        call(
+            &main,
+            "local",
+            "previous_run_crashed",
+            serde_json::json!({})
+        ),
+        Ok("no".to_string())
     );
     assert!(
         call(&main, "local", "watch_signal", signal_body()).is_err(),
