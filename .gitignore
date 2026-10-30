@@ -60,3 +60,6 @@ frontend/src-tauri/resources/backend-sidecar/
 # Local symlinks to the project's agent-skills instructions (owner-approved chore)
 /AGENTS.md
 /CLAUDE.md
+
+# Development records live in the private repo cafitac/ssu-lecture-downloader-dev (cloned into .dev/ locally).
+/.dev/
