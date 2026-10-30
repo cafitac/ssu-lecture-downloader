@@ -72,6 +72,27 @@ export async function saveDiagnosticsFile(now: Date = new Date()): Promise<Saved
   return invoke<SavedDiagnostics>('save_diagnostics', { destination });
 }
 
+/**
+ * Saves the diagnostics zip without asking where: `~/Downloads/SSU 진단/ssu-진단-<yyyyMMdd-HHmm>.zip`
+ * (the shell creates the folder and adds ` (2)`, ` (3)` to a name that is taken). Nothing is
+ * uploaded. Resolves to `null` outside the desktop app.
+ */
+export async function saveDiagnosticsAutomatically(now: Date = new Date()): Promise<SavedDiagnostics | null> {
+  if (!isTauriRuntime()) return null;
+  const destination = await invoke<string>('diagnostics_auto_destination', { fileName: diagnosticsFileName(now) });
+  return invoke<SavedDiagnostics>('save_diagnostics', { destination });
+}
+
+/** Whether the previous run of the app ended abnormally. The shell clears the flag when it is read. */
+export async function previousRunCrashed(): Promise<boolean> {
+  if (!isTauriRuntime()) return false;
+  try {
+    return await invoke<boolean>('previous_run_crashed');
+  } catch {
+    return false;
+  }
+}
+
 export async function backendSupervisionStatus(): Promise<BackendSupervisionStatus> {
   if (!isTauriRuntime()) {
     return { state: 'ready', mode: 'browser', error: null, log_path: null };

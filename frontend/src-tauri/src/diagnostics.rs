@@ -567,6 +567,51 @@ fn build_info(
 // Command
 // ---------------------------------------------------------------------------
 
+/// The folder the automatic save (the "문제가 생겼어요" dialog) writes into, under Downloads.
+const AUTO_SAVE_FOLDER: &str = "SSU 진단";
+/// How many `(2)`, `(3)`, ... names are tried before giving up.
+const AUTO_SAVE_MAX_COPIES: u32 = 999;
+
+/// `folder/<file_name>`, or `folder/<name> (2).zip`, `(3)`, ... when that name is taken. Creates
+/// the folder. `file_name` must be a plain file name (no folder parts).
+pub(crate) fn unique_zip_destination(folder: &Path, file_name: &str) -> Result<PathBuf, String> {
+    let name = file_name.trim();
+    let plain = !name.is_empty()
+        && !name.starts_with('.')
+        && !name.contains(['/', '\\', '\0'])
+        && Path::new(name).file_name().is_some_and(|only| only == name);
+    if !plain {
+        return Err("저장할 파일 이름이 올바르지 않아요.".to_string());
+    }
+    let stem = name
+        .strip_suffix(".zip")
+        .or_else(|| name.strip_suffix(".ZIP"))
+        .unwrap_or(name);
+    fs::create_dir_all(folder).map_err(|error| io_error_text(&error))?;
+    let taken = |path: &Path| fs::symlink_metadata(path).is_ok();
+    let first = folder.join(format!("{stem}.zip"));
+    if !taken(&first) {
+        return Ok(first);
+    }
+    for copy in 2..=AUTO_SAVE_MAX_COPIES {
+        let candidate = folder.join(format!("{stem} ({copy}).zip"));
+        if !taken(&candidate) {
+            return Ok(candidate);
+        }
+    }
+    Err(NAME_TAKEN_ERROR.to_string())
+}
+
+/// Where the automatic save puts the zip: `~/Downloads/SSU 진단/<file_name>` (made unique, the
+/// folder created). The frontend then calls `save_diagnostics` with this path.
+#[tauri::command]
+pub(crate) fn diagnostics_auto_destination(file_name: String) -> Result<String, String> {
+    let home = crate::platform::real_user_home_dir()
+        .ok_or_else(|| "다운로드 폴더를 찾지 못했어요.".to_string())?;
+    let folder = home.join("Downloads").join(AUTO_SAVE_FOLDER);
+    unique_zip_destination(&folder, &file_name).map(|path| path.to_string_lossy().to_string())
+}
+
 /// `async` so that Tauri runs it off the main thread: reading, redacting and compressing the
 /// logs (and `sw_vers`) must not freeze the window.
 #[tauri::command(async)]
@@ -620,6 +665,34 @@ mod tests {
                 (entry.name().expect("entry name").to_string(), text)
             })
             .collect()
+    }
+
+    #[test]
+    fn automatic_destination_is_unique_and_creates_the_folder() {
+        let root = temp_dir("auto");
+        let folder = root.join("Downloads").join(AUTO_SAVE_FOLDER);
+        let first = unique_zip_destination(&folder, "ssu-진단-20261030-1105.zip").unwrap();
+        assert_eq!(first, folder.join("ssu-진단-20261030-1105.zip"));
+        assert!(folder.is_dir(), "the folder was created");
+        fs::write(&first, b"zip").unwrap();
+        let second = unique_zip_destination(&folder, "ssu-진단-20261030-1105.zip").unwrap();
+        assert_eq!(second, folder.join("ssu-진단-20261030-1105 (2).zip"));
+        fs::write(&second, b"zip").unwrap();
+        let third = unique_zip_destination(&folder, "ssu-진단-20261030-1105.zip").unwrap();
+        assert_eq!(third, folder.join("ssu-진단-20261030-1105 (3).zip"));
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn automatic_destination_refuses_names_with_folder_parts() {
+        let root = temp_dir("auto-bad");
+        for name in ["", "  ", "../x.zip", "a/b.zip", "a\\b.zip", ".hidden.zip"] {
+            assert!(unique_zip_destination(&root, name).is_err(), "{name:?}");
+        }
+        // A name without `.zip` gets it.
+        let path = unique_zip_destination(&root, "diag").unwrap();
+        assert_eq!(path, root.join("diag.zip"));
+        fs::remove_dir_all(root).ok();
     }
 
     #[test]
