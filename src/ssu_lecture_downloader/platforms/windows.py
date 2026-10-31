@@ -25,6 +25,9 @@ class WindowsPlatform:
     def chrome_profile_dir(self) -> Path:
         raise _todo("Chrome watch profile directory")
 
+    def chrome_legacy_cache_dir(self) -> Path | None:
+        return None
+
     def stt_config_path(self) -> Path:
         raise _todo("remote STT settings path")
 

@@ -1265,7 +1265,7 @@ def test_profile_trim_removes_only_regenerable_dirs(tmp_path, caplog, relative):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(b"protected\x00\xff")
     with caplog.at_level(logging.INFO, logger=cw.logger.name):
-        cw.trim_chrome_profile(tmp_path, threshold_bytes=1)
+        cw.trim_chrome_profile(tmp_path, threshold_bytes=90)
     assert not cache.exists()
     for name in protected:
         assert (tmp_path / name).read_bytes() == b"protected\x00\xff"
@@ -1351,3 +1351,93 @@ def test_deletion_failure_does_not_block_launch(tmp_path, monkeypatch):
     h.wait_thread()
     assert FakePopen.instances
     assert (cache / "data").read_bytes() == b"xx"
+
+
+def test_explicit_disk_cache_is_measured_and_trimmed(tmp_path):
+    assert f"--disk-cache-dir={tmp_path / 'disk-cache'}" in cw.build_chrome_args('chrome', tmp_path)
+    cache = tmp_path / 'disk-cache'
+    cache.mkdir()
+    (cache / 'data').write_bytes(b'123456')
+    assert cw._profile_size(tmp_path) == 6
+    cw.trim_chrome_profile(tmp_path, threshold_bytes=5)
+    assert not cache.exists()
+
+
+def test_trim_skips_when_residual_already_exceeds_threshold(tmp_path, caplog):
+    (tmp_path / 'Cookies').write_bytes(b'123456')
+    cache = tmp_path / 'disk-cache'
+    cache.mkdir()
+    (cache / 'data').write_bytes(b'123456')
+    cw.trim_chrome_profile(tmp_path, threshold_bytes=5)
+    assert (cache / 'data').exists()
+    assert 'profile_trim_skipped over_mb=' in caplog.text
+    assert 'reason=residual_over_threshold' in caplog.text
+    assert caplog.records[-1].levelno == logging.WARNING
+
+
+def test_trim_warns_when_deletion_leaves_profile_over_threshold(tmp_path, monkeypatch, caplog):
+    cache = tmp_path / 'disk-cache'
+    cache.mkdir()
+    (cache / 'data').write_bytes(b'123456')
+    def fail(path):
+        raise PermissionError('locked')
+    monkeypatch.setattr(cw.shutil, 'rmtree', fail)
+    cw.trim_chrome_profile(tmp_path, threshold_bytes=5)
+    assert any(r.levelno == logging.WARNING and 'after_mb=' in r.message for r in caplog.records)
+
+
+@pytest.mark.parametrize('state', ['stopped', 'running', 'unknown'])
+def test_legacy_cache_cleanup_requires_known_stopped_chrome(tmp_path, monkeypatch, state):
+    from types import SimpleNamespace
+    h = Harness(tmp_path, [FakePlayer()])
+    root = tmp_path / 'Caches' / 'bundle'
+    legacy = root / 'chrome-watch-profile'
+    for name in ('chrome-watch-profile', 'WebKit', 'other'):
+        (root / name).mkdir(parents=True)
+        (root / name / 'data').write_bytes(b'keep')
+    h.manager._app_paths = SimpleNamespace(chrome_legacy_cache_dir=lambda: legacy)
+    def find(profile):
+        if state == 'unknown':
+            raise RuntimeError('ps failed')
+        return 123 if state == 'running' else None
+    monkeypatch.setattr(h.manager._process_tree, 'find_main_pid', find)
+    calls = []
+    monkeypatch.setattr(cw, 'trim_chrome_profile', lambda profile: calls.append(profile))
+    h.manager.start(items(1))
+    assert h.finish()['state'] == 'finished'
+    h.wait_thread()
+    assert legacy.exists() == (state != 'stopped')
+    assert calls == ([h.profile] if state == 'stopped' else [])
+    assert (root / 'WebKit/data').read_bytes() == b'keep'
+    assert (root / 'other/data').read_bytes() == b'keep'
+
+
+@pytest.mark.parametrize('failure', ['exit', 'exception'])
+def test_macos_process_listing_failure_reports_unknown(monkeypatch, failure):
+    import subprocess
+    from ssu_lecture_downloader.platforms import macos
+    def run(*args, **kwargs):
+        if failure == 'exception':
+            raise OSError('ps failed')
+        return subprocess.CompletedProcess(args, 1, stdout='')
+    monkeypatch.setattr(macos.subprocess, 'run', run)
+    with pytest.raises(RuntimeError, match='state is unknown'):
+        macos.default_list_processes()
+
+
+def test_legacy_cache_path_is_platform_owned(monkeypatch, tmp_path):
+    monkeypatch.setattr(Path, 'home', lambda: tmp_path)
+    assert MacOSPlatform(environ={}).chrome_legacy_cache_dir() == (
+        tmp_path / 'Library/Caches/com.local.ssu-lecture-downloader/chrome-watch-profile'
+    )
+
+
+def test_unexpected_trim_failure_does_not_block_launch(tmp_path, monkeypatch):
+    h = Harness(tmp_path, [FakePlayer()])
+    monkeypatch.setattr(h.manager._process_tree, 'find_main_pid', lambda profile: None)
+    def fail(profile):
+        raise RuntimeError('unexpected maintenance failure')
+    monkeypatch.setattr(cw, 'trim_chrome_profile', fail)
+    h.manager.start(items(1))
+    assert h.finish()['state'] == 'finished'
+    h.wait_thread()

@@ -68,8 +68,10 @@ def build_background_launch(chrome: Path | str, chrome_args: list[str]) -> list[
 def default_list_processes() -> list[tuple[int, str]]:
     try:
         completed = subprocess.run(["ps", "-axo", "pid=,command="], capture_output=True, text=True, timeout=5, check=False)
-    except (OSError, subprocess.SubprocessError):
-        return []
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise RuntimeError("Chrome process state is unknown") from exc
+    if completed.returncode != 0:
+        raise RuntimeError("Chrome process state is unknown")
     rows: list[tuple[int, str]] = []
     for line in completed.stdout.splitlines():
         head, _, command = line.strip().partition(" ")
@@ -135,6 +137,9 @@ class MacOSPlatform:
         if override:
             return Path(override).expanduser()
         return self.app_data_dir() / "chrome-watch-profile"
+
+    def chrome_legacy_cache_dir(self) -> Path:
+        return Path.home() / "Library" / "Caches" / APP_IDENTIFIER / "chrome-watch-profile"
 
     def stt_config_path(self) -> Path:
         override = self._env().get(STT_CONFIG_PATH_ENV, "").strip()

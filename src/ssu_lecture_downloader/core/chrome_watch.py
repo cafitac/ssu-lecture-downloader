@@ -46,7 +46,7 @@ PROFILE_TRIM_THRESHOLD_BYTES = 200 * 1024 * 1024
 PROFILE_CACHE_DIRS = (
     "optimization_guide_model_store", "component_crx_cache", "WasmTtsEngine",
     "OnDeviceHeadSuggestModel", "BrowserMetrics", "GraphiteDawnCache",
-    "GrShaderCache", "ShaderCache", "Default/Cache", "Default/Code Cache",
+    "disk-cache", "GrShaderCache", "ShaderCache", "Default/Cache", "Default/Code Cache",
     "Default/GPUCache", "Default/DawnGraphiteCache", "Default/DawnWebGPUCache",
 )
 
@@ -114,6 +114,7 @@ def build_chrome_args(chrome: Path | str, profile_dir: Path | str, *, window_siz
     return [
         str(chrome),
         f"--user-data-dir={profile_dir}",
+        f"--disk-cache-dir={Path(profile_dir) / 'disk-cache'}",
         "--disk-cache-size=104857600",
         "--remote-debugging-port=0",
         "--no-first-run",
@@ -147,6 +148,17 @@ def trim_chrome_profile(profile_dir: Path, *, threshold_bytes: int = PROFILE_TRI
     before = _profile_size(profile_dir)
     if before <= threshold_bytes:
         return
+    candidates = [profile_dir / relative for relative in PROFILE_CACHE_DIRS
+                  if not (profile_dir / relative).is_symlink()
+                  and not (profile_dir / relative).parent.is_symlink()]
+    allowlisted = sum(_profile_size(path) for path in candidates)
+    residual = before - allowlisted
+    if residual > threshold_bytes:
+        logger.warning(
+            "chrome_watch profile_trim_skipped over_mb=%.2f reason=residual_over_threshold",
+            (residual - threshold_bytes) / (1024 * 1024),
+        )
+        return
     removed = 0
     for relative in PROFILE_CACHE_DIRS:
         path = profile_dir / relative
@@ -159,9 +171,12 @@ def trim_chrome_profile(profile_dir: Path, *, threshold_bytes: int = PROFILE_TRI
                 removed += 1
         except OSError:
             continue
+    after = _profile_size(profile_dir)
+    if after > threshold_bytes:
+        logger.warning("chrome_watch profile_trim after_mb=%.2f reason=still_over_threshold", after / (1024 * 1024))
     logger.info(
         "chrome_watch profile_trim before_mb=%.2f after_mb=%.2f removed=%s",
-        before / (1024 * 1024), _profile_size(profile_dir) / (1024 * 1024), removed,
+        before / (1024 * 1024), after / (1024 * 1024), removed,
     )
 
 
@@ -612,8 +627,12 @@ class ChromeWatchManager:
         self._kill_stale()
         try:
             if self._process_tree.find_main_pid(profile) is None:
+                if self._app_paths is not None:
+                    legacy = self._app_paths.chrome_legacy_cache_dir()
+                    if legacy is not None and not legacy.is_symlink() and not legacy.parent.is_symlink() and legacy.is_dir():
+                        shutil.rmtree(legacy)
                 trim_chrome_profile(profile)
-        except OSError:
+        except Exception:
             pass  # Cache maintenance must never prevent Chrome from launching.
         try:
             (profile / "DevToolsActivePort").unlink()
