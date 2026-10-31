@@ -135,6 +135,7 @@ def test_chrome_args_use_a_private_profile_a_free_debug_port_and_no_visibility_t
     args = cw.build_chrome_args("/c/Chrome", "/p/chrome-watch-profile")
     assert args[0] == "/c/Chrome"
     assert "--user-data-dir=/p/chrome-watch-profile" in args
+    assert "--disk-cache-size=104857600" in args
     assert "--remote-debugging-port=0" in args
     assert "--no-first-run" in args and "--no-default-browser-check" in args
     assert "--window-size=1000,700" in args
@@ -1250,3 +1251,357 @@ def test_failed_same_session_revival_retries_navigate_first(tmp_path, monkeypatc
     revival_navigation = max(i for i, command in enumerate(commands) if command["method"] == "Page.navigate")
     # No domain setup may run against the still-crashed target between attempts.
     assert not any(command["method"] in {"Page.enable", "Runtime.enable"} for command in commands[first_navigation + 1:revival_navigation])
+
+
+def test_profile_cache_allowlist():
+    assert cw.PROFILE_CACHE_DIRS == (
+        "disk-cache", "GraphiteDawnCache", "GrShaderCache", "ShaderCache", "Default/Cache",
+        "Default/Code Cache", "Default/GPUCache", "Default/DawnGraphiteCache", "Default/DawnWebGPUCache",
+        "BrowserMetrics", "optimization_guide_model_store", "component_crx_cache", "WasmTtsEngine",
+        "OnDeviceHeadSuggestModel",
+    )
+
+
+@pytest.mark.parametrize("relative", ["disk-cache", "Default/Cache", "optimization_guide_model_store"])
+def test_profile_trim_removes_only_regenerable_dirs(tmp_path, caplog, relative):
+    cache = tmp_path / relative
+    cache.mkdir(parents=True)
+    (cache / "data").write_bytes(b"cache" * 20)
+    protected = ("Default/Cookies", "Default/Local Storage/data", "Default/IndexedDB/data",
+                 "Default/Preferences", "Default/Login Data", "Safe Browsing/data", "WidevineCdm/data")
+    for name in protected:
+        path = tmp_path / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"protected\x00\xff")
+    with caplog.at_level(logging.INFO, logger=cw.logger.name):
+        cw.trim_chrome_profile(tmp_path, threshold_bytes=90)
+    assert not cache.exists()
+    for name in protected:
+        assert (tmp_path / name).read_bytes() == b"protected\x00\xff"
+    assert "chrome_watch profile_trim before_mb=" in caplog.text
+    assert "after_mb=" in caplog.text and "removed=1" in caplog.text
+
+
+@pytest.mark.parametrize("threshold", [5, 6])
+def test_profile_trim_leaves_small_profile_untouched(tmp_path, caplog, threshold):
+    cache = tmp_path / "Default/Cache"
+    cache.mkdir(parents=True)
+    data = cache / "data"
+    data.write_bytes(b"12345")
+    before = data.stat().st_mtime_ns
+    cw.trim_chrome_profile(tmp_path, threshold_bytes=threshold)
+    assert data.read_bytes() == b"12345"
+    assert data.stat().st_mtime_ns == before
+    assert "profile_trim" not in caplog.text
+
+
+@pytest.mark.parametrize("link_name", ["Default", "component_crx_cache", "Default/Cache"])
+def test_profile_trim_does_not_follow_symlinks(tmp_path, link_name):
+    profile = tmp_path / "profile"
+    profile.mkdir()
+    outside = tmp_path / "outside"
+    (outside / "Cache").mkdir(parents=True)
+    (outside / "Cache/data").write_bytes(b"keep")
+    link = profile / link_name
+    link.parent.mkdir(parents=True, exist_ok=True)
+    link.symlink_to(outside, target_is_directory=True)
+    (profile / "large").write_bytes(b"xx")
+    cw.trim_chrome_profile(profile, threshold_bytes=1)
+    assert link.is_symlink()
+    assert (outside / "Cache/data").read_bytes() == b"keep"
+
+
+def test_profile_trim_continues_after_deletion_error(tmp_path, monkeypatch, caplog):
+    for name in ("BrowserMetrics", "ShaderCache"):
+        (tmp_path / name).mkdir()
+        (tmp_path / name / "data").write_bytes(b"xx")
+    real_rmtree = cw.shutil.rmtree
+
+    def remove(path):
+        if path.name == "BrowserMetrics":
+            raise PermissionError("locked")
+        real_rmtree(path)
+
+    monkeypatch.setattr(cw.shutil, "rmtree", remove)
+    with caplog.at_level(logging.INFO, logger=cw.logger.name):
+        cw.trim_chrome_profile(tmp_path, threshold_bytes=1)
+    assert (tmp_path / "BrowserMetrics/data").read_bytes() == b"xx"
+    assert not (tmp_path / "ShaderCache").exists()
+    assert "removed=1" in caplog.text
+
+
+@pytest.mark.parametrize("running", [False, True])
+def test_launch_trims_only_when_chrome_is_not_running(tmp_path, monkeypatch, running):
+    h = Harness(tmp_path, [FakePlayer()])
+    calls = []
+    monkeypatch.setattr(h.manager._process_tree, "is_stopped", lambda profile: not running)
+    monkeypatch.setattr(cw, "trim_chrome_profile", lambda profile: calls.append(profile))
+    h.manager.start(items(1))
+    assert h.finish()["state"] == "finished"
+    h.wait_thread()
+    assert calls == ([] if running else [h.profile])
+
+
+def test_deletion_failure_does_not_block_launch(tmp_path, monkeypatch):
+    h = Harness(tmp_path, [FakePlayer()])
+    cache = h.profile / "Default/Cache"
+    cache.mkdir(parents=True)
+    (cache / "data").write_bytes(b"xx")
+    real_trim = cw.trim_chrome_profile
+    monkeypatch.setattr(cw, "trim_chrome_profile", lambda profile: real_trim(profile, threshold_bytes=1))
+    monkeypatch.setattr(h.manager._process_tree, "is_stopped", lambda profile: True)
+
+    def fail(path):
+        raise PermissionError("locked")
+
+    monkeypatch.setattr(cw.shutil, "rmtree", fail)
+    h.manager.start(items(1))
+    assert h.finish()["state"] == "finished"
+    h.wait_thread()
+    assert FakePopen.instances
+    assert (cache / "data").read_bytes() == b"xx"
+
+
+def test_explicit_disk_cache_is_measured_and_trimmed(tmp_path):
+    assert f"--disk-cache-dir={tmp_path / 'disk-cache'}" in cw.build_chrome_args('chrome', tmp_path)
+    cache = tmp_path / 'disk-cache'
+    cache.mkdir()
+    (cache / 'data').write_bytes(b'123456')
+    assert cw._profile_size(tmp_path) == 6
+    cw.trim_chrome_profile(tmp_path, threshold_bytes=5)
+    assert not cache.exists()
+
+
+def test_trim_skips_when_residual_already_exceeds_threshold(tmp_path, caplog):
+    (tmp_path / 'Cookies').write_bytes(b'123456')
+    cache = tmp_path / 'disk-cache'
+    cache.mkdir()
+    (cache / 'data').write_bytes(b'123456')
+    cw.trim_chrome_profile(tmp_path, threshold_bytes=5)
+    assert (cache / 'data').exists()
+    assert 'profile_trim_skipped over_mb=' in caplog.text
+    assert 'reason=residual_over_threshold' in caplog.text
+    assert caplog.records[-1].levelno == logging.WARNING
+
+
+def test_trim_warns_when_deletion_leaves_profile_over_threshold(tmp_path, monkeypatch, caplog):
+    cache = tmp_path / 'disk-cache'
+    cache.mkdir()
+    (cache / 'data').write_bytes(b'123456')
+    def fail(path):
+        raise PermissionError('locked')
+    monkeypatch.setattr(cw.shutil, 'rmtree', fail)
+    cw.trim_chrome_profile(tmp_path, threshold_bytes=5)
+    assert any(r.levelno == logging.WARNING and 'after_mb=' in r.message for r in caplog.records)
+
+
+@pytest.mark.parametrize('state', ['stopped', 'running', 'unknown', 'exception'])
+def test_legacy_cache_cleanup_requires_known_stopped_chrome(tmp_path, monkeypatch, caplog, state):
+    from types import SimpleNamespace
+    h = Harness(tmp_path, [FakePlayer()])
+    root = tmp_path / 'Caches' / 'bundle'
+    legacy = root / 'chrome-watch-profile'
+    for name in ('chrome-watch-profile', 'WebKit', 'other'):
+        (root / name).mkdir(parents=True)
+        (root / name / 'data').write_bytes(b'keep')
+    h.manager._app_paths = SimpleNamespace(chrome_legacy_cache_dir=lambda: legacy)
+    def find(profile):
+        if state == 'exception':
+            raise OSError('process lookup failed')
+        if state == 'unknown':
+            return None
+        return state == 'stopped'
+    monkeypatch.setattr(h.manager._process_tree, 'is_stopped', find)
+    calls = []
+    monkeypatch.setattr(cw, 'trim_chrome_profile', lambda profile: calls.append(profile))
+    h.manager.start(items(1))
+    assert h.finish()['state'] == 'finished'
+    h.wait_thread()
+    assert legacy.exists() == (state != 'stopped')
+    if state != 'stopped':
+        assert (legacy / 'data').read_bytes() == b'keep'
+        reason = 'process_running' if state == 'running' else 'process_unknown'
+        for step in ('legacy', 'trim'):
+            assert f'step={step} reason={reason}' in caplog.text
+    assert calls == ([h.profile] if state == 'stopped' else [])
+    assert (root / 'WebKit/data').read_bytes() == b'keep'
+    assert (root / 'other/data').read_bytes() == b'keep'
+
+
+@pytest.mark.parametrize('failure', ['exit', 'exception'])
+def test_macos_process_listing_failure_reports_unknown(monkeypatch, failure):
+    import subprocess
+    from ssu_lecture_downloader.platforms import macos
+    def run(*args, **kwargs):
+        if failure == 'exception':
+            raise OSError('ps failed')
+        return subprocess.CompletedProcess(args, 1, stdout='')
+    monkeypatch.setattr(macos.subprocess, 'run', run)
+    assert macos.default_list_processes() == []
+    platform = MacOSPlatform()
+    assert platform.find_main_pid(Path('/profile')) is None
+    assert platform.is_stopped(Path('/profile')) is None
+
+
+def test_legacy_cache_path_is_platform_owned(monkeypatch, tmp_path):
+    monkeypatch.setattr(Path, 'home', lambda: tmp_path)
+    assert MacOSPlatform(environ={}).chrome_legacy_cache_dir() == (
+        tmp_path / 'Library/Caches/com.local.ssu-lecture-downloader/chrome-watch-profile'
+    )
+
+
+def test_unexpected_trim_failure_does_not_block_launch(tmp_path, monkeypatch):
+    h = Harness(tmp_path, [FakePlayer()])
+    assert h.manager._app_paths is None
+    monkeypatch.setattr(h.manager._process_tree, 'is_stopped', lambda profile: True)
+    def fail(profile):
+        raise RuntimeError('unexpected maintenance failure')
+    monkeypatch.setattr(cw, 'trim_chrome_profile', fail)
+    h.manager.start(items(1))
+    assert h.finish()['state'] == 'finished'
+    h.wait_thread()
+
+
+def test_user_paths_are_isolated(tmp_path):
+    platform = MacOSPlatform()
+    for path in (Path.home(), platform.chrome_legacy_cache_dir(), platform.app_data_dir(), platform.default_download_dir()):
+        assert path == tmp_path or tmp_path in path.parents
+
+
+@pytest.mark.parametrize("relation", ["equal", "profile_inside", "legacy_inside"])
+def test_legacy_overlap_is_preserved(tmp_path, monkeypatch, caplog, relation):
+    from types import SimpleNamespace
+    h = Harness(tmp_path, [FakePlayer()])
+    legacy = {"equal": h.profile, "profile_inside": h.profile.parent, "legacy_inside": h.profile / "legacy"}[relation]
+    legacy.mkdir(parents=True, exist_ok=True)
+    marker = legacy / "keep"
+    marker.write_text("keep")
+    h.manager._app_paths = SimpleNamespace(chrome_legacy_cache_dir=lambda: legacy)
+    monkeypatch.setattr(h.manager._process_tree, "is_stopped", lambda profile: True)
+    h.manager.start(items(1))
+    assert h.finish()["state"] == "finished"
+    h.wait_thread()
+    assert marker.read_text() == "keep"
+    assert "step=legacy reason=profile_overlap" in caplog.text
+
+
+def test_legacy_failure_still_trims(tmp_path, monkeypatch, caplog):
+    from types import SimpleNamespace
+    h = Harness(tmp_path, [FakePlayer()])
+    legacy = tmp_path / "chrome-watch-profile"
+    legacy.mkdir()
+    h.manager._app_paths = SimpleNamespace(chrome_legacy_cache_dir=lambda: legacy)
+    monkeypatch.setattr(h.manager._process_tree, "is_stopped", lambda profile: True)
+    def fail(path):
+        raise PermissionError("private path must not be logged")
+    monkeypatch.setattr(cw.shutil, "rmtree", fail)
+    calls = []
+    monkeypatch.setattr(cw, "trim_chrome_profile", calls.append)
+    h.manager.start(items(1))
+    assert h.finish()["state"] == "finished"
+    h.wait_thread()
+    assert calls == [h.profile]
+    assert "step=legacy reason=removal_failed" in caplog.text
+    assert "private path" not in caplog.text
+
+
+def test_trim_preserves_models_when_cache_is_enough(tmp_path):
+    for name, data in (("disk-cache", b"123456"), ("optimization_guide_model_store", b"123")):
+        (tmp_path / name).mkdir()
+        (tmp_path / name / "data").write_bytes(data)
+    cw.trim_chrome_profile(tmp_path, threshold_bytes=5)
+    assert not (tmp_path / "disk-cache").exists()
+    assert (tmp_path / "optimization_guide_model_store/data").read_bytes() == b"123"
+
+
+@pytest.mark.parametrize("residual", [5, 6])
+def test_residual_threshold_boundary(tmp_path, residual):
+    (tmp_path / "Cookies").write_bytes(b"x" * residual)
+    (tmp_path / "disk-cache").mkdir()
+    (tmp_path / "disk-cache/data").write_bytes(b"xx")
+    cw.trim_chrome_profile(tmp_path, threshold_bytes=5)
+    assert (tmp_path / "disk-cache").exists() == (residual > 5)
+
+
+def test_disk_cache_symlink_not_counted_or_followed(tmp_path, caplog):
+    profile = tmp_path / "profile"
+    profile.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "data").write_bytes(b"secret")
+    (profile / "disk-cache").symlink_to(outside, target_is_directory=True)
+    assert cw._profile_size(profile) == 0
+    cw.trim_chrome_profile(profile, threshold_bytes=1)
+    assert (outside / "data").read_bytes() == b"secret"
+    assert "step=trim reason=symlink" in caplog.text
+
+
+def test_windows_has_no_legacy_cache():
+    from ssu_lecture_downloader.platforms.windows import WindowsPlatform
+    assert WindowsPlatform().chrome_legacy_cache_dir() is None
+
+
+def test_ps_failure_preserves_nonmaintenance_callers(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from ssu_lecture_downloader.platforms import macos
+    def fail(*args, **kwargs):
+        raise OSError("ps failed")
+    monkeypatch.setattr(macos.subprocess, "run", fail)
+    h = Harness(tmp_path, [FakePlayer()])
+    h.manager._background_launch = True
+    h.manager.start(items(1))
+    assert h.finish()["state"] == "finished"
+    h.wait_thread()
+    playback = object.__new__(cw._Playback)
+    playback.m = h.manager
+    assert playback._process_alive() is False
+    waited = []
+    h.manager._process_tree.terminate(SimpleNamespace(wait=lambda **kw: waited.append(kw)), chrome_pid=None,
+                                    profile_dir=h.profile, background=True, grace=0)
+    assert waited == [{"timeout": 5}]
+
+
+@pytest.mark.parametrize("case", ["symlinked_parent", "unexpected_name"])
+def test_legacy_unsafe_path_is_preserved(tmp_path, monkeypatch, caplog, case):
+    from types import SimpleNamespace
+    h = Harness(tmp_path, [FakePlayer()])
+    root = tmp_path / "cache-root"
+    root.mkdir()
+    if case == "symlinked_parent":
+        link = tmp_path / "cache-link"
+        link.symlink_to(root, target_is_directory=True)
+        legacy = link / "chrome-watch-profile"
+        reason = "symlink"
+    else:
+        legacy = root / "other-profile"
+        reason = "unexpected_name"
+    legacy.mkdir()
+    marker = legacy / "keep"
+    marker.write_bytes(b"keep")
+    h.manager._app_paths = SimpleNamespace(chrome_legacy_cache_dir=lambda: legacy)
+    monkeypatch.setattr(h.manager._process_tree, "is_stopped", lambda profile: True)
+    h.manager.start(items(1))
+    assert h.finish()["state"] == "finished"
+    h.wait_thread()
+    assert marker.read_bytes() == b"keep"
+    assert f"step=legacy reason={reason}" in caplog.text
+
+
+def test_trim_measures_profile_only_before_and_after(tmp_path, monkeypatch):
+    for name in ("disk-cache", "ShaderCache", "optimization_guide_model_store"):
+        (tmp_path / name).mkdir()
+        (tmp_path / name / "data").write_bytes(b"123")
+    real_size = cw._profile_size
+    calls = []
+
+    def measure(path):
+        calls.append(path)
+        return real_size(path)
+
+    monkeypatch.setattr(cw, "_profile_size", measure)
+    cw.trim_chrome_profile(tmp_path, threshold_bytes=3)
+    assert calls.count(tmp_path) == 2
+    assert all(calls.count(tmp_path / name) == 1 for name in cw.PROFILE_CACHE_DIRS)
+    assert not (tmp_path / "disk-cache").exists()
+    assert not (tmp_path / "ShaderCache").exists()
+    assert (tmp_path / "optimization_guide_model_store/data").read_bytes() == b"123"

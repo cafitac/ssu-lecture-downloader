@@ -29,3 +29,10 @@ def no_real_chrome(monkeypatch, tmp_path_factory):
     monkeypatch.setenv(PROFILE_DIR_ENV, str(tmp_path_factory.mktemp("chrome-profile") / "chrome-watch-profile"))
     # The desktop shell exports this for the real app; tests must not inherit it.
     monkeypatch.delenv(APP_DATA_DIR_ENV, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def isolated_user_directories(monkeypatch, tmp_path):
+    """All HOME fallbacks and legacy maintenance stay inside this test's sandbox."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("SSU_CHROME_LEGACY_CACHE_DIR", str(tmp_path / "legacy-cache"))

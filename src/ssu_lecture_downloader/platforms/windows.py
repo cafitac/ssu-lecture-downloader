@@ -25,6 +25,9 @@ class WindowsPlatform:
     def chrome_profile_dir(self) -> Path:
         raise _todo("Chrome watch profile directory")
 
+    def chrome_legacy_cache_dir(self) -> Path | None:
+        return None
+
     def stt_config_path(self) -> Path:
         raise _todo("remote STT settings path")
 
@@ -41,6 +44,9 @@ class WindowsPlatform:
 
     def find_main_pid(self, profile_dir: Path) -> int | None:
         raise _todo("finding the Chrome main process")
+
+    def is_stopped(self, profile_dir: Path) -> bool | None:
+        return None
 
     def terminate(self, handle: ProcessHandle, *, chrome_pid: int | None, profile_dir: Path, background: bool, grace: float) -> None:
         raise _todo("stopping the Chrome process tree")

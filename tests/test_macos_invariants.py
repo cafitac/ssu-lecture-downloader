@@ -136,6 +136,8 @@ def test_chrome_args_exact_argv():
     assert cw.build_chrome_args(chrome, profile) == [
         chrome,
         f"--user-data-dir={profile}",
+        f"--disk-cache-dir={profile}/disk-cache",
+        "--disk-cache-size=104857600",
         "--remote-debugging-port=0",
         "--no-first-run",
         "--no-default-browser-check",
