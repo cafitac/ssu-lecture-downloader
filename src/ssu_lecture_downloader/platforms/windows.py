@@ -45,6 +45,9 @@ class WindowsPlatform:
     def find_main_pid(self, profile_dir: Path) -> int | None:
         raise _todo("finding the Chrome main process")
 
+    def is_stopped(self, profile_dir: Path) -> bool | None:
+        return None
+
     def terminate(self, handle: ProcessHandle, *, chrome_pid: int | None, profile_dir: Path, background: bool, grace: float) -> None:
         raise _todo("stopping the Chrome process tree")
 

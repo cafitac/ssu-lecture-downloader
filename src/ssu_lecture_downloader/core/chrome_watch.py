@@ -44,10 +44,10 @@ MAX_QUEUE_ITEMS = 200
 WINDOW_SIZE = (1000, 700)
 PROFILE_TRIM_THRESHOLD_BYTES = 200 * 1024 * 1024
 PROFILE_CACHE_DIRS = (
-    "optimization_guide_model_store", "component_crx_cache", "WasmTtsEngine",
-    "OnDeviceHeadSuggestModel", "BrowserMetrics", "GraphiteDawnCache",
-    "disk-cache", "GrShaderCache", "ShaderCache", "Default/Cache", "Default/Code Cache",
-    "Default/GPUCache", "Default/DawnGraphiteCache", "Default/DawnWebGPUCache",
+    "disk-cache", "GraphiteDawnCache", "GrShaderCache", "ShaderCache", "Default/Cache",
+    "Default/Code Cache", "Default/GPUCache", "Default/DawnGraphiteCache", "Default/DawnWebGPUCache",
+    "BrowserMetrics", "optimization_guide_model_store", "component_crx_cache", "WasmTtsEngine",
+    "OnDeviceHeadSuggestModel",
 )
 
 STALL_SKIP_REASON = "재생이 멈춰 건너뛰었어요"
@@ -141,10 +141,19 @@ def _profile_size(profile_dir: Path) -> int:
     return total
 
 
+def _maintenance_warning(step: str, reason: str) -> None:
+    logger.warning("chrome_watch maintenance_skipped step=%s reason=%s", step, reason)
+
+
 def trim_chrome_profile(profile_dir: Path, *, threshold_bytes: int = PROFILE_TRIM_THRESHOLD_BYTES) -> None:
     """Best-effort cleanup of regenerable directories; caller must check Chrome is stopped."""
     if profile_dir.is_symlink():
+        _maintenance_warning("trim", "symlink")
         return
+    for relative in PROFILE_CACHE_DIRS:
+        path = profile_dir / relative
+        if path.is_symlink() or path.parent.is_symlink():
+            _maintenance_warning("trim", "symlink")
     before = _profile_size(profile_dir)
     if before <= threshold_bytes:
         return
@@ -154,6 +163,7 @@ def trim_chrome_profile(profile_dir: Path, *, threshold_bytes: int = PROFILE_TRI
     allowlisted = sum(_profile_size(path) for path in candidates)
     residual = before - allowlisted
     if residual > threshold_bytes:
+        _maintenance_warning("trim", "residual_over_threshold")
         logger.warning(
             "chrome_watch profile_trim_skipped over_mb=%.2f reason=residual_over_threshold",
             (residual - threshold_bytes) / (1024 * 1024),
@@ -161,6 +171,8 @@ def trim_chrome_profile(profile_dir: Path, *, threshold_bytes: int = PROFILE_TRI
         return
     removed = 0
     for relative in PROFILE_CACHE_DIRS:
+        if _profile_size(profile_dir) <= threshold_bytes:
+            break
         path = profile_dir / relative
         try:
             # In particular, Default itself must not redirect us outside the profile.
@@ -170,7 +182,7 @@ def trim_chrome_profile(profile_dir: Path, *, threshold_bytes: int = PROFILE_TRI
                 shutil.rmtree(path)
                 removed += 1
         except OSError:
-            continue
+            _maintenance_warning("trim", "removal_failed")
     after = _profile_size(profile_dir)
     if after > threshold_bytes:
         logger.warning("chrome_watch profile_trim after_mb=%.2f reason=still_over_threshold", after / (1024 * 1024))
@@ -626,14 +638,30 @@ class ChromeWatchManager:
         profile.mkdir(parents=True, exist_ok=True)
         self._kill_stale()
         try:
-            if self._process_tree.find_main_pid(profile) is None:
+            stopped = self._process_tree.is_stopped(profile)
+        except Exception:
+            stopped = None
+        if stopped is True:
+            try:
                 if self._app_paths is not None:
                     legacy = self._app_paths.chrome_legacy_cache_dir()
-                    if legacy is not None and not legacy.is_symlink() and not legacy.parent.is_symlink() and legacy.is_dir():
-                        shutil.rmtree(legacy)
+                    if legacy is not None:
+                        resolved, live = legacy.resolve(), profile.resolve()
+                        if legacy.is_symlink() or any(p.is_symlink() for p in legacy.parents):
+                            _maintenance_warning("legacy", "symlink")
+                        elif resolved == live or resolved in live.parents or live in resolved.parents:
+                            _maintenance_warning("legacy", "profile_overlap")
+                        elif legacy.is_dir():
+                            shutil.rmtree(legacy)
+            except Exception:
+                _maintenance_warning("legacy", "removal_failed")
+            try:
                 trim_chrome_profile(profile)
-        except Exception:
-            pass  # Cache maintenance must never prevent Chrome from launching.
+            except Exception:
+                _maintenance_warning("trim", "failed")
+        else:
+            for step in ("legacy", "trim"):
+                _maintenance_warning(step, "process_unknown" if stopped is None else "process_running")
         try:
             (profile / "DevToolsActivePort").unlink()
         except FileNotFoundError:

@@ -65,7 +65,7 @@ def build_background_launch(chrome: Path | str, chrome_args: list[str]) -> list[
     return ["/usr/bin/open", "-g", "-n", "-W", "-a", str(bundle), "--args", *chrome_args[1:]]
 
 
-def default_list_processes() -> list[tuple[int, str]]:
+def _query_processes() -> list[tuple[int, str]]:
     try:
         completed = subprocess.run(["ps", "-axo", "pid=,command="], capture_output=True, text=True, timeout=5, check=False)
     except (OSError, subprocess.SubprocessError) as exc:
@@ -78,6 +78,13 @@ def default_list_processes() -> list[tuple[int, str]]:
         if head.isdigit():
             rows.append((int(head), command.strip()))
     return rows
+
+
+def default_list_processes() -> list[tuple[int, str]]:
+    try:
+        return _query_processes()
+    except RuntimeError:
+        return []
 
 
 def find_chrome_main_pid(processes: list[tuple[int, str]], profile_dir: Path | str) -> int | None:
@@ -119,6 +126,7 @@ class MacOSPlatform:
         self._killpg = killpg or default_killpg
         self._process_command = process_command or default_process_command
         self._list_processes = list_processes or default_list_processes
+        self._maintenance_processes = list_processes or _query_processes
         self._clock = clock
         self._sleep = sleep
 
@@ -139,6 +147,9 @@ class MacOSPlatform:
         return self.app_data_dir() / "chrome-watch-profile"
 
     def chrome_legacy_cache_dir(self) -> Path:
+        override = self._env().get("SSU_CHROME_LEGACY_CACHE_DIR", "").strip()
+        if override:
+            return Path(override).expanduser()
         return Path.home() / "Library" / "Caches" / APP_IDENTIFIER / "chrome-watch-profile"
 
     def stt_config_path(self) -> Path:
@@ -173,6 +184,12 @@ class MacOSPlatform:
 
     def find_main_pid(self, profile_dir: Path) -> int | None:
         return find_chrome_main_pid(self._list_processes(), profile_dir)
+
+    def is_stopped(self, profile_dir: Path) -> bool | None:
+        try:
+            return find_chrome_main_pid(self._maintenance_processes(), profile_dir) is None
+        except RuntimeError:
+            return None
 
     def terminate(self, handle: ProcessHandle, *, chrome_pid: int | None, profile_dir: Path, background: bool, grace: float) -> None:
         """SIGTERM the whole process group, then SIGKILL what is left. The profile stays."""
