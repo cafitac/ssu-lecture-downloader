@@ -22,8 +22,10 @@ from __future__ import annotations
 import atexit
 import json
 import logging
+import os
 import queue
 import re
+import shutil
 import threading
 import time
 import uuid
@@ -40,6 +42,13 @@ logger = logging.getLogger("ssu_lecture_downloader.chrome_watch")
 
 MAX_QUEUE_ITEMS = 200
 WINDOW_SIZE = (1000, 700)
+PROFILE_TRIM_THRESHOLD_BYTES = 200 * 1024 * 1024
+PROFILE_CACHE_DIRS = (
+    "optimization_guide_model_store", "component_crx_cache", "WasmTtsEngine",
+    "OnDeviceHeadSuggestModel", "BrowserMetrics", "GraphiteDawnCache",
+    "GrShaderCache", "ShaderCache", "Default/Cache", "Default/Code Cache",
+    "Default/GPUCache", "Default/DawnGraphiteCache", "Default/DawnWebGPUCache",
+)
 
 STALL_SKIP_REASON = "재생이 멈춰 건너뛰었어요"
 USER_SKIP_REASON = "직접 넘겼어요"
@@ -105,6 +114,7 @@ def build_chrome_args(chrome: Path | str, profile_dir: Path | str, *, window_siz
     return [
         str(chrome),
         f"--user-data-dir={profile_dir}",
+        "--disk-cache-size=104857600",
         "--remote-debugging-port=0",
         "--no-first-run",
         "--no-default-browser-check",
@@ -114,6 +124,45 @@ def build_chrome_args(chrome: Path | str, profile_dir: Path | str, *, window_siz
         "--new-window",
         "about:blank",
     ]
+
+
+def _profile_size(profile_dir: Path) -> int:
+    total = 0
+    for root, dirs, files in os.walk(profile_dir, followlinks=False):
+        dirs[:] = [name for name in dirs if not (Path(root) / name).is_symlink()]
+        for name in files:
+            path = Path(root) / name
+            try:
+                if not path.is_symlink():
+                    total += path.stat().st_size
+            except OSError:
+                continue
+    return total
+
+
+def trim_chrome_profile(profile_dir: Path, *, threshold_bytes: int = PROFILE_TRIM_THRESHOLD_BYTES) -> None:
+    """Best-effort cleanup of regenerable directories; caller must check Chrome is stopped."""
+    if profile_dir.is_symlink():
+        return
+    before = _profile_size(profile_dir)
+    if before <= threshold_bytes:
+        return
+    removed = 0
+    for relative in PROFILE_CACHE_DIRS:
+        path = profile_dir / relative
+        try:
+            # In particular, Default itself must not redirect us outside the profile.
+            if path.is_symlink() or path.parent.is_symlink():
+                continue
+            if path.is_dir():
+                shutil.rmtree(path)
+                removed += 1
+        except OSError:
+            continue
+    logger.info(
+        "chrome_watch profile_trim before_mb=%.2f after_mb=%.2f removed=%s",
+        before / (1024 * 1024), _profile_size(profile_dir) / (1024 * 1024), removed,
+    )
 
 
 def parse_devtools_active_port(text: str) -> tuple[int, str] | None:
@@ -561,6 +610,11 @@ class ChromeWatchManager:
         profile = self.profile_dir
         profile.mkdir(parents=True, exist_ok=True)
         self._kill_stale()
+        try:
+            if self._process_tree.find_main_pid(profile) is None:
+                trim_chrome_profile(profile)
+        except OSError:
+            pass  # Cache maintenance must never prevent Chrome from launching.
         try:
             (profile / "DevToolsActivePort").unlink()
         except FileNotFoundError:

@@ -80,7 +80,7 @@ def default_list_processes() -> list[tuple[int, str]]:
 
 def find_chrome_main_pid(processes: list[tuple[int, str]], profile_dir: Path | str) -> int | None:
     """The browser process of the dedicated profile (helpers carry a --type= flag)."""
-    marker = f"--user-data-dir={profile_dir}"
+    marker = f"--user-data-dir={profile_dir}"  # disk-footprint: ok process match only; profile trimmed by chrome_watch profile_trim
     for pid, command in processes:
         if marker in command and "--type=" not in command and not command.startswith("/usr/bin/open"):
             return pid

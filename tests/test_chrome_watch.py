@@ -135,6 +135,7 @@ def test_chrome_args_use_a_private_profile_a_free_debug_port_and_no_visibility_t
     args = cw.build_chrome_args("/c/Chrome", "/p/chrome-watch-profile")
     assert args[0] == "/c/Chrome"
     assert "--user-data-dir=/p/chrome-watch-profile" in args
+    assert "--disk-cache-size=104857600" in args
     assert "--remote-debugging-port=0" in args
     assert "--no-first-run" in args and "--no-default-browser-check" in args
     assert "--window-size=1000,700" in args
@@ -1250,3 +1251,103 @@ def test_failed_same_session_revival_retries_navigate_first(tmp_path, monkeypatc
     revival_navigation = max(i for i, command in enumerate(commands) if command["method"] == "Page.navigate")
     # No domain setup may run against the still-crashed target between attempts.
     assert not any(command["method"] in {"Page.enable", "Runtime.enable"} for command in commands[first_navigation + 1:revival_navigation])
+
+
+@pytest.mark.parametrize("relative", cw.PROFILE_CACHE_DIRS)
+def test_profile_trim_removes_only_regenerable_dirs(tmp_path, caplog, relative):
+    cache = tmp_path / relative
+    cache.mkdir(parents=True)
+    (cache / "data").write_bytes(b"cache" * 20)
+    protected = ("Default/Cookies", "Default/Local Storage/data", "Default/IndexedDB/data",
+                 "Default/Preferences", "Default/Login Data", "Safe Browsing/data", "WidevineCdm/data")
+    for name in protected:
+        path = tmp_path / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"protected\x00\xff")
+    with caplog.at_level(logging.INFO, logger=cw.logger.name):
+        cw.trim_chrome_profile(tmp_path, threshold_bytes=1)
+    assert not cache.exists()
+    for name in protected:
+        assert (tmp_path / name).read_bytes() == b"protected\x00\xff"
+    assert "chrome_watch profile_trim before_mb=" in caplog.text
+    assert "after_mb=" in caplog.text and "removed=1" in caplog.text
+
+
+@pytest.mark.parametrize("threshold", [5, 6])
+def test_profile_trim_leaves_small_profile_untouched(tmp_path, caplog, threshold):
+    cache = tmp_path / "Default/Cache"
+    cache.mkdir(parents=True)
+    data = cache / "data"
+    data.write_bytes(b"12345")
+    before = data.stat().st_mtime_ns
+    cw.trim_chrome_profile(tmp_path, threshold_bytes=threshold)
+    assert data.read_bytes() == b"12345"
+    assert data.stat().st_mtime_ns == before
+    assert "profile_trim" not in caplog.text
+
+
+@pytest.mark.parametrize("link_name", ["Default", "component_crx_cache", "Default/Cache"])
+def test_profile_trim_does_not_follow_symlinks(tmp_path, link_name):
+    profile = tmp_path / "profile"
+    profile.mkdir()
+    outside = tmp_path / "outside"
+    (outside / "Cache").mkdir(parents=True)
+    (outside / "Cache/data").write_bytes(b"keep")
+    link = profile / link_name
+    link.parent.mkdir(parents=True, exist_ok=True)
+    link.symlink_to(outside, target_is_directory=True)
+    (profile / "large").write_bytes(b"xx")
+    cw.trim_chrome_profile(profile, threshold_bytes=1)
+    assert link.is_symlink()
+    assert (outside / "Cache/data").read_bytes() == b"keep"
+
+
+def test_profile_trim_continues_after_deletion_error(tmp_path, monkeypatch, caplog):
+    for name in ("BrowserMetrics", "ShaderCache"):
+        (tmp_path / name).mkdir()
+        (tmp_path / name / "data").write_bytes(b"xx")
+    real_rmtree = cw.shutil.rmtree
+
+    def remove(path):
+        if path.name == "BrowserMetrics":
+            raise PermissionError("locked")
+        real_rmtree(path)
+
+    monkeypatch.setattr(cw.shutil, "rmtree", remove)
+    with caplog.at_level(logging.INFO, logger=cw.logger.name):
+        cw.trim_chrome_profile(tmp_path, threshold_bytes=1)
+    assert (tmp_path / "BrowserMetrics/data").read_bytes() == b"xx"
+    assert not (tmp_path / "ShaderCache").exists()
+    assert "removed=1" in caplog.text
+
+
+@pytest.mark.parametrize("running", [False, True])
+def test_launch_trims_only_when_chrome_is_not_running(tmp_path, monkeypatch, running):
+    h = Harness(tmp_path, [FakePlayer()])
+    calls = []
+    monkeypatch.setattr(h.manager._process_tree, "find_main_pid", lambda profile: 123 if running else None)
+    monkeypatch.setattr(cw, "trim_chrome_profile", lambda profile: calls.append(profile))
+    h.manager.start(items(1))
+    assert h.finish()["state"] == "finished"
+    h.wait_thread()
+    assert calls == ([] if running else [h.profile])
+
+
+def test_deletion_failure_does_not_block_launch(tmp_path, monkeypatch):
+    h = Harness(tmp_path, [FakePlayer()])
+    cache = h.profile / "Default/Cache"
+    cache.mkdir(parents=True)
+    (cache / "data").write_bytes(b"xx")
+    real_trim = cw.trim_chrome_profile
+    monkeypatch.setattr(cw, "trim_chrome_profile", lambda profile: real_trim(profile, threshold_bytes=1))
+    monkeypatch.setattr(h.manager._process_tree, "find_main_pid", lambda profile: None)
+
+    def fail(path):
+        raise PermissionError("locked")
+
+    monkeypatch.setattr(cw.shutil, "rmtree", fail)
+    h.manager.start(items(1))
+    assert h.finish()["state"] == "finished"
+    h.wait_thread()
+    assert FakePopen.instances
+    assert (cache / "data").read_bytes() == b"xx"
