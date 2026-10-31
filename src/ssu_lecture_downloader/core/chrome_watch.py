@@ -160,7 +160,8 @@ def trim_chrome_profile(profile_dir: Path, *, threshold_bytes: int = PROFILE_TRI
     candidates = [profile_dir / relative for relative in PROFILE_CACHE_DIRS
                   if not (profile_dir / relative).is_symlink()
                   and not (profile_dir / relative).parent.is_symlink()]
-    allowlisted = sum(_profile_size(path) for path in candidates)
+    candidate_sizes = {path: _profile_size(path) for path in candidates}
+    allowlisted = sum(candidate_sizes.values())
     residual = before - allowlisted
     if residual > threshold_bytes:
         _maintenance_warning("trim", "residual_over_threshold")
@@ -170,8 +171,9 @@ def trim_chrome_profile(profile_dir: Path, *, threshold_bytes: int = PROFILE_TRI
         )
         return
     removed = 0
+    remaining = before
     for relative in PROFILE_CACHE_DIRS:
-        if _profile_size(profile_dir) <= threshold_bytes:
+        if remaining <= threshold_bytes:
             break
         path = profile_dir / relative
         try:
@@ -181,6 +183,7 @@ def trim_chrome_profile(profile_dir: Path, *, threshold_bytes: int = PROFILE_TRI
             if path.is_dir():
                 shutil.rmtree(path)
                 removed += 1
+                remaining -= candidate_sizes.get(path, 0)
         except OSError:
             _maintenance_warning("trim", "removal_failed")
     after = _profile_size(profile_dir)
@@ -651,6 +654,8 @@ class ChromeWatchManager:
                             _maintenance_warning("legacy", "symlink")
                         elif resolved == live or resolved in live.parents or live in resolved.parents:
                             _maintenance_warning("legacy", "profile_overlap")
+                        elif legacy.name != "chrome-watch-profile":
+                            _maintenance_warning("legacy", "unexpected_name")
                         elif legacy.is_dir():
                             shutil.rmtree(legacy)
             except Exception:
