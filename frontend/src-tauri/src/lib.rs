@@ -95,8 +95,14 @@ fn folder_to_open(path: &Path) -> PathBuf {
         path.parent()
             .map(Path::to_path_buf)
             .unwrap_or_else(|| path.to_path_buf())
-    } else {
+    } else if path.is_dir() {
         path.to_path_buf()
+    } else {
+        path.ancestors()
+            .skip(1)
+            .find(|ancestor| ancestor.is_dir())
+            .unwrap_or(path)
+            .to_path_buf()
     }
 }
 
@@ -295,6 +301,58 @@ mod tests {
         assert_eq!(folder_to_open(&file), root);
 
         fs::remove_file(&file).ok();
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn folder_to_open_uses_parent_when_file_was_deleted() {
+        let root = std::env::temp_dir().join(format!(
+            "ssu-lecture-downloader-deleted-file-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).expect("create temp dir");
+        let file = root.join("lecture.mp4");
+        fs::write(&file, b"test").expect("write temp file");
+        fs::remove_file(&file).expect("delete temp file");
+
+        assert_eq!(folder_to_open(&file), root);
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn folder_to_open_uses_nearest_existing_ancestor_directory() {
+        let root = std::env::temp_dir().join(format!(
+            "ssu-lecture-downloader-missing-ancestors-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).expect("create temp dir");
+        let file = root.join("a").join("b").join("c.mp4");
+
+        assert_eq!(folder_to_open(&file), root);
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn folder_to_open_keeps_existing_directory() {
+        let root = std::env::temp_dir().join(format!(
+            "ssu-lecture-downloader-existing-directory-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).expect("create temp dir");
+
+        assert_eq!(folder_to_open(&root), root);
+
         fs::remove_dir_all(root).ok();
     }
 }
