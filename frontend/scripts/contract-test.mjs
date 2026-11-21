@@ -619,6 +619,36 @@ const progress = await import('../src/lib/progress.ts');
   // Local transcription keeps its plain label.
   row = run([{ stage: 'transcript_progress', module_item_id: 1, progress_percent: 30 }]);
   assert.deepEqual([row.label, row.note], ['자막 만드는 중', undefined]);
+  // A transcript-only lecture removes its audio and video at cleanup; the removed paths never become the row's path.
+  row = run([
+    { stage: 'transcript_done', module_item_id: 1, output_path: '/x/lecture/transcript.txt' },
+    { stage: 'intermediate_audio_removed', module_item_id: 1, output_path: '/x/lecture/audio.mp3' },
+    { stage: 'source_video_removed', module_item_id: 1, output_path: '/x/lecture/video.mp4' },
+    { stage: 'artifact_item_done', module_item_id: 1 },
+  ]);
+  assert.deepEqual([row.phase, row.outputPath], ['done', '/x/lecture/transcript.txt']);
+  // The finished job's download result names the same removed video; it loses to the remaining transcript.
+  const removedEvents = [
+    { stage: 'transcript_done', module_item_id: 1, output_path: '/x/lecture/transcript.txt' },
+    { stage: 'source_video_removed', module_item_id: 1, output_path: '/x/lecture/video.mp4' },
+    { stage: 'artifact_item_done', module_item_id: 1 },
+  ];
+  const finished = (videoPath) => buildJobRows(plan, { job_id: 'artifact-1', status: 'succeeded', cancel_requested: false, progress: removedEvents, error_code: null, result: { artifacts: [], download: { ok: true, module_item_id: 1, output_path: videoPath } } })[0];
+  assert.equal(finished('/x/lecture/video.mp4').outputPath, '/x/lecture/transcript.txt');
+  // A result path that cleanup did not remove still wins.
+  assert.equal(finished('/x/lecture/kept.mp4').outputPath, '/x/lecture/kept.mp4');
+  // An event path that cleanup removed loses to a result path that still exists.
+  const audioOnly = [
+    { stage: 'audio_done', module_item_id: 1, output_path: '/x/lecture/audio.mp3' },
+    { stage: 'transcript_done', module_item_id: 1, output_path: null },
+    { stage: 'intermediate_audio_removed', module_item_id: 1, output_path: '/x/lecture/audio.mp3' },
+    { stage: 'artifact_item_done', module_item_id: 1 },
+  ];
+  const withResult = (events, videoPath) => buildJobRows(plan, { job_id: 'artifact-1', status: 'succeeded', cancel_requested: false, progress: events, error_code: null, result: { artifacts: [], download: { ok: true, module_item_id: 1, output_path: videoPath } } })[0];
+  assert.equal(withResult(audioOnly, '/x/lecture/kept.mp4').outputPath, '/x/lecture/kept.mp4');
+  // When every known path was removed, one of them stays as a last resort: the lecture folder is still right.
+  const allRemoved = [...audioOnly.slice(0, 3), { stage: 'source_video_removed', module_item_id: 1, output_path: '/x/lecture/video.mp4' }, audioOnly[3]];
+  assert.equal(withResult(allRemoved, '/x/lecture/video.mp4').outputPath, '/x/lecture/video.mp4');
   assert.ok(readFileSync(new URL('../src/components/DownloadDrawer.tsx', import.meta.url), 'utf8').includes('row.note'));
 
   // Remote error codes read as plain Korean.

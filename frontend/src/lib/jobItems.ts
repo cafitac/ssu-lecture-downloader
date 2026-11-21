@@ -120,6 +120,8 @@ interface Accumulated {
   total?: number;
   failure: string | null;
   outputPath?: string;
+  /** Files that cleanup removed (`*_removed` events); the row's path avoids them while another path is known. */
+  removedPaths?: Set<string>;
   /** Subtitles are made by the remote server (changes the label). */
   remote?: boolean;
   note?: string;
@@ -175,7 +177,9 @@ function hasReachedAudio(seen: Set<string>): boolean {
 function applyEvent(state: Accumulated, event: ProgressEvent, ctx: StepContext): void {
   const stage = event.stage;
   state.seen.add(stage);
-  if (event.output_path) state.outputPath = event.output_path;
+  // Cleanup events (`*_removed`) name a file that no longer exists, so they never set the row's path.
+  if (event.output_path && stage.endsWith('_removed')) (state.removedPaths ??= new Set()).add(event.output_path);
+  else if (event.output_path) state.outputPath = event.output_path;
   if (typeof event.total_bytes === 'number' && event.total_bytes > 0) state.total = event.total_bytes;
   if (typeof event.bytes_written === 'number') state.written = event.bytes_written;
 
@@ -464,7 +468,10 @@ export function buildJobRows(plan: JobPlan, job: DownloadJobStatus | null): JobR
     // A failure of a running job may still be retried by the backend; only the sources below are final.
     const jobEnded = job !== null && TERMINAL_DOWNLOAD_STATUSES.has(job.status);
     const isFinal = phase === 'failed' ? state.locked || finalState === 'failed' || jobEnded : FINAL_PHASES.has(phase);
-    const outputPath = result?.output_path ?? state.outputPath;
+    // A transcript-only lecture deletes the downloaded video (also the download result's path) and the audio.
+    // Prefer a path that still exists; a removed one stays only as a last resort, since its folder is still right.
+    const candidates = [result?.output_path, state.outputPath].filter((path): path is string => Boolean(path));
+    const outputPath = candidates.find((path) => !state.removedPaths?.has(path)) ?? candidates[0];
     const percent = phase === 'done' ? 100 : phase === 'failed' ? null : state.percent;
     const waiting = phase === 'waiting_transcript' ? waitingTranscriptText(state) : null;
     const row: JobRow = {
