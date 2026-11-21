@@ -1001,6 +1001,13 @@ def test_recovery_protocol_failure_counts_as_try(tmp_path, monkeypatch, caplog, 
     harness = Harness(tmp_path, [FakePlayer()])
     first = harness.browser
     replacement = FakeBrowser([FakePlayer()])
+    browsers = [first, replacement, FakeBrowser([FakePlayer()])]
+
+    def connect(url):
+        harness.urls.append(url)
+        return browsers[len(harness.urls) - 1]
+
+    harness.connect = connect
     navigate = first.navigate
 
     def disconnect(message, url):
@@ -1017,7 +1024,7 @@ def test_recovery_protocol_failure_counts_as_try(tmp_path, monkeypatch, caplog, 
         if client._transport is replacement and method == target and not failed:
             failed = True
             if failure.endswith("timeout"):
-                raise cw.CdpTimeout("test")
+                raise cw.CdpTimeout(target)
             raise CdpError(-32000, "test")
         return original(client, method, *args, **kwargs)
 
@@ -1028,6 +1035,10 @@ def test_recovery_protocol_failure_counts_as_try(tmp_path, monkeypatch, caplog, 
     assert failed
     assert harness.manager.status()["state"] == "finished"
     assert caplog.text.count("chrome_watch recover run_id=") == 2
+
+    if failure == "attach_timeout":
+        assert len(harness.urls) == 3
+        assert "attempt=2 cause=cdp_timeout method=Target.attachToTarget" in caplog.text
 
 
 @pytest.mark.parametrize("background", [False, True])
@@ -1605,3 +1616,221 @@ def test_trim_measures_profile_only_before_and_after(tmp_path, monkeypatch):
     assert not (tmp_path / "disk-cache").exists()
     assert not (tmp_path / "ShaderCache").exists()
     assert (tmp_path / "optimization_guide_model_store/data").read_bytes() == b"123"
+
+
+def test_stall_reload_and_skip_have_sanitized_ordered_snapshots(tmp_path, monkeypatch, caplog):
+    caplog.set_level(logging.INFO, logger=cw.logger.name)
+    launch = 'https://example.test/courses/1?token=fixture-token'
+    page_title = 'private-page-title'
+    plan = plan_for('1') | {'launch_url': launch}
+    harness = Harness(tmp_path, [FakePlayer(stall=True)], plan=lambda *args: plan)
+    formatter = cw._Playback.stall_snapshot
+
+    def snapshot(playback, now):
+        # Populate diagnostic inputs at the log boundary; playback still uses the fake player.
+        playback.sessions = {'S1', 'S2'}
+        playback.child_targets = {'S2': 'child-target'}
+        playback.frames = {'top': cw._Frame('S1', None), 'child': cw._Frame('S2', 'top')}
+        playback.contexts = {('S1', 9): 'top', ('S2', 2): 'child', ('S2', 3): 'child', ('S1', 1): 'top'}
+        video = {'time': 0.04, 'duration': 20.06, 'paused': True, 'ended': False, 'main': True, 'ready': 2}
+        base = {'host': 'top.example', 'top': False, 'videoCount': 2, 'playingCount': 1,
+                'playingLong': 1, 'scanCapped': False, 'front': False, 'resume': False, 'video': video,
+                'url': launch, 'cookie': 'secret-cookie', 'title': page_title}
+        playback.reports = {
+            ('S1', 1): (now - 20, base | {'host': 'stale.example'}),
+            ('S2', 3): (now, {'host': 'old.example', 'top': True, 'video': {k: v for k, v in video.items() if k != 'ready'}}),
+            ('S2', 2): (now, base | {'host': 'child.example', 'top': True}),
+            ('S1', 9): (now, base),
+            ('S1', 4): (now, base | {'host': launch, 'videoCount': '2', 'playingCount': -1,
+                                   'playingLong': True, 'scanCapped': 1, 'front': 'false', 'resume': [],
+                                   'video': video | {'time': float('nan'), 'duration': float('inf'), 'paused': 1,
+                                                     'ended': None, 'main': 'yes', 'ready': 9}}),
+            ('S1', 5): (now, {'host': 'none.example', 'video': None}),
+        }
+        return formatter(playback, now)
+
+    monkeypatch.setattr(cw._Playback, 'stall_snapshot', snapshot)
+    harness.manager.start(items(1))
+    harness.wait_thread()
+    status = harness.manager.status()
+    assert status['state'] == 'finished' and status['skipped_count'] == 1
+    lines = [r.getMessage() for r in caplog.records if 'chrome_watch stall ' in r.getMessage()]
+    assert len(lines) == 2
+    assert 'action=stalled_reload' in lines[0] and 'action=skip' in lines[1]
+    for line in lines:
+        assert 'sessions=2 child_targets=1 frames=2 contexts=4 reports=6 fresh=5 stale=1' in line
+        assert line.index('[top host=top.example') < line.index('[child host=child.example') < line.index('[child host=old.example') < line.index('[? host=?') < line.index('[? host=none.example') < line.index('[top host=stale.example')
+        assert 'host=stale.example age=20.0' in line
+        assert 'videos=2 playing_all=1 playing_long=1 capped=0 front=0 resume=0 video=t=0.0 d=20.1 paused=1 ended=0 main=1 ready=2' in line
+        assert 'videos=? playing_all=? playing_long=? capped=?' in line
+        assert 'video=t=? d=? paused=? ended=? main=? ready=?' in line
+        assert 'video=none' in line and 'ready=?' in line
+        assert line.endswith('truncated=0 minimized=0')
+        for secret in ('://', launch, '/courses/', '?token=', 'secret-cookie', items(1)[0]['title'], page_title):
+            assert secret not in line
+
+
+def test_stall_snapshot_caps_entries_and_is_total(tmp_path):
+    from types import SimpleNamespace
+    playback = object.__new__(cw._Playback)
+    playback.m = SimpleNamespace(timings=FAST)
+    playback.run = SimpleNamespace(auto_minimized=True)
+    playback.sessions = set()
+    playback.child_targets = {}
+    playback.frames = {}
+    playback.contexts = {}
+    playback.reports = {('S', n): (10, {'host': f'{n}.example', 'video': None}) for n in reversed(range(7))}
+    line = playback.stall_snapshot(10)
+    assert line.count('[') == 6 and 'host=6.example' not in line
+    assert 'reports=7 fresh=7 stale=0' in line and line.endswith('truncated=1 minimized=1')
+    playback.reports = {('S', 1): (10, {'host': ['bad'], 'video': ['bad'], 'videoCount': {}, 'playingCount': 1.2})}
+    assert 'host=? videos=? playing_all=?' in playback.stall_snapshot(10)
+    # Even unexpectedly corrupted driver bookkeeping cannot make the diagnostic throw.
+    playback.reports = None
+    assert 'reports=?' in playback.stall_snapshot(10)
+
+
+@pytest.mark.parametrize('stall', [False, True])
+def test_diagnostic_fields_do_not_change_playback_decisions(tmp_path, stall):
+    results = []
+    for added in (False, True):
+        player = FakePlayer(stall=stall)
+        poll = player.poll
+
+        def report():
+            value = poll()
+            if added:
+                value.update(videoCount=8, playingCount=7, playingLong=6, scanCapped=True)
+                if value.get('video'):
+                    value['video']['ready'] = 0
+            return value
+
+        player.poll = report
+        harness = Harness(tmp_path / str(added), [player])
+        harness.manager.start(items(1))
+        harness.wait_thread()
+        status = harness.manager.status()
+        bounds = [m['params']['bounds']['windowState'] for m in harness.browser.sent if m['method'] == 'Browser.setWindowBounds']
+        results.append((status['state'], status['done_count'], status['skipped_count'], bounds, len(harness.browser.navigations)))
+    assert results[0] == results[1]
+    assert results[0][1:3] == ((0, 1) if stall else (1, 0))
+    assert ('minimized' in results[0][3]) is (not stall)
+
+
+def _fresh_browser_connections(harness, browsers):
+    def connect(url):
+        harness.urls.append(url)
+        return browsers[len(harness.urls) - 1]
+    harness.connect = connect
+
+
+def _disconnect_first_navigation(browser):
+    navigate = browser.navigate
+
+    def disconnect(message, url):
+        navigate(message, url)
+        browser.close()
+    browser.navigate = disconnect
+
+
+@pytest.mark.parametrize('failure_at', ['play', 'attach', 'exhausted'])
+def test_post_recovery_timeout_reconnects_within_budget(tmp_path, monkeypatch, caplog, failure_at):
+    caplog.set_level(logging.INFO, logger=cw.logger.name)
+    harness = Harness(tmp_path, [FakePlayer()])
+    browsers = [harness.browser] + [FakeBrowser([FakePlayer()]) for _ in range(3)]
+    _fresh_browser_connections(harness, browsers)
+    _disconnect_first_navigation(browsers[0])
+    original = CdpClient.call
+    failed_clients = []
+    target = 'Target.attachToTarget' if failure_at == 'attach' else 'Page.navigate'
+
+    def call(client, method, *args, **kwargs):
+        transport = client._transport
+        should_fail = transport in (browsers[1:] if failure_at == 'exhausted' else browsers[1:2])
+        if should_fail and method == target:
+            failed_clients.append(client)
+            raise cw.CdpTimeout(method)
+        return original(client, method, *args, **kwargs)
+
+    monkeypatch.setattr(CdpClient, 'call', call)
+    harness.manager.start(items(1))
+    harness.wait_thread()
+    status = harness.manager.status()
+    assert all(client.closed for client in failed_clients)
+    assert f'attempt=2 cause=cdp_timeout method={target}' in caplog.text
+    assert 'attempt=4' not in caplog.text
+    if failure_at == 'exhausted':
+        assert status['error_code'] == 'chrome_recover_exhausted'
+        assert len(harness.urls) == 4 and len(failed_clients) == 3
+    else:
+        assert status['state'] == 'finished' and status['done_count'] == 1
+        assert len(harness.urls) == 3 and len(failed_clients) == 1
+
+
+@pytest.mark.parametrize('guard', ['first_item', 'next_item', 'cdp_error'])
+def test_timeout_reconnect_guards_preserve_existing_failures(tmp_path, monkeypatch, caplog, guard):
+    caplog.set_level(logging.INFO, logger=cw.logger.name)
+    harness = Harness(tmp_path, [FakePlayer()])
+    replacement = FakeBrowser([FakePlayer(), FakePlayer()])
+    _fresh_browser_connections(harness, [harness.browser, replacement])
+    if guard != 'first_item':
+        _disconnect_first_navigation(harness.browser)
+    original = CdpClient.call
+
+    def call(client, method, params=None, **kwargs):
+        if method == 'Page.navigate':
+            fail = guard == 'first_item' or (client._transport is replacement and (guard == 'cdp_error' or params['url'].endswith('/2')))
+            if fail:
+                if guard == 'cdp_error':
+                    raise CdpError(-32000, 'fixture')
+                raise cw.CdpTimeout(method)
+        return original(client, method, params, **kwargs)
+
+    monkeypatch.setattr(CdpClient, 'call', call)
+    harness.manager.start(items(2 if guard == 'next_item' else 1))
+    harness.wait_thread()
+    status = harness.manager.status()
+    assert status['error_code'] == ('chrome_watch_error' if guard == 'cdp_error' else 'chrome_closed')
+    assert len(harness.urls) == (1 if guard == 'first_item' else 2)
+    assert 'cause=cdp_timeout' not in caplog.text
+    if guard == 'next_item':
+        assert status['done_count'] == 1
+
+
+@pytest.mark.parametrize('signal', ['navigate_returned', 'reload_event'])
+def test_timeout_after_renderer_revival_started_reconnects(tmp_path, monkeypatch, caplog, signal):
+    caplog.set_level(logging.INFO, logger=cw.logger.name)
+    harness = Harness(tmp_path, [FakePlayer()])
+    browser = harness.browser
+    replacement = FakeBrowser([FakePlayer()])
+    _fresh_browser_connections(harness, [browser, replacement])
+    navigate = browser.navigate
+
+    def crash_once(message, url):
+        navigate(message, url)
+        if len(browser.navigations) == 1:
+            browser.emit('Target.targetCrashed', {'targetId': 'T1'})
+    browser.navigate = crash_once
+    original = CdpClient.call
+    failed = False
+
+    def call(client, method, *args, **kwargs):
+        nonlocal failed
+        if client._transport is browser and not failed:
+            if signal == 'reload_event' and method == 'Page.navigate' and browser.crashed_sessions:
+                # The command reached Chrome and queued the reload signal before timing out.
+                original(client, method, *args, **kwargs)
+                failed = True
+                raise cw.CdpTimeout(method)
+            if signal == 'navigate_returned' and method == 'Target.attachToTarget' and len(browser.navigations) == 2:
+                failed = True
+                raise cw.CdpTimeout(method)
+        return original(client, method, *args, **kwargs)
+
+    monkeypatch.setattr(CdpClient, 'call', call)
+    harness.manager.start(items(1))
+    harness.wait_thread()
+    assert failed and harness.manager.status()['state'] == 'finished'
+    assert len(harness.urls) == 2
+    method = 'Page.navigate' if signal == 'reload_event' else 'Target.attachToTarget'
+    assert f'attempt=2 cause=cdp_timeout method={method}' in caplog.text
