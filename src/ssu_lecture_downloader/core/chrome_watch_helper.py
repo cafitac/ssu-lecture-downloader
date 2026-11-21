@@ -111,6 +111,41 @@ HELPER_JS = r"""
     send({ kind: 'ended', time: video.currentTime, duration: video.duration });
   };
 
+  // Diagnostics only: keep the selected video and all playback decisions unchanged.
+  const countVideos = () => {
+    try {
+      const videos = new Set(document.querySelectorAll('video'));
+      let visited = 0;
+      let scanCapped = false;
+      const walk = (first, depth) => {
+        for (let element = first; element; element = element.nextElementSibling) {
+          if (visited >= 2000) { scanCapped = true; return; }
+          visited += 1;
+          if (depth > 0 && element.localName === 'video') videos.add(element);
+          const shadow = element.shadowRoot;
+          if (shadow) {
+            if (depth >= 4) scanCapped = true;
+            else walk(shadow.firstElementChild, depth + 1);
+          }
+          walk(element.firstElementChild, depth);
+        }
+      };
+      walk(document.documentElement, 0);
+      let playingCount = 0;
+      let playingLong = 0;
+      for (const video of videos) {
+        if (!video.paused && !video.ended) {
+          playingCount += 1;
+          // Uses the helper's existing 10 s rule, not the driver's LMS length rule.
+          if (isMain(video)) playingLong += 1;
+        }
+      }
+      return { videoCount: videos.size, playingCount, playingLong, scanCapped };
+    } catch (_) {
+      return { videoCount: null, playingCount: null, playingLong: null, scanCapped: null };
+    }
+  };
+
   const attached = new WeakSet();
   // The driver reads this itself (Runtime.evaluate), so progress does not depend on this page's
   // timers, which Chrome slows down in pages that are not on screen.
@@ -126,6 +161,7 @@ HELPER_JS = r"""
       if (video.ended) sendEnded(video);
     }
     return {
+      ...countVideos(),
       kind: 'state',
       top: isTop,
       host: host,
@@ -137,6 +173,7 @@ HELPER_JS = r"""
         paused: Boolean(video.paused),
         ended: Boolean(video.ended),
         main: isMain(video),
+        ready: video.readyState,
       } : null,
     };
   };

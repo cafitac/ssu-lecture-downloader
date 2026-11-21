@@ -22,6 +22,7 @@ from __future__ import annotations
 import atexit
 import json
 import logging
+import math
 import os
 import queue
 import re
@@ -1026,6 +1027,10 @@ class _Playback:
                     raise _Stopped() from exc
                 if self.window_closed:
                     raise _WindowClosed() from exc
+                timeout_reconnect = isinstance(exc, CdpTimeout) and recoveries > 0 and not self.client.closed and not self.renderer_gone
+                if timeout_reconnect:
+                    self.client.close()
+                    self.connection_closed = True
                 if isinstance(exc, (CdpTimeout, CdpError)) and not needs_attach and not (self.renderer_gone or self.connection_closed or self.client.closed):
                     raise
                 if isinstance(exc, CdpClosed):
@@ -1042,7 +1047,9 @@ class _Playback:
                 if recoveries:
                     self._recovery_pause(self.m.timings.reconnect_backoff)
                 recoveries += 1
-                cause = "cdp_closed" if self.connection_closed or self.client.closed else "renderer_gone"
+                cause = "cdp_timeout" if timeout_reconnect else "cdp_closed" if self.connection_closed or self.client.closed else "renderer_gone"
+                if timeout_reconnect:
+                    cause += f" method={exc.args[0]}"
                 logger.info("chrome_watch recover run_id=%s module_item_id=%s attempt=%s cause=%s", run.run_id, item.module_item_id, recoveries, cause)
                 with self.m._lock:
                     run.phase = PHASE_OPENING
@@ -1176,7 +1183,7 @@ class _Playback:
                     clicked = self.click(front_report[0], front_report[1], "front")
                     logger.info("chrome_watch click run_id=%s kind=front ok=%s", run.run_id, clicked)
             if now - activity_at >= timings.stall_after:
-                logger.info("chrome_watch stall run_id=%s module_item_id=%s seconds_without_progress=%.1f action=%s paused=%s accepting=%s phase=%s", run.run_id, item.module_item_id, now - activity_at, "skip" if retried else "stalled_reload", run.paused, self.accepting, run.phase)
+                logger.info("chrome_watch stall run_id=%s module_item_id=%s seconds_without_progress=%.1f action=%s paused=%s accepting=%s phase=%s %s", run.run_id, item.module_item_id, now - activity_at, "skip" if retried else "stalled_reload", run.paused, self.accepting, run.phase, self.stall_snapshot(now))
                 activity_at = now
                 if not retried:
                     retried = True
@@ -1390,6 +1397,60 @@ class _Playback:
             raise ChromeWatchError("chrome_navigation_failed", "강의 페이지를 열지 못했어요.")
 
     # ------------------------------------------------------------- reports, clicks
+
+    def stall_snapshot(self, now: float) -> str:
+        """Format untrusted page diagnostics without letting logging end playback."""
+        def count(value: Any, maximum: int | None = None) -> str:
+            return str(value) if type(value) is int and value >= 0 and (maximum is None or value <= maximum) else "?"
+
+        def boolean(value: Any) -> str:
+            return str(int(value)) if type(value) is bool else "?"
+
+        def seconds(value: Any) -> str:
+            if type(value) not in (int, float):
+                return "?"
+            try:
+                return f"{value:.1f}" if math.isfinite(value) else "?"
+            except (ValueError, OverflowError):
+                return "?"
+
+        try:
+            limit = max(self.m.timings.poll_interval * 4, 8.0)
+            entries = []
+            fresh = 0
+            for (session, context), (at, data) in self.reports.items():
+                age = now - at
+                stale = age > limit
+                fresh += not stale
+                frame = self.frames.get(self.contexts.get((session, context)))
+                kind = "?" if frame is None else "child" if frame.parent else "top"
+                data = data if isinstance(data, dict) else {}
+                host = data.get("host")
+                host = host if type(host) is str and re.fullmatch(r"[A-Za-z0-9.-]{1,253}", host) else "?"
+                fields = [kind, f"host={host}"]
+                if stale:
+                    fields.append(f"age={seconds(age)}")
+                fields.extend((f"videos={count(data.get('videoCount'))}",
+                               f"playing_all={count(data.get('playingCount'))}",
+                               f"playing_long={count(data.get('playingLong'))}",
+                               f"capped={boolean(data.get('scanCapped'))}",
+                               f"front={boolean(data.get('front'))}", f"resume={boolean(data.get('resume'))}"))
+                video = data.get("video")
+                if video is None:
+                    fields.append("video=none")
+                else:
+                    video = video if isinstance(video, dict) else {}
+                    fields.extend((f"video=t={seconds(video.get('time'))}", f"d={seconds(video.get('duration'))}",
+                                   f"paused={boolean(video.get('paused'))}", f"ended={boolean(video.get('ended'))}",
+                                   f"main={boolean(video.get('main'))}", f"ready={count(video.get('ready'), 4)}"))
+                entries.append(((stale, {"top": 0, "child": 1, "?": 2}[kind], context, session), "[" + " ".join(fields) + "]"))
+            entries.sort(key=lambda entry: entry[0])
+            return (f"sessions={len(self.sessions)} child_targets={len(self.child_targets)} frames={len(self.frames)} "
+                    f"contexts={len(self.contexts)} reports={len(entries)} fresh={fresh} stale={len(entries) - fresh} "
+                    + " ".join(entry for _, entry in entries[:6])
+                    + f" truncated={int(len(entries) > 6)} minimized={boolean(self.run.auto_minimized)}")
+        except Exception:  # A diagnostic must never replace the stall/reload/skip outcome.
+            return "sessions=? child_targets=? frames=? contexts=? reports=? fresh=? stale=? truncated=? minimized=?"
 
     def fresh_reports(self, now: float) -> list[tuple[str, int, dict[str, Any]]]:
         limit = max(self.m.timings.poll_interval * 4, 8.0)
