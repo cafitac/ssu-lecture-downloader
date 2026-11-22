@@ -317,6 +317,7 @@ def test_helper_script_is_installed_for_new_documents_and_never_fakes_playback(t
     assert install["params"]["runImmediately"] is True
     source = install["params"]["source"]
     assert ".play(" not in source and "playbackRate" not in source and "visibilityState" not in source and "currentTime =" not in source
+    assert ".muted =" not in source and ".muted=" not in source
     binding = next(m for m in harness.browser.sent if m["method"] == "Runtime.addBinding")
     assert binding["params"] == {"name": "ssuWatchSignal"}
 
@@ -1632,9 +1633,9 @@ def test_stall_reload_and_skip_have_sanitized_ordered_snapshots(tmp_path, monkey
         playback.child_targets = {'S2': 'child-target'}
         playback.frames = {'top': cw._Frame('S1', None), 'child': cw._Frame('S2', 'top')}
         playback.contexts = {('S1', 9): 'top', ('S2', 2): 'child', ('S2', 3): 'child', ('S1', 1): 'top'}
-        video = {'time': 0.04, 'duration': 20.06, 'paused': True, 'ended': False, 'main': True, 'ready': 2}
+        video = {'time': 0.04, 'duration': 20.06, 'paused': True, 'ended': False, 'main': True, 'ready': 2, 'tag': 'audio'}
         base = {'host': 'top.example', 'top': False, 'videoCount': 2, 'playingCount': 1,
-                'playingLong': 1, 'scanCapped': False, 'front': False, 'resume': False, 'video': video,
+                'playingLong': 1, 'audioCount': 3, 'playingAudio': 2, 'scanCapped': False, 'front': False, 'resume': False, 'video': video,
                 'url': launch, 'cookie': 'secret-cookie', 'title': page_title}
         playback.reports = {
             ('S1', 1): (now - 20, base | {'host': 'stale.example'}),
@@ -1644,7 +1645,7 @@ def test_stall_reload_and_skip_have_sanitized_ordered_snapshots(tmp_path, monkey
             ('S1', 4): (now, base | {'host': launch, 'videoCount': '2', 'playingCount': -1,
                                    'playingLong': True, 'scanCapped': 1, 'front': 'false', 'resume': [],
                                    'video': video | {'time': float('nan'), 'duration': float('inf'), 'paused': 1,
-                                                     'ended': None, 'main': 'yes', 'ready': 9}}),
+                                                     'ended': None, 'main': 'yes', 'ready': 9, 'tag': ['audio']}}),
             ('S1', 5): (now, {'host': 'none.example', 'video': None}),
         }
         return formatter(playback, now)
@@ -1661,9 +1662,9 @@ def test_stall_reload_and_skip_have_sanitized_ordered_snapshots(tmp_path, monkey
         assert 'sessions=2 child_targets=1 frames=2 contexts=4 reports=6 fresh=5 stale=1' in line
         assert line.index('[top host=top.example') < line.index('[child host=child.example') < line.index('[child host=old.example') < line.index('[? host=?') < line.index('[? host=none.example') < line.index('[top host=stale.example')
         assert 'host=stale.example age=20.0' in line
-        assert 'videos=2 playing_all=1 playing_long=1 capped=0 front=0 resume=0 video=t=0.0 d=20.1 paused=1 ended=0 main=1 ready=2' in line
-        assert 'videos=? playing_all=? playing_long=? capped=?' in line
-        assert 'video=t=? d=? paused=? ended=? main=? ready=?' in line
+        assert 'videos=2 playing_all=1 playing_long=1 audios=3 playing_audio=2 capped=0 front=0 resume=0 video=t=0.0 d=20.1 paused=1 ended=0 main=1 ready=2 tag=audio' in line
+        assert 'videos=? playing_all=? playing_long=? audios=? playing_audio=? capped=?' in line
+        assert 'video=t=? d=? paused=? ended=? main=? ready=? tag=?' in line
         assert 'video=none' in line and 'ready=?' in line
         assert line.endswith('truncated=0 minimized=0')
         for secret in ('://', launch, '/courses/', '?token=', 'secret-cookie', items(1)[0]['title'], page_title):
@@ -1834,3 +1835,133 @@ def test_timeout_after_renderer_revival_started_reconnects(tmp_path, monkeypatch
     assert len(harness.urls) == 2
     method = 'Page.navigate' if signal == 'reload_event' else 'Target.attachToTarget'
     assert f'attempt=2 cause=cdp_timeout method={method}' in caplog.text
+
+
+def test_advancing_main_audio_completes_without_stalling(tmp_path, caplog):
+    player = FakePlayer(duration=200, step=5)
+    poll = player.poll
+    reports = []
+
+    def report():
+        value = poll()
+        if value.get('video'):
+            value['video']['tag'] = 'audio'
+            value.update(audioCount=1, playingAudio=int(not value['video']['ended']))
+            reports.append(value)
+        return value
+
+    player.poll = report
+    harness = Harness(tmp_path, [player], plan=lambda *args: plan_for('1') | {'duration': 200})
+    harness.manager.start(items(1))
+    harness.wait_thread()
+    status = harness.manager.status()
+    assert status['state'] == 'finished'
+    assert status['done_count'] == 1 and status['skipped_count'] == 0
+    assert len(harness.browser.navigations) == 1
+    assert len({value['video']['time'] for value in reports}) > 2
+    assert reports[-1]['video']['ended'] is True
+    assert 'stalled_reload' not in caplog.text
+
+
+def test_advancing_main_audio_completes_via_ended_binding(tmp_path, caplog):
+    caplog.set_level(logging.INFO, logger=cw.logger.name)
+    player = FakePlayer(duration=200, step=5)
+    poll = player.poll
+    reports = []
+    signals = []
+    harness = Harness(tmp_path, [player], plan=lambda *args: plan_for('1') | {'duration': 200})
+
+    def report():
+        value = poll()
+        if value.get('video'):
+            media = value['video']
+            media.update(tag='audio', ended=False)
+            reports.append(value)
+            if media['time'] >= player.duration and not signals:
+                payload = {'kind': 'ended', 'time': media['time'], 'duration': player.duration,
+                           'top': True, 'host': 'fixture.example'}
+                signals.append(payload)
+                harness.browser.emit('Runtime.bindingCalled', {
+                    'name': 'ssuWatchSignal', 'payload': json.dumps(payload), 'executionContextId': 1,
+                }, PAGE_SESSION)
+        return value
+
+    player.poll = report
+    harness.manager.start(items(1))
+    harness.wait_thread()
+    status = harness.manager.status()
+    assert status['state'] == 'finished'
+    assert status['done_count'] == 1 and status['skipped_count'] == 0
+    assert status['items'][0]['state'] == 'done'
+    assert len({value['video']['time'] for value in reports}) > 2
+    assert all(value['video']['tag'] == 'audio' and value['video']['ended'] is False for value in reports)
+    assert len(signals) == 1
+    assert 'stalled_reload' not in caplog.text
+
+
+def test_paused_main_audio_after_minimizing_restores_window(tmp_path, caplog):
+    caplog.set_level(logging.INFO, logger=cw.logger.name)
+    player = FakePlayer(duration=200, step=5)
+    poll = player.poll
+    reports = []
+    harness = Harness(tmp_path, [player], plan=lambda *args: plan_for('1') | {'duration': 200})
+
+    def report():
+        bounds = [message['params']['bounds']['windowState'] for message in harness.browser.sent
+                  if message['method'] == 'Browser.setWindowBounds']
+        player.stall = bool(bounds and bounds[-1] == 'minimized')
+        value = poll()
+        if value.get('video'):
+            value['video']['tag'] = 'audio'
+            reports.append(value)
+        return value
+
+    player.poll = report
+    harness.manager.start(items(1))
+    harness.wait_thread()
+    status = harness.manager.status()
+    bounds = [message['params']['bounds'] for message in harness.browser.sent
+              if message['method'] == 'Browser.setWindowBounds']
+    assert bounds == [{'windowState': 'minimized'}, {'windowState': 'normal'}]
+    assert any(value['video']['paused'] and value['video']['main'] for value in reports)
+    assert len({value['video']['time'] for value in reports}) > 2
+    assert status['state'] == 'finished'
+    assert status['done_count'] == 1 and status['skipped_count'] == 0
+    assert len(harness.browser.navigations) == 1
+    assert any(notice['kind'] == 'minimize_paused' for notice in status['notices'])
+    assert 'action=minimize_paused' in caplog.text
+    assert 'stalled_reload' not in caplog.text
+
+
+def test_short_ended_binding_waits_for_main_lecture_end(tmp_path):
+    player = FakePlayer(duration=3000, step=500)
+    poll = player.poll
+    reports = []
+    signals = []
+    harness = Harness(tmp_path, [player], plan=lambda *args: plan_for('1') | {'duration': 3000})
+
+    def report():
+        value = poll()
+        media = value.get('video')
+        if media:
+            reports.append(dict(media))
+            if not signals:
+                payload = {'kind': 'ended', 'time': 30, 'duration': 30,
+                           'top': True, 'host': 'fixture.example'}
+                signals.append(payload)
+                harness.browser.emit('Runtime.bindingCalled', {
+                    'name': 'ssuWatchSignal', 'payload': json.dumps(payload), 'executionContextId': 1,
+                }, PAGE_SESSION)
+        return value
+
+    player.poll = report
+    harness.manager.start(items(1))
+    harness.wait_thread()
+    status = harness.manager.status()
+    assert status['state'] == 'finished'
+    assert status['done_count'] == 1 and status['skipped_count'] == 0
+    assert status['items'][0]['state'] == 'done'
+    assert len(signals) == 1
+    assert len({media['time'] for media in reports}) > 2
+    assert reports[0]['ended'] is False
+    assert reports[-1]['time'] == 3000 and reports[-1]['ended'] is True

@@ -1,6 +1,6 @@
 """The page helper injected into the Chrome playback window (every frame of the lecture page).
 
-It only observes and mutes. It reports the video state and where the player's start button and
+It only observes. It reports the video or audio state and where the player's start button and
 the "resume?" 예 button are through the `ssuWatchSignal` binding (Runtime.addBinding), and answers
 `window.__ssuWatchLocate(what)` so the driver can press those buttons with trusted mouse
 events. It never calls `video.play()`, never changes the playback rate, never seeks and never
@@ -54,13 +54,22 @@ HELPER_JS = r"""
   const duration = (video) => (video && Number.isFinite(video.duration) ? video.duration : 0);
   const isMain = (video) => duration(video) > SHORT_INTRO_MAX_SECONDS;
 
-  const findVideo = () => {
-    const videos = Array.from(document.querySelectorAll('video'));
+  let lastAudio = null;
+  const findMedia = () => {
+    const candidates = Array.from(document.querySelectorAll('video,audio'));
+    const videos = candidates.filter((el) => el.localName === 'video');
     const usable = videos.filter((video) => {
       const rect = video.getBoundingClientRect();
       return rect.width > 0 && rect.height > 0 && (video.currentSrc || video.src || video.readyState > 0);
     });
-    return usable.find(isMain) || usable[0] || videos.find(isMain) || videos[0] || null;
+    const legacy = usable.find(isMain) || usable[0] || videos.find(isMain) || videos[0] || null;
+    if (legacy && isMain(legacy)) return legacy;
+    // No main-length video: fall back to a main-length <audio> (some lectures play slides on a canvas with the sound in <audio>).
+    const audios = candidates.filter((el) => el.localName === 'audio' && isMain(el));
+    const playing = audios.find((el) => !el.paused && !el.ended);
+    if (playing) { lastAudio = playing; return playing; }
+    if (lastAudio && lastAudio.isConnected !== false && audios.includes(lastAudio)) return lastAudio;
+    return audios[0] || legacy;
   };
 
   const findFront = () => {
@@ -112,9 +121,11 @@ HELPER_JS = r"""
   };
 
   // Diagnostics only: keep the selected video and all playback decisions unchanged.
-  const countVideos = () => {
+  const countMedia = () => {
     try {
-      const videos = new Set(document.querySelectorAll('video'));
+      const media = Array.from(document.querySelectorAll('video,audio'));
+      const videos = new Set(media.filter((el) => el.localName === 'video'));
+      const audios = new Set(media.filter((el) => el.localName === 'audio'));
       let visited = 0;
       let scanCapped = false;
       const walk = (first, depth) => {
@@ -122,6 +133,7 @@ HELPER_JS = r"""
           if (visited >= 2000) { scanCapped = true; return; }
           visited += 1;
           if (depth > 0 && element.localName === 'video') videos.add(element);
+          if (depth > 0 && element.localName === 'audio') audios.add(element);
           const shadow = element.shadowRoot;
           if (shadow) {
             if (depth >= 4) scanCapped = true;
@@ -140,9 +152,10 @@ HELPER_JS = r"""
           if (isMain(video)) playingLong += 1;
         }
       }
-      return { videoCount: videos.size, playingCount, playingLong, scanCapped };
+      const playingAudio = Array.from(audios).filter((el) => !el.paused && !el.ended).length;
+      return { videoCount: videos.size, playingCount, playingLong, scanCapped, audioCount: audios.size, playingAudio };
     } catch (_) {
-      return { videoCount: null, playingCount: null, playingLong: null, scanCapped: null };
+      return { videoCount: null, playingCount: null, playingLong: null, scanCapped: null, audioCount: null, playingAudio: null };
     }
   };
 
@@ -150,7 +163,7 @@ HELPER_JS = r"""
   // The driver reads this itself (Runtime.evaluate), so progress does not depend on this page's
   // timers, which Chrome slows down in pages that are not on screen.
   const snapshot = () => {
-    const video = findVideo();
+    const video = findMedia();
     if (video) {
       if (!attached.has(video)) {
         attached.add(video);
@@ -161,13 +174,14 @@ HELPER_JS = r"""
       if (video.ended) sendEnded(video);
     }
     return {
-      ...countVideos(),
+      ...countMedia(),
       kind: 'state',
       top: isTop,
       host: host,
       front: Boolean(findFront()),
       resume: Boolean(findYes()),
       video: video ? {
+        tag: video.localName === 'audio' ? 'audio' : 'video',
         time: Number.isFinite(video.currentTime) ? video.currentTime : 0,
         duration: duration(video),
         paused: Boolean(video.paused),
