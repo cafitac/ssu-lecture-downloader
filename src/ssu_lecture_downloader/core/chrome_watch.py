@@ -4,7 +4,7 @@ The in-app web view only plays while its small window stays visible. A real Chro
 playing while other tabs or other apps are in front, so this module launches a separate Chrome
 instance (own persistent profile, never the user's default one), opens each lecture in a tab with
 the LMS session cookies, presses the player's buttons with trusted mouse events and watches the
-main video until it ends.
+main video or audio until it ends.
 
 Rules this module keeps:
 - Nothing fakes visibility or speed: no visibility overrides, no backgrounding flags, no
@@ -1433,6 +1433,8 @@ class _Playback:
                 fields.extend((f"videos={count(data.get('videoCount'))}",
                                f"playing_all={count(data.get('playingCount'))}",
                                f"playing_long={count(data.get('playingLong'))}",
+                               f"audios={count(data.get('audioCount'))}",
+                               f"playing_audio={count(data.get('playingAudio'))}",
                                f"capped={boolean(data.get('scanCapped'))}",
                                f"front={boolean(data.get('front'))}", f"resume={boolean(data.get('resume'))}"))
                 video = data.get("video")
@@ -1442,7 +1444,8 @@ class _Playback:
                     video = video if isinstance(video, dict) else {}
                     fields.extend((f"video=t={seconds(video.get('time'))}", f"d={seconds(video.get('duration'))}",
                                    f"paused={boolean(video.get('paused'))}", f"ended={boolean(video.get('ended'))}",
-                                   f"main={boolean(video.get('main'))}", f"ready={count(video.get('ready'), 4)}"))
+                                   f"main={boolean(video.get('main'))}", f"ready={count(video.get('ready'), 4)}",
+                                   f"tag={video.get('tag') if type(video.get('tag')) is str and video.get('tag') in ('video', 'audio') else '?'}"))
                 entries.append(((stale, {"top": 0, "child": 1, "?": 2}[kind], context, session), "[" + " ".join(fields) + "]"))
             entries.sort(key=lambda entry: entry[0])
             return (f"sessions={len(self.sessions)} child_targets={len(self.child_targets)} frames={len(self.frames)} "
